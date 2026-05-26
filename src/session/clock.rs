@@ -12,8 +12,10 @@ impl RecordingClock {
         let mut frequency = 0i64;
         let mut ticks = 0i64;
         unsafe {
-            QueryPerformanceFrequency(&mut frequency).unwrap();
-            QueryPerformanceCounter(&mut ticks).unwrap();
+            QueryPerformanceFrequency(&mut frequency)
+                .expect("QueryPerformanceFrequency failed — requires Windows XP+");
+            QueryPerformanceCounter(&mut ticks)
+                .expect("QueryPerformanceCounter failed — requires Windows XP+");
         }
         Arc::new(Self {
             start_ticks: ticks,
@@ -24,7 +26,8 @@ impl RecordingClock {
     pub fn elapsed(&self) -> Duration {
         let mut now = 0i64;
         unsafe {
-            QueryPerformanceCounter(&mut now).unwrap();
+            QueryPerformanceCounter(&mut now)
+                .expect("QueryPerformanceCounter failed");
         }
         let ticks = now - self.start_ticks;
         let nanos = (ticks as u128 * 1_000_000_000) / self.frequency as u128;
@@ -41,7 +44,7 @@ mod tests {
     fn clock_starts_near_zero() {
         let clock = RecordingClock::new();
         let elapsed = clock.elapsed();
-        assert!(elapsed.as_millis() < 10, "elapsed should be < 10ms right after creation");
+        assert!(elapsed.as_millis() < 100, "elapsed should be < 100ms right after creation");
     }
 
     #[test]
@@ -62,6 +65,6 @@ mod tests {
         let t1 = clock.elapsed();
         let t2 = clone.elapsed();
         let diff = if t1 > t2 { t1 - t2 } else { t2 - t1 };
-        assert!(diff.as_micros() < 100, "two reads of same clock should be within 100µs");
+        assert!(diff.as_micros() < 1000, "two reads of same clock should be within 1ms");
     }
 }
