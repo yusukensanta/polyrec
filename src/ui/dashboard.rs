@@ -51,6 +51,7 @@ impl eframe::App for App {
                 ui.separator();
                 if ui.button("⟳ Refresh").clicked() {
                     self.sources = enumerate_sources();
+                    self.selected_source = None;
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
                     self.selected_audio = vec![true; self.audio_devices.len()];
                 }
@@ -126,7 +127,10 @@ impl eframe::App for App {
                         self.session.stop_capture();
                         self.frame_count.store(0, Ordering::Relaxed);
                     } else if let Some(idx) = self.selected_source {
-                        let source = self.sources[idx].clone();
+                        let Some(source) = self.sources.get(idx).cloned() else {
+                            self.selected_source = None;
+                            return;
+                        };
                         let selected_devices: Vec<_> = self
                             .audio_devices
                             .iter()
