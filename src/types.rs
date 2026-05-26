@@ -38,7 +38,7 @@ pub struct VideoFrame {
 
 impl VideoFrame {
     pub fn byte_len(&self) -> usize {
-        (self.width * self.height * 4) as usize
+        self.width as usize * self.height as usize * 4
     }
 }
 
