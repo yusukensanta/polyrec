@@ -44,6 +44,7 @@ features = [
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Performance",
+    "Win32_UI_Shell_PropertiesSystem",
 ]
 
 [dev-dependencies]
