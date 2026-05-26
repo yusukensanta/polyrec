@@ -197,7 +197,8 @@ pub async fn run_audio_capture(
                     // No data yet; yield to the async runtime
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!("GetBuffer error: {e}");
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }
             }
