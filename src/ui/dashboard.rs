@@ -1,5 +1,6 @@
 use crate::capture::audio::enumerate_audio_devices;
 use crate::config::Config;
+use crate::hotkeys::{HotkeyEvent, HotkeyListener};
 use crate::session::{state::SessionAction, SessionManager};
 use crate::sources::enumerate_sources;
 use crate::types::{AudioDevice, CaptureSource};
@@ -20,13 +21,23 @@ pub struct App {
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
     last_output_path: Option<PathBuf>,
+    show_export_dialog: bool,
+    export_track_selection: Vec<bool>,
+    hotkey_listener: HotkeyListener,
 }
 
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>, config: Config) -> Self {
         let overlay_enabled = config.overlay.enabled;
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
-        let selected_audio = vec![true; audio_devices.len()];
+        let n = audio_devices.len();
+        let selected_audio = vec![true; n];
+        let export_track_selection = vec![true; n];
+        let hotkey_listener = HotkeyListener::spawn(
+            &config.hotkeys.start_stop,
+            &config.hotkeys.pause,
+            &config.hotkeys.toggle_overlay,
+        );
         Self {
             config,
             session: SessionManager::new(),
@@ -38,12 +49,31 @@ impl App {
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             last_output_path: None,
+            show_export_dialog: false,
+            export_track_selection,
+            hotkey_listener,
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let is_recording = self.session.is_recording();
+        let frames = self.frame_count.load(Ordering::Relaxed);
+
+        // Poll hotkey events (non-blocking)
+        while let Some(event) = self.hotkey_listener.try_recv() {
+            match event {
+                HotkeyEvent::StartStop => self.handle_rec_button(is_recording),
+                HotkeyEvent::Pause => {}
+                HotkeyEvent::ToggleOverlay => {
+                    self.overlay_enabled = !self.overlay_enabled;
+                    self.config.overlay.enabled = self.overlay_enabled;
+                }
+            }
+        }
+
+        // ── Menu bar ──────────────────────────────────────────────────────────
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PolyRec");
@@ -52,15 +82,13 @@ impl eframe::App for App {
                     self.sources = enumerate_sources();
                     self.selected_source = None;
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
-                    self.selected_audio = vec![true; self.audio_devices.len()];
+                    let n = self.audio_devices.len();
+                    self.selected_audio = vec![true; n];
+                    self.export_track_selection = vec![true; n];
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let overlay_label = if self.overlay_enabled {
-                        "Overlay: ON"
-                    } else {
-                        "Overlay: OFF"
-                    };
-                    if ui.button(overlay_label).clicked() {
+                    let label = if self.overlay_enabled { "Overlay: ON" } else { "Overlay: OFF" };
+                    if ui.button(label).clicked() {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
                     }
@@ -68,6 +96,7 @@ impl eframe::App for App {
             });
         });
 
+        // ── Left panel ────────────────────────────────────────────────────────
         egui::SidePanel::left("source_panel")
             .min_width(200.0)
             .show(ctx, |ui| {
@@ -97,12 +126,10 @@ impl eframe::App for App {
                 }
             });
 
+        // ── Center panel ──────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label(egui::RichText::new("RECORDING STATUS").small().weak());
             ui.separator();
-
-            let is_recording = self.session.is_recording();
-            let frames = self.frame_count.load(Ordering::Relaxed);
 
             if is_recording {
                 let elapsed = self
@@ -162,38 +189,7 @@ impl eframe::App for App {
                 );
 
                 if ui.add_sized([120.0, 48.0], btn).clicked() {
-                    if is_recording {
-                        let path = self
-                            .session
-                            .active
-                            .as_ref()
-                            .map(|a| a.output_path.clone());
-                        if self.session.apply(SessionAction::Stop) {
-                            self.session.stop_capture();
-                        }
-                        self.last_output_path = path;
-                        self.recording_start = None;
-                        self.frame_count.store(0, Ordering::Relaxed);
-                    } else if let Some(idx) = self.selected_source {
-                        let Some(source) = self.sources.get(idx).cloned() else {
-                            self.selected_source = None;
-                            return;
-                        };
-                        let selected_devices: Vec<_> = self
-                            .audio_devices
-                            .iter()
-                            .zip(self.selected_audio.iter())
-                            .filter(|(_, &sel)| sel)
-                            .map(|(dev, _)| dev.clone())
-                            .collect();
-                        self.session.apply(SessionAction::Start);
-                        self.session.start_capture(
-                            source,
-                            selected_devices,
-                            Arc::clone(&self.frame_count),
-                        );
-                        self.recording_start = Some(Instant::now());
-                    }
+                    self.handle_rec_button(is_recording);
                 }
 
                 ui.label(
@@ -202,10 +198,148 @@ impl eframe::App for App {
                         .weak(),
                 );
             });
-
-            if is_recording {
-                ctx.request_repaint_after(std::time::Duration::from_millis(500));
-            }
         });
+
+        // ── Overlay viewport (second OS window, click-through) ────────────────
+        if is_recording && self.overlay_enabled {
+            let track_count = self.selected_audio.iter().filter(|&&b| b).count();
+            let elapsed_secs = self
+                .recording_start
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+
+            let screen_w = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+                ) as f32
+            };
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("polyrec_overlay"),
+                egui::ViewportBuilder::default()
+                    .with_title("PolyRec Overlay")
+                    .with_always_on_top()
+                    .with_decorations(false)
+                    .with_transparent(true)
+                    .with_mouse_passthrough(true)
+                    .with_inner_size([310.0, 32.0])
+                    .with_position(egui::pos2(screen_w - 320.0, 10.0)),
+                move |ctx, _class| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_premultiplied(20, 20, 20, 200))
+                                .inner_margin(egui::Margin::same(6.0)),
+                        )
+                        .show(ctx, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "● {:02}:{:02}:{:02}  |  {} tracks  |  F9 stop",
+                                    elapsed_secs / 3600,
+                                    (elapsed_secs % 3600) / 60,
+                                    elapsed_secs % 60,
+                                    track_count,
+                                ))
+                                .color(egui::Color32::WHITE)
+                                .size(13.0),
+                            );
+                        });
+                },
+            );
+        }
+
+        // ── Export dialog ─────────────────────────────────────────────────────
+        if self.show_export_dialog {
+            if let Some(path) = self.last_output_path.clone() {
+                let mut close = false;
+                egui::Window::new("Recording Complete")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.label("Recording saved:");
+                        ui.label(
+                            egui::RichText::new(path.to_string_lossy().as_ref())
+                                .small()
+                                .weak(),
+                        );
+
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("AUDIO TRACKS").small().weak());
+                        for (i, dev) in self.audio_devices.iter().enumerate() {
+                            if i < self.export_track_selection.len() {
+                                let icon = if dev.is_loopback { "🔊" } else { "🎙" };
+                                ui.checkbox(
+                                    &mut self.export_track_selection[i],
+                                    format!("{icon} {}", dev.name),
+                                );
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Open Folder").clicked() {
+                                open_folder(path.as_ref());
+                            }
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if close {
+                    self.show_export_dialog = false;
+                }
+            } else {
+                self.show_export_dialog = false;
+            }
+        }
+
+        if is_recording {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+}
+
+fn open_folder(path: &std::path::Path) {
+    let folder = path.parent().unwrap_or(path);
+    let _ = std::process::Command::new("explorer").arg(folder).spawn();
+}
+
+impl App {
+    fn handle_rec_button(&mut self, is_recording: bool) {
+        if is_recording {
+            let path = self
+                .session
+                .active
+                .as_ref()
+                .map(|a| a.output_path.clone());
+            if self.session.apply(SessionAction::Stop) {
+                self.session.stop_capture();
+            }
+            self.last_output_path = path.clone();
+            self.recording_start = None;
+            self.frame_count.store(0, Ordering::Relaxed);
+            self.export_track_selection = self.selected_audio.clone();
+            self.show_export_dialog = path.is_some();
+        } else if let Some(idx) = self.selected_source {
+            let Some(source) = self.sources.get(idx).cloned() else {
+                self.selected_source = None;
+                return;
+            };
+            let selected_devices: Vec<_> = self
+                .audio_devices
+                .iter()
+                .zip(self.selected_audio.iter())
+                .filter(|(_, &sel)| sel)
+                .map(|(dev, _)| dev.clone())
+                .collect();
+            self.session.apply(SessionAction::Start);
+            self.session.start_capture(
+                source,
+                selected_devices,
+                Arc::clone(&self.frame_count),
+            );
+            self.recording_start = Some(Instant::now());
+        }
     }
 }
