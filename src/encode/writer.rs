@@ -39,8 +39,20 @@ impl RecordingWriter {
                 .to_str()
                 .ok_or_else(|| AppError::Encode("output path is not valid UTF-8".into()))?;
             let url = HSTRING::from(path_str);
-            let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&url, None, None)
-                .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+            // Create attributes to force software encoding (needed for CI/headless test environments)
+            use windows::Win32::Media::MediaFoundation::{MFCreateAttributes, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS};
+            use windows::Win32::Media::MediaFoundation::IMFAttributes;
+            let mut attrs_opt: Option<IMFAttributes> = None;
+            MFCreateAttributes(&mut attrs_opt, 1)
+                .map_err(|e| AppError::Encode(format!("MFCreateAttributes: {e}")))?;
+            let attrs = attrs_opt
+                .ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
+            attrs
+                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 0)
+                .map_err(|e| AppError::Encode(format!("SetUINT32 hw_transforms: {e}")))?;
+            let writer: IMFSinkWriter =
+                MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
+                    .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
 
             let video_out = make_video_output_type(width, height, fps)?;
             let video_in = make_video_input_type(width, height, fps)?;
@@ -293,5 +305,45 @@ mod tests {
         assert_eq!(pcm[2], -32767);
         assert_eq!(pcm[3], 32767);
         assert_eq!(pcm[4], -32767);
+    }
+
+    #[test]
+    fn writer_creates_mp4_for_tiny_resolution() {
+        use std::time::Duration;
+        use crate::types::{AudioSamples, TrackId, VideoFrame};
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("test.mp4");
+
+        // 64×64 at 30fps, one stereo 48kHz audio track
+        let audio_tracks = vec![(48000u32, 2u16)];
+        let writer = RecordingWriter::new(&output, 64, 64, 30, &audio_tracks);
+        assert!(writer.is_ok(), "RecordingWriter::new failed: {:?}", writer.err());
+        let writer = writer.unwrap();
+
+        writer.begin_writing().expect("begin_writing failed");
+
+        // One blank BGRA frame (64×64×4 bytes)
+        let frame = VideoFrame {
+            pts: Duration::ZERO,
+            width: 64,
+            height: 64,
+            data: vec![0u8; 64 * 64 * 4],
+        };
+        writer.write_video(frame).expect("write_video failed");
+
+        // One 10ms audio chunk (480 samples × 2 channels at 48kHz)
+        let samples = AudioSamples {
+            track_id: TrackId::new(0),
+            pts: Duration::ZERO,
+            samples: vec![0.0f32; 480 * 2],
+            sample_rate: 48000,
+            channels: 2,
+        };
+        writer.write_audio(0, samples).expect("write_audio failed");
+
+        let path = writer.finalize().expect("finalize failed");
+        assert!(path.exists(), "output file not created");
+        assert!(path.metadata().unwrap().len() > 0, "output file is empty");
     }
 }
