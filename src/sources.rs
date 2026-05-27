@@ -42,7 +42,7 @@ unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
         process_id,
         window_title,
         exe_name,
-        hwnd: hwnd.0 as isize,
+        hwnd: hwnd.0 as usize,
     });
 
     BOOL(1)
@@ -53,6 +53,7 @@ fn get_exe_name(pid: u32) -> Option<String> {
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
         let mut buf = vec![0u16; 260];
         let len = GetModuleFileNameExW(handle, None, &mut buf);
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
         if len == 0 {
             return None;
         }
@@ -87,7 +88,7 @@ mod tests {
         let sources = enumerate_sources();
         assert!(!sources.is_empty());
         for s in &sources {
-            assert_ne!(s.hwnd, 0isize, "HWND should not be null for '{}'", s.window_title);
+            assert_ne!(s.hwnd, 0usize, "HWND should not be null for '{}'", s.window_title);
         }
     }
 }

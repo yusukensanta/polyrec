@@ -23,7 +23,7 @@ pub struct CaptureSource {
     pub process_id: u32,
     pub window_title: String,
     pub exe_name: String,
-    pub hwnd: isize,
+    pub hwnd: usize,
 }
 
 /// Captured video frame — CPU-mapped BGRA bytes (Plan 2).
