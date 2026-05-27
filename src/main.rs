@@ -3,6 +3,7 @@
 mod capture;
 mod config;
 mod encode;
+mod hotkeys;
 mod error;
 mod session;
 mod sources;
