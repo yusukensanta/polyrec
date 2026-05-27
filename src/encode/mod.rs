@@ -1,3 +1,4 @@
+pub mod actor;
 pub mod writer;
 pub use writer::RecordingWriter;
 
