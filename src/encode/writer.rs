@@ -35,7 +35,10 @@ impl RecordingWriter {
             MFStartup(MF_VERSION, MFSTARTUP_FULL)
                 .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
 
-            let url = HSTRING::from(output_path.to_str().unwrap_or("output.mp4"));
+            let path_str = output_path
+                .to_str()
+                .ok_or_else(|| AppError::Encode("output path is not valid UTF-8".into()))?;
+            let url = HSTRING::from(path_str);
             let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&url, None, None)
                 .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
 
