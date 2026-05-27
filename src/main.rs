@@ -13,6 +13,15 @@ mod ui;
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
+    // Build a multi-thread runtime so tokio::task::spawn_blocking and mpsc channels
+    // work from the egui main thread (eframe is not async, so we enter the runtime
+    // without blocking it).
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let _rt_guard = rt.enter();
+
     unsafe {
         use windows::Win32::Media::MediaFoundation::{MFStartup, MF_VERSION, MFSTARTUP_FULL};
         MFStartup(MF_VERSION, MFSTARTUP_FULL)
