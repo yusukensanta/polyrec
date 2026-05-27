@@ -12,8 +12,13 @@ mod ui;
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = config::Config::load().unwrap_or_default();
+    unsafe {
+        use windows::Win32::Media::MediaFoundation::{MFStartup, MF_VERSION, MFSTARTUP_FULL};
+        MFStartup(MF_VERSION, MFSTARTUP_FULL)
+            .expect("MFStartup failed — requires Windows 7+");
+    }
 
+    let config = config::Config::load().unwrap_or_default();
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("PolyRec")
@@ -22,9 +27,16 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "PolyRec",
         native_options,
         Box::new(|cc| Ok(Box::new(ui::App::new(cc, config)))),
-    )
+    );
+
+    unsafe {
+        use windows::Win32::Media::MediaFoundation::MFShutdown;
+        let _ = MFShutdown();
+    }
+
+    result
 }

@@ -4,8 +4,10 @@ use crate::session::{state::SessionAction, SessionManager};
 use crate::sources::enumerate_sources;
 use crate::types::{AudioDevice, CaptureSource};
 use eframe::egui;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct App {
     config: Config,
@@ -16,6 +18,8 @@ pub struct App {
     selected_audio: Vec<bool>,
     overlay_enabled: bool,
     frame_count: Arc<AtomicU64>,
+    recording_start: Option<Instant>,
+    last_output_path: Option<PathBuf>,
 }
 
 impl App {
@@ -32,6 +36,8 @@ impl App {
             selected_audio,
             overlay_enabled,
             frame_count: Arc::new(AtomicU64::new(0)),
+            recording_start: None,
+            last_output_path: None,
         }
     }
 }
@@ -49,7 +55,11 @@ impl eframe::App for App {
                     self.selected_audio = vec![true; self.audio_devices.len()];
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let overlay_label = if self.overlay_enabled { "Overlay: ON" } else { "Overlay: OFF" };
+                    let overlay_label = if self.overlay_enabled {
+                        "Overlay: ON"
+                    } else {
+                        "Overlay: OFF"
+                    };
                     if ui.button(overlay_label).clicked() {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
@@ -80,26 +90,62 @@ impl eframe::App for App {
                 ui.separator();
                 for (i, dev) in self.audio_devices.iter().enumerate() {
                     let icon = if dev.is_loopback { "🔊" } else { "🎙" };
-                    ui.checkbox(&mut self.selected_audio[i], format!("{icon} {}", dev.name));
+                    ui.checkbox(
+                        &mut self.selected_audio[i],
+                        format!("{icon} {}", dev.name),
+                    );
                 }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(egui::RichText::new("AUDIO TRACKS").small().weak());
+            ui.label(egui::RichText::new("RECORDING STATUS").small().weak());
             ui.separator();
-            if self.session.is_recording() {
-                ui.label(format!(
-                    "Capturing {} audio track(s)",
-                    self.selected_audio.iter().filter(|&&b| b).count()
-                ));
-            } else {
-                ui.label("Select audio devices and a capture source, then press REC.");
-            }
-
-            ui.add_space(16.0);
 
             let is_recording = self.session.is_recording();
             let frames = self.frame_count.load(Ordering::Relaxed);
+
+            if is_recording {
+                let elapsed = self
+                    .recording_start
+                    .map(|t| t.elapsed())
+                    .unwrap_or_default();
+                let secs = elapsed.as_secs();
+                ui.label(format!(
+                    "Recording  {:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60
+                ));
+                ui.label(format!(
+                    "{} audio track(s)  |  {} video frames",
+                    self.selected_audio.iter().filter(|&&b| b).count(),
+                    frames
+                ));
+                if let Some(active) = self.session.active.as_ref() {
+                    ui.label(
+                        egui::RichText::new(
+                            active
+                                .output_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("recording.mp4"),
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+            } else if let Some(path) = &self.last_output_path {
+                ui.label("Last recording:");
+                ui.label(
+                    egui::RichText::new(path.to_string_lossy().as_ref())
+                        .small()
+                        .weak(),
+                );
+            } else {
+                ui.label("Select a source and press REC to start recording.");
+            }
+
+            ui.add_space(16.0);
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
@@ -114,11 +160,19 @@ impl eframe::App for App {
                 let btn = egui::Button::new(
                     egui::RichText::new(rec_label).color(rec_color).size(18.0),
                 );
+
                 if ui.add_sized([120.0, 48.0], btn).clicked() {
                     if is_recording {
+                        let path = self
+                            .session
+                            .active
+                            .as_ref()
+                            .map(|a| a.output_path.clone());
                         if self.session.apply(SessionAction::Stop) {
                             self.session.stop_capture();
                         }
+                        self.last_output_path = path;
+                        self.recording_start = None;
                         self.frame_count.store(0, Ordering::Relaxed);
                     } else if let Some(idx) = self.selected_source {
                         let Some(source) = self.sources.get(idx).cloned() else {
@@ -133,22 +187,24 @@ impl eframe::App for App {
                             .map(|(dev, _)| dev.clone())
                             .collect();
                         self.session.apply(SessionAction::Start);
-                        self.session.start_capture(source, selected_devices, Arc::clone(&self.frame_count));
+                        self.session.start_capture(
+                            source,
+                            selected_devices,
+                            Arc::clone(&self.frame_count),
+                        );
+                        self.recording_start = Some(Instant::now());
                     }
                 }
 
                 ui.label(
-                    egui::RichText::new(format!(
-                        "State: {:?}  |  Frames: {frames}",
-                        self.session.state()
-                    ))
-                    .small()
-                    .weak(),
+                    egui::RichText::new(format!("State: {:?}", self.session.state()))
+                        .small()
+                        .weak(),
                 );
             });
 
             if is_recording {
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
         });
     }
