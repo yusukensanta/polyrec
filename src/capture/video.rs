@@ -129,7 +129,7 @@ pub async fn run_video_capture(
                 .d3d_device
                 .CreateTexture2D(&staging_desc, None, Some(&mut staging))
                 .map_err(|e| AppError::Capture(format!("CreateTexture2D staging: {e}")))?;
-            let staging = staging.unwrap();
+            let staging = staging.expect("CreateTexture2D succeeded but staging is None");
 
             // Cast textures to ID3D11Resource for CopyResource / Map / Unmap.
             let staging_res: ID3D11Resource = staging

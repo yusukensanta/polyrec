@@ -150,6 +150,9 @@ pub async fn run_audio_capture(
 
         let sample_rate = (*mix_format).nSamplesPerSec;
         let channels = (*mix_format).nChannels;
+        if channels == 0 {
+            return Err(AppError::Windows("WASAPI mix format has 0 channels".into()));
+        }
 
         loop {
             let mut data: *mut u8 = std::ptr::null_mut();
