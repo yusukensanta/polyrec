@@ -6,7 +6,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_HOTKEY,
+    DispatchMessageW, GetMessageW, PeekMessageW, PM_NOREMOVE, PostThreadMessageW, TranslateMessage,
+    MSG, WM_HOTKEY,
 };
 
 /// `MOD_NOREPEAT` (0x4000) — suppress auto-repeat key presses.
@@ -36,11 +37,17 @@ impl HotkeyListener {
 
         let handle = std::thread::spawn(move || {
             let tid = unsafe { GetCurrentThreadId() };
+            // Force Win32 message queue creation before signalling the ID.
+            // PostThreadMessageW silently drops messages if the queue doesn't exist yet.
+            unsafe {
+                let mut dummy = MSG::default();
+                let _ = PeekMessageW(&mut dummy, None, 0, 0, PM_NOREMOVE);
+            }
             id_tx.send(tid).ok();
             run_hotkey_loop(event_tx, start_stop_vk, pause_vk, toggle_overlay_vk);
         });
 
-        let thread_id = id_rx.recv().unwrap_or(0);
+        let thread_id = id_rx.recv().expect("hotkey thread panicked before sending thread ID");
 
         Self {
             rx: event_rx,
@@ -103,7 +110,11 @@ fn run_hotkey_loop(
         }
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            let ret = GetMessageW(&mut msg, None, 0, 0);
+            if ret.0 <= 0 {
+                break; // 0 = WM_QUIT, negative = error
+            }
             if msg.message == WM_HOTKEY {
                 let id = msg.wParam.0 as i32;
                 let event = match id {
@@ -120,9 +131,15 @@ fn run_hotkey_loop(
             DispatchMessageW(&msg);
         }
 
-        UnregisterHotKey(None, ID_START_STOP).ok();
-        UnregisterHotKey(None, ID_PAUSE).ok();
-        UnregisterHotKey(None, ID_TOGGLE_OVERLAY).ok();
+        if start_stop_vk.is_some() {
+            UnregisterHotKey(None, ID_START_STOP).ok();
+        }
+        if pause_vk.is_some() {
+            UnregisterHotKey(None, ID_PAUSE).ok();
+        }
+        if toggle_overlay_vk.is_some() {
+            UnregisterHotKey(None, ID_TOGGLE_OVERLAY).ok();
+        }
     }
 }
 
