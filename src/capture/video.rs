@@ -150,12 +150,13 @@ pub async fn run_video_capture(
                 .map_err(|e| AppError::Capture(format!("Map: {e}")))?;
 
             let row_pitch = mapped.RowPitch as usize;
-            let mut pixel_data = vec![0u8; height as usize * row_pitch];
-            std::ptr::copy_nonoverlapping(
-                mapped.pData as *const u8,
-                pixel_data.as_mut_ptr(),
-                pixel_data.len(),
-            );
+            let packed_row = width as usize * 4;
+            let mut pixel_data = vec![0u8; height as usize * packed_row];
+            for row in 0..height as usize {
+                let src = (mapped.pData as *const u8).add(row * row_pitch);
+                let dst = pixel_data.as_mut_ptr().add(row * packed_row);
+                std::ptr::copy_nonoverlapping(src, dst, packed_row);
+            }
             device.d3d_context.Unmap(&staging_res, 0);
 
             pts = clock.elapsed();
