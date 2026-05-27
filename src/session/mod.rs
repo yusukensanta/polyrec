@@ -76,18 +76,34 @@ impl SessionManager {
             .map(|_| (48000u32, 2u16))
             .collect();
 
+        // Resolve real window client dimensions via GetClientRect.
+        let real_hwnd = windows::Win32::Foundation::HWND(
+            source.hwnd as *mut core::ffi::c_void,
+        );
+        let (width, height) = unsafe {
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            if windows::Win32::UI::WindowsAndMessaging::GetClientRect(real_hwnd, &mut rect).is_ok() {
+                let w = (rect.right - rect.left).max(1) as u32;
+                let h = (rect.bottom - rect.top).max(1) as u32;
+                (w, h)
+            } else {
+                tracing::warn!("GetClientRect failed for hwnd {:x}; using 1920x1080", source.hwnd);
+                (1920u32, 1080u32)
+            }
+        };
+
         // Spawn RecordingActor
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
-            1920, // placeholder; Plan 4 will pass real resolution
-            1080,
+            width,
+            height,
             RECORDING_FPS,
             audio_specs,
         );
 
         // Spawn video capture + pump
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
-        let process_id = source.process_id;
+        let hwnd_val = source.hwnd;
         let video_clock = Arc::clone(&clock);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -97,7 +113,7 @@ impl SessionManager {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let hwnd = windows::Win32::Foundation::HWND(
-                    process_id as usize as *mut core::ffi::c_void,
+                    hwnd_val as *mut core::ffi::c_void,
                 );
                 if let Err(e) = run_video_capture(hwnd, video_clock, video_tx).await {
                     tracing::error!("VideoCapture error: {e}");

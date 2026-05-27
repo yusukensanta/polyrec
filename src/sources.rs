@@ -42,6 +42,7 @@ unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
         process_id,
         window_title,
         exe_name,
+        hwnd: hwnd.0 as isize,
     });
 
     BOOL(1)
@@ -78,6 +79,15 @@ mod tests {
         let sources = enumerate_sources();
         for s in &sources {
             assert!(!s.window_title.is_empty());
+        }
+    }
+
+    #[test]
+    fn capture_sources_have_nonzero_hwnd() {
+        let sources = enumerate_sources();
+        assert!(!sources.is_empty());
+        for s in &sources {
+            assert_ne!(s.hwnd, 0isize, "HWND should not be null for '{}'", s.window_title);
         }
     }
 }
