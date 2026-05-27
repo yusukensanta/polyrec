@@ -2,6 +2,7 @@
 
 mod capture;
 mod config;
+mod encode;
 mod error;
 mod session;
 mod sources;
