@@ -116,8 +116,9 @@ impl eframe::App for App {
                 );
                 if ui.add_sized([120.0, 48.0], btn).clicked() {
                     if is_recording {
-                        self.session.apply(SessionAction::Stop);
-                        self.session.stop_capture();
+                        if self.session.apply(SessionAction::Stop) {
+                            self.session.stop_capture();
+                        }
                         self.frame_count.store(0, Ordering::Relaxed);
                     } else if let Some(idx) = self.selected_source {
                         let Some(source) = self.sources.get(idx).cloned() else {

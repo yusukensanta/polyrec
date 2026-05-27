@@ -153,16 +153,17 @@ impl SessionManager {
     /// Stops all capture and recording actors. Sends Stop to the recorder so it finalizes.
     pub fn stop_capture(&mut self) {
         if let Some(active) = self.active.take() {
-            // Signal recorder to finalize (async send, best-effort)
-            let _ = active.recording_tx.try_send(RecordingCommand::Stop);
-            // Abort capture and pump tasks immediately
+            // Abort capture sources first (stops new frame production)
             for h in active.capture_handles {
                 h.abort();
             }
+            // Abort pump tasks (stops forwarding)
             for h in active.pump_handles {
                 h.abort();
             }
-            // Recorder handle is dropped here; finalization runs to completion on its thread
+            // Deliver Stop to recorder; blocking_send is safe from non-async context
+            let _ = active.recording_tx.blocking_send(RecordingCommand::Stop);
+            // recorder_handle dropped here — spawn_blocking task continues running to completion
         }
     }
 
@@ -185,7 +186,9 @@ fn make_output_path() -> PathBuf {
     let base = dirs::video_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
     let dir = base.join("PolyRec");
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("Failed to create output directory {}: {e}", dir.display());
+    }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
