@@ -38,13 +38,6 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain video frames to update counter (non-blocking try_recv)
-        if let Some(active) = self.session.active.as_mut() {
-            while active.video_rx.try_recv().is_ok() {
-                self.frame_count.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PolyRec");
@@ -139,7 +132,7 @@ impl eframe::App for App {
                             .map(|(dev, _)| dev.clone())
                             .collect();
                         self.session.apply(SessionAction::Start);
-                        self.session.start_capture(source, selected_devices);
+                        self.session.start_capture(source, selected_devices, Arc::clone(&self.frame_count));
                     }
                 }
 

@@ -3,22 +3,29 @@ pub mod state;
 
 use crate::capture::audio::run_audio_capture;
 use crate::capture::video::run_video_capture;
+use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
+use crate::encode::RecordingCommand;
+use crate::error::AppError;
 use crate::session::clock::RecordingClock;
-use crate::types::{AudioDevice, AudioSamples, CaptureSource, TrackId, VideoFrame, SessionState};
+use crate::types::{AudioDevice, CaptureSource, SessionState, TrackId};
 use state::{transition, SessionAction};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 const VIDEO_CHANNEL_CAPACITY: usize = 4;
 const AUDIO_CHANNEL_CAPACITY: usize = 64;
+const RECORDING_FPS: u32 = 60;
 
 pub struct ActiveCapture {
-    pub video_rx: mpsc::Receiver<VideoFrame>,
-    pub audio_tracks: Vec<(TrackId, mpsc::Receiver<AudioSamples>)>,
-    video_handle: JoinHandle<()>,
-    audio_handles: Vec<JoinHandle<()>>,
+    capture_handles: Vec<JoinHandle<()>>,
+    pump_handles: Vec<JoinHandle<()>>,
+    pub recorder_handle: JoinHandle<Result<PathBuf, AppError>>,
+    pub recording_tx: mpsc::Sender<RecordingCommand>,
     pub clock: Arc<RecordingClock>,
+    pub output_path: PathBuf,
 }
 
 pub struct SessionManager {
@@ -48,74 +55,114 @@ impl SessionManager {
         }
     }
 
-    pub fn start_capture(&mut self, source: CaptureSource, audio_devices: Vec<AudioDevice>) {
+    /// Starts capture and recording actors.
+    /// `frame_count` is incremented by the video pump for each frame forwarded to the encoder.
+    pub fn start_capture(
+        &mut self,
+        source: CaptureSource,
+        audio_devices: Vec<AudioDevice>,
+        frame_count: Arc<AtomicU64>,
+    ) -> PathBuf {
         let clock = RecordingClock::new();
 
-        // Video capture — uses COM/WinRT types that are !Send.
-        // Spawn on a dedicated OS thread with a single-threaded tokio runtime so
-        // that the !Send future never crosses thread boundaries.
-        let (video_tx, video_rx) = mpsc::channel::<VideoFrame>(VIDEO_CHANNEL_CAPACITY);
+        // Compute output path: ~/Videos/PolyRec/polyrec_<timestamp>.mp4
+        let output_path = make_output_path();
+
+        // Audio device specs for RecordingWriter (sample_rate, channels per track).
+        // We use defaults here; the capture actor will start with WASAPI native format.
+        // Plan 4 can wire the actual format back.
+        let audio_specs: Vec<(u32, u16)> = audio_devices
+            .iter()
+            .map(|_| (48000u32, 2u16))
+            .collect();
+
+        // Spawn RecordingActor
+        let (recording_tx, recorder_handle) = spawn_recording_actor(
+            output_path.clone(),
+            1920, // placeholder; Plan 4 will pass real resolution
+            1080,
+            RECORDING_FPS,
+            audio_specs,
+        );
+
+        // Spawn video capture + pump
+        let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
         let process_id = source.process_id;
         let video_clock = Arc::clone(&clock);
-        let video_handle = tokio::task::spawn_blocking(move || {
+        let video_capture_handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("video capture runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                // Placeholder HWND: real lookup by PID is deferred to Plan 4.
-                let hwnd =
-                    windows::Win32::Foundation::HWND(process_id as *mut core::ffi::c_void);
+                let hwnd = windows::Win32::Foundation::HWND(
+                    process_id as usize as *mut core::ffi::c_void,
+                );
                 if let Err(e) = run_video_capture(hwnd, video_clock, video_tx).await {
                     tracing::error!("VideoCapture error: {e}");
                 }
             });
         });
+        let video_pump_handle =
+            spawn_video_pump(video_rx, recording_tx.clone(), frame_count);
 
-        // Audio capture — also holds !Send raw pointers across awaits.
-        let mut audio_tracks = Vec::new();
-        let mut audio_handles = Vec::new();
+        // Spawn audio capture + pump (one per device)
+        let mut capture_handles = vec![video_capture_handle];
+        let mut pump_handles = vec![video_pump_handle];
+
         for (i, dev) in audio_devices.into_iter().enumerate() {
             let track_id = TrackId::new(i as u32);
-            let (audio_tx, audio_rx) = mpsc::channel::<AudioSamples>(AUDIO_CHANNEL_CAPACITY);
+            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
             let audio_clock = Arc::clone(&clock);
             let dev_id = dev.id.clone();
             let is_loopback = dev.is_loopback;
-            let handle = tokio::task::spawn_blocking(move || {
+            let capture_handle = tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("audio capture runtime");
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    if let Err(e) =
-                        run_audio_capture(dev_id, track_id, is_loopback, audio_clock, audio_tx)
-                            .await
+                    if let Err(e) = run_audio_capture(
+                        dev_id, track_id, is_loopback, audio_clock, audio_tx,
+                    )
+                    .await
                     {
                         tracing::error!("AudioCapture[{track_id:?}] error: {e}");
                     }
                 });
             });
-            audio_tracks.push((track_id, audio_rx));
-            audio_handles.push(handle);
+            let pump_handle = spawn_audio_pump(audio_rx, recording_tx.clone());
+            capture_handles.push(capture_handle);
+            pump_handles.push(pump_handle);
         }
 
         self.active = Some(ActiveCapture {
-            video_rx,
-            audio_tracks,
-            video_handle,
-            audio_handles,
+            capture_handles,
+            pump_handles,
+            recorder_handle,
+            recording_tx,
             clock,
+            output_path: output_path.clone(),
         });
+
+        output_path
     }
 
+    /// Stops all capture and recording actors. Sends Stop to the recorder so it finalizes.
     pub fn stop_capture(&mut self) {
         if let Some(active) = self.active.take() {
-            active.video_handle.abort();
-            for h in active.audio_handles {
+            // Signal recorder to finalize (async send, best-effort)
+            let _ = active.recording_tx.try_send(RecordingCommand::Stop);
+            // Abort capture and pump tasks immediately
+            for h in active.capture_handles {
                 h.abort();
             }
+            for h in active.pump_handles {
+                h.abort();
+            }
+            // Recorder handle is dropped here; finalization runs to completion on its thread
         }
     }
 
@@ -132,6 +179,18 @@ impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn make_output_path() -> PathBuf {
+    let base = dirs::video_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let dir = base.join("PolyRec");
+    let _ = std::fs::create_dir_all(&dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    dir.join(format!("polyrec_{ts}.mp4"))
 }
 
 #[cfg(test)]
@@ -156,5 +215,11 @@ mod tests {
         let mut sm = SessionManager::new();
         assert!(!sm.apply(SessionAction::Stop));
         assert!(sm.is_idle());
+    }
+
+    #[test]
+    fn make_output_path_has_mp4_extension() {
+        let p = make_output_path();
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
     }
 }
