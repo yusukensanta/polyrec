@@ -115,8 +115,7 @@ impl eframe::App for App {
         egui::SidePanel::left("source_panel")
             .min_width(200.0)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new("CAPTURE SOURCE").small().weak());
-                ui.separator();
+                section_header(ui, "CAPTURE SOURCE");
                 egui::ScrollArea::vertical()
                     .max_height(200.0)
                     .show(ui, |ui| {
@@ -155,8 +154,7 @@ impl eframe::App for App {
                     });
 
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("AUDIO DEVICES").small().weak());
-                ui.separator();
+                section_header(ui, "AUDIO");
                 for (i, dev) in self.audio_devices.iter().enumerate() {
                     let icon = if dev.is_loopback { "🔊" } else { "🎙" };
                     ui.checkbox(
@@ -168,8 +166,7 @@ impl eframe::App for App {
 
         // ── Center panel ──────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(egui::RichText::new("RECORDING STATUS").small().weak());
-            ui.separator();
+            section_header(ui, "STATUS");
 
             if is_recording {
                 let elapsed = self
@@ -245,14 +242,20 @@ impl eframe::App for App {
                     );
                 }
             } else if let Some(path) = &self.last_output_path {
-                ui.label("Last recording:");
+                ui.label(egui::RichText::new("Last recording:").size(11.0).color(TEXT_MUTED));
+                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(path.to_string_lossy().as_ref())
-                        .small()
-                        .weak(),
+                        .size(12.0)
+                        .color(TEXT_PRIMARY),
                 );
             } else {
-                ui.label("Select a source and press REC to start recording.");
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Select a source and press REC to start.")
+                        .size(13.0)
+                        .color(TEXT_MUTED),
+                );
             }
 
             ui.add_space(16.0);
@@ -266,19 +269,26 @@ impl eframe::App for App {
                 } else {
                     ACCENT_IDLE
                 };
+                let btn_bg = if is_recording {
+                    egui::Color32::from_rgb(52, 18, 18)
+                } else {
+                    egui::Color32::from_rgb(18, 46, 28)
+                };
 
                 let btn = egui::Button::new(
                     egui::RichText::new(rec_label).color(rec_color).size(18.0),
-                );
+                )
+                .fill(btn_bg)
+                .min_size(egui::Vec2::new(130.0, 52.0));
 
-                if ui.add_sized([120.0, 48.0], btn).clicked() {
+                if ui.add(btn).clicked() {
                     self.handle_rec_button(is_recording);
                 }
 
                 ui.label(
                     egui::RichText::new(format!("State: {:?}", self.session.state()))
-                        .small()
-                        .weak(),
+                        .size(10.0)
+                        .color(TEXT_MUTED),
                 );
             });
         });
@@ -340,15 +350,16 @@ impl eframe::App for App {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ctx, |ui| {
-                        ui.label("Recording saved:");
+                        ui.label(egui::RichText::new("Recording saved:").size(11.0).color(TEXT_MUTED));
+                        ui.add_space(2.0);
                         ui.label(
                             egui::RichText::new(path.to_string_lossy().as_ref())
-                                .small()
-                                .weak(),
+                                .size(12.0)
+                                .color(TEXT_PRIMARY),
                         );
 
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("AUDIO TRACKS").small().weak());
+                        section_header(ui, "AUDIO TRACKS");
                         for (i, dev) in self.audio_devices.iter().enumerate() {
                             if i < self.export_track_selection.len() {
                                 let icon = if dev.is_loopback { "🔊" } else { "🎙" };
@@ -382,6 +393,14 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
+}
+
+fn section_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(title).size(10.0).color(TEXT_MUTED).strong());
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(4.0);
 }
 
 fn setup_theme(ctx: &egui::Context) {
