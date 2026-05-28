@@ -152,18 +152,61 @@ impl eframe::App for App {
                     .map(|t| t.elapsed())
                     .unwrap_or_default();
                 let secs = elapsed.as_secs();
-                ui.label(format!(
-                    "Recording  {:02}:{:02}:{:02}",
-                    secs / 3600,
-                    (secs % 3600) / 60,
-                    secs % 60
-                ));
-                ui.label(format!(
-                    "{} audio track(s)  |  {} video frames",
-                    self.selected_audio.iter().filter(|&&b| b).count(),
-                    frames
-                ));
+
+                // Pulsing dot — alpha oscillates 56%–100% (never fully off)
+                let t = ctx.input(|i| i.time) as f32;
+                let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
+                let dot_col = egui::Color32::from_rgba_unmultiplied(
+                    248, 80, 80, (alpha * 255.0) as u8,
+                );
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(14.0, 14.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().circle_filled(rect.center(), 5.0, dot_col);
+                    ui.label(
+                        egui::RichText::new("RECORDING")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(200, 80, 80))
+                            .strong(),
+                    );
+                });
+
+                ui.add_space(6.0);
+
+                // Large monospace timer
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:02}:{:02}:{:02}",
+                        secs / 3600,
+                        (secs % 3600) / 60,
+                        secs % 60,
+                    ))
+                    .font(egui::FontId::monospace(40.0))
+                    .color(TEXT_PRIMARY),
+                );
+
+                ui.add_space(4.0);
+
+                // Stats row
+                let track_count = self.selected_audio.iter().filter(|&&b| b).count();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} tracks", track_count))
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                    ui.label(egui::RichText::new("  ·  ").size(12.0).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new(format!("{} frames", frames))
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                });
+
                 if let Some(active) = self.session.active.as_ref() {
+                    ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(
                             active
@@ -172,8 +215,8 @@ impl eframe::App for App {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("recording.mp4"),
                         )
-                        .small()
-                        .weak(),
+                        .size(11.0)
+                        .color(TEXT_MUTED),
                     );
                 }
             } else if let Some(path) = &self.last_output_path {
@@ -310,7 +353,8 @@ impl eframe::App for App {
         }
 
         if is_recording {
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 }
