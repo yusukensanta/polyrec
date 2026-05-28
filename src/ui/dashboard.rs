@@ -20,7 +20,7 @@ use std::time::Instant;
                     const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
                     const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
                     const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
-#[allow(dead_code)] const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
+                    const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
 #[allow(dead_code)] const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
 #[allow(dead_code)] const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
 
