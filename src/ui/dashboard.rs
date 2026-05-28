@@ -22,7 +22,7 @@ use std::time::Instant;
                     const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
                     const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
 #[allow(dead_code)] const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
-#[allow(dead_code)] const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
+                    const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
 
 pub struct App {
     config: Config,
@@ -264,7 +264,7 @@ impl eframe::App for App {
                 let rec_color = if is_recording {
                     egui::Color32::from_rgb(248, 113, 113)
                 } else {
-                    egui::Color32::from_rgb(74, 222, 128)
+                    ACCENT_IDLE
                 };
 
                 let btn = egui::Button::new(
