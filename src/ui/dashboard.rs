@@ -11,16 +11,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
-const BG_DEEP:      egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
-const BG_BASE:      egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
-const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
-const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
-const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
-const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
-const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
-const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
-const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
-const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
+#[allow(dead_code)] const BG_DEEP:      egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
+                    const BG_WINDOW:    egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
+                    const BG_FAINT:     egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
+                    const BG_BASE:      egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
+#[allow(dead_code)] const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
+#[allow(dead_code)] const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
+#[allow(dead_code)] const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
+#[allow(dead_code)] const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
+                    const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
+#[allow(dead_code)] const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
+#[allow(dead_code)] const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
+#[allow(dead_code)] const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
 
 pub struct App {
     config: Config,
@@ -318,9 +320,9 @@ fn setup_theme(ctx: &egui::Context) {
 
     // Background layers
     v.panel_fill         = BG_BASE;
-    v.window_fill        = egui::Color32::from_rgb(22, 22, 34);
+    v.window_fill        = BG_WINDOW;
     v.extreme_bg_color   = BG_DEEP;
-    v.faint_bg_color     = egui::Color32::from_rgb(14, 14, 22);
+    v.faint_bg_color     = BG_FAINT;
     v.override_text_color = Some(TEXT_PRIMARY);
 
     // Window chrome
