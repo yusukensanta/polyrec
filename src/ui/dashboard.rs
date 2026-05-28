@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
-#[allow(dead_code)] const BG_DEEP:      egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
+                    const BG_DEEP:      egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
                     const BG_WINDOW:    egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
                     const BG_FAINT:     egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
                     const BG_BASE:      egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
@@ -21,8 +21,10 @@ use std::time::Instant;
                     const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
                     const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
                     const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
-#[allow(dead_code)] const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
+                    const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
                     const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
+                    const BG_BTN_STOP:  egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
+                    const BG_BTN_IDLE:  egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
 
 pub struct App {
     config: Config,
@@ -179,7 +181,7 @@ impl eframe::App for App {
                 let t = ctx.input(|i| i.time) as f32;
                 let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
                 let dot_col = egui::Color32::from_rgba_unmultiplied(
-                    248, 80, 80, (alpha * 255.0) as u8,
+                    ACCENT_REC.r(), ACCENT_REC.g(), ACCENT_REC.b(), (alpha * 255.0) as u8,
                 );
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(
@@ -269,11 +271,7 @@ impl eframe::App for App {
                 } else {
                     ACCENT_IDLE
                 };
-                let btn_bg = if is_recording {
-                    egui::Color32::from_rgb(52, 18, 18)
-                } else {
-                    egui::Color32::from_rgb(18, 46, 28)
-                };
+                let btn_bg = if is_recording { BG_BTN_STOP } else { BG_BTN_IDLE };
 
                 let btn = egui::Button::new(
                     egui::RichText::new(rec_label).color(rec_color).size(18.0),
