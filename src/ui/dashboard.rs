@@ -15,10 +15,10 @@ use std::time::Instant;
                     const BG_WINDOW:    egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
                     const BG_FAINT:     egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
                     const BG_BASE:      egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
-#[allow(dead_code)] const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
-#[allow(dead_code)] const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
-#[allow(dead_code)] const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
-#[allow(dead_code)] const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
+                    const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
+                    const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
+                    const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
+                    const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
                     const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
 #[allow(dead_code)] const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
 #[allow(dead_code)] const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
@@ -122,10 +122,35 @@ impl eframe::App for App {
                     .show(ui, |ui| {
                         for (i, source) in self.sources.iter().enumerate() {
                             let selected = self.selected_source == Some(i);
-                            let label = format!("🎮 {}", source.window_title);
-                            if ui.selectable_label(selected, &label).clicked() {
+                            let fill   = if selected { BG_SELECTED } else { BG_CARD };
+                            let border = if selected { BORDER_SEL } else { BORDER };
+
+                            let inner = egui::Frame::none()
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(1.0, border))
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::same(8.0))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.label(
+                                        egui::RichText::new(&source.window_title)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(TEXT_PRIMARY),
+                                    );
+                                    if !source.exe_name.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&source.exe_name)
+                                                .size(11.0)
+                                                .color(TEXT_MUTED),
+                                        );
+                                    }
+                                });
+
+                            if inner.response.interact(egui::Sense::click()).clicked() {
                                 self.selected_source = Some(i);
                             }
+                            ui.add_space(3.0);
                         }
                     });
 
