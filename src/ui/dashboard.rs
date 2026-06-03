@@ -1,5 +1,6 @@
 use crate::capture::audio::enumerate_audio_devices;
 use crate::config::Config;
+use crate::encode::remux::remux;
 use crate::hotkeys::{HotkeyEvent, HotkeyListener};
 use crate::session::{state::SessionAction, SessionManager};
 use crate::sources::enumerate_sources;
@@ -9,6 +10,7 @@ use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
 
 // WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
@@ -27,6 +29,13 @@ use std::time::Instant;
                     const BG_BTN_STOP:  egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
                     const BG_BTN_IDLE:  egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
 
+enum ExportState {
+    Idle,
+    Running,
+    Done(PathBuf),
+    Failed(String),
+}
+
 pub struct App {
     config: Config,
     session: SessionManager,
@@ -41,6 +50,8 @@ pub struct App {
     output_dir_input: String,
     show_export_dialog: bool,
     export_track_selection: Vec<bool>,
+    export_state: ExportState,
+    export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     hotkey_listener: HotkeyListener,
 }
 
@@ -72,6 +83,8 @@ impl App {
             output_dir_input,
             show_export_dialog: false,
             export_track_selection,
+            export_state: ExportState::Idle,
+            export_result_rx: None,
             hotkey_listener,
         }
     }
@@ -81,6 +94,16 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_recording = self.session.is_recording();
         let frames = self.frame_count.load(Ordering::Relaxed);
+
+        // Poll export result channel
+        let export_result = self.export_result_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = export_result {
+            self.export_state = match result {
+                Ok(path) => ExportState::Done(path),
+                Err(msg) => ExportState::Failed(msg),
+            };
+            self.export_result_rx = None;
+        }
 
         // Poll hotkey events (non-blocking)
         while let Some(event) = self.hotkey_listener.try_recv() {
@@ -400,26 +423,107 @@ impl eframe::App for App {
                         }
 
                         ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Open Folder").clicked() {
-                                open_folder(path.as_ref());
-                            }
+
+                        let done_path = if let ExportState::Done(p) = &self.export_state {
+                            Some(p.clone())
+                        } else {
+                            None
+                        };
+                        let failed_msg = if let ExportState::Failed(m) = &self.export_state {
+                            Some(m.clone())
+                        } else {
+                            None
+                        };
+                        let is_idle = matches!(self.export_state, ExportState::Idle);
+                        let is_running = matches!(self.export_state, ExportState::Running);
+
+                        if is_idle {
+                            ui.horizontal(|ui| {
+                                if ui.button("Export").clicked() {
+                                    if let Some(dest) = rfd::FileDialog::new()
+                                        .add_filter("MP4 video", &["mp4"])
+                                        .set_file_name("export.mp4")
+                                        .save_file()
+                                    {
+                                        let src = path.clone();
+                                        let indices: Vec<usize> = self
+                                            .export_track_selection
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, &sel)| sel)
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        let (tx, rx) = mpsc::channel();
+                                        std::thread::spawn(move || {
+                                            let result = remux(&src, &dest, &indices)
+                                                .map_err(|e| e.to_string());
+                                            let _ = tx.send(result);
+                                        });
+                                        self.export_result_rx = Some(rx);
+                                        self.export_state = ExportState::Running;
+                                    }
+                                }
+                                if ui.button("Open Folder").clicked() {
+                                    open_folder(path.as_ref());
+                                }
+                                if ui.button("Close").clicked() {
+                                    close = true;
+                                }
+                            });
+                        } else if is_running {
+                            section_header(ui, "EXPORTING…");
+                            ui.label(
+                                egui::RichText::new("Please wait…")
+                                    .size(11.0)
+                                    .color(TEXT_MUTED),
+                            );
+                        } else if let Some(export_path) = done_path {
+                            section_header(ui, "EXPORT COMPLETE");
+                            ui.label(
+                                egui::RichText::new(export_path.to_string_lossy().as_ref())
+                                    .size(11.0)
+                                    .color(TEXT_PRIMARY),
+                            );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Open Folder").clicked() {
+                                    open_folder(&export_path);
+                                }
+                                if ui.button("Close").clicked() {
+                                    close = true;
+                                }
+                            });
+                        } else if let Some(msg) = failed_msg {
+                            section_header(ui, "EXPORT FAILED");
+                            ui.label(
+                                egui::RichText::new(&msg)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(248, 80, 80)),
+                            );
+                            ui.add_space(4.0);
                             if ui.button("Close").clicked() {
                                 close = true;
                             }
-                        });
+                        }
                     });
                 if close {
                     self.show_export_dialog = false;
+                    self.export_state = ExportState::Idle;
+                    self.export_result_rx = None;
                 }
             } else {
                 self.show_export_dialog = false;
+                self.export_state = ExportState::Idle;
+                self.export_result_rx = None;
             }
         }
 
         if is_recording {
             // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        if matches!(self.export_state, ExportState::Running) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
