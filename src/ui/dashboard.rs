@@ -5,6 +5,7 @@ use crate::session::{state::SessionAction, SessionManager};
 use crate::sources::enumerate_sources;
 use crate::types::{AudioDevice, CaptureSource};
 use eframe::egui;
+use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -264,6 +265,29 @@ impl eframe::App for App {
             }
 
             ui.add_space(16.0);
+            section_header(ui, "OUTPUT");
+            ui.horizontal(|ui| {
+                let btn_width = 74.0;
+                let tf_width = (ui.available_width() - btn_width - 8.0).max(60.0);
+                let tf = ui.add_sized(
+                    [tf_width, 22.0],
+                    egui::TextEdit::singleline(&mut self.output_dir_input),
+                );
+                if tf.lost_focus() {
+                    self.config.output_dir = PathBuf::from(&self.output_dir_input);
+                    let _ = self.config.save();
+                }
+                if ui.button("Browse…").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .set_directory(&self.config.output_dir)
+                        .pick_folder()
+                    {
+                        self.output_dir_input = path.to_string_lossy().into_owned();
+                        self.config.output_dir = path;
+                        let _ = self.config.save();
+                    }
+                }
+            });
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
