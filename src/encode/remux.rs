@@ -57,6 +57,9 @@ unsafe fn do_remux(
     reader
         .SetStreamSelection(0, TRUE)
         .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
+    // PolyRec recordings always have exactly one video stream at index 0
+    // followed by N audio streams at indices 1..=N in capture order.
+    // audio_track_indices are 0-based logical audio indices → stream idx+1.
     for &idx in audio_track_indices {
         reader
             .SetStreamSelection((idx + 1) as u32, TRUE)
@@ -75,6 +78,7 @@ unsafe fn do_remux(
         .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(video): {e}")))?;
 
     let mut audio_types: Vec<(u32, IMFMediaType)> = Vec::new();
+    // Same index mapping as above: audio_track_indices are 0-based → stream idx+1.
     for &idx in audio_track_indices {
         let src_idx = (idx + 1) as u32;
         let t: IMFMediaType = reader
@@ -135,6 +139,13 @@ unsafe fn do_remux(
                 Some(&mut sample),
             )
             .map_err(|e| AppError::Encode(format!("ReadSample: {e}")))?;
+
+        if stream_flags & 1 != 0 {
+            // MF_SOURCE_READERF_ERROR on this stream — abort
+            return Err(AppError::Encode(format!(
+                "ReadSample: stream {actual_idx} reported error"
+            )));
+        }
 
         // MF_SOURCE_READERF_ENDOFSTREAM = 2
         if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
