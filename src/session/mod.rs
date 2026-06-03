@@ -62,11 +62,11 @@ impl SessionManager {
         source: CaptureSource,
         audio_devices: Vec<AudioDevice>,
         frame_count: Arc<AtomicU64>,
+        output_dir: &std::path::Path,
     ) -> PathBuf {
         let clock = RecordingClock::new();
 
-        // Compute output path: ~/Videos/PolyRec/polyrec_<timestamp>.mp4
-        let output_path = make_output_path();
+        let output_path = make_output_path(output_dir);
 
         // Audio device specs for RecordingWriter (sample_rate, channels per track).
         // We use defaults here; the capture actor will start with WASAPI native format.
@@ -198,10 +198,8 @@ impl Default for SessionManager {
     }
 }
 
-fn make_output_path() -> PathBuf {
-    let base = dirs::video_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
-    let dir = base.join("PolyRec");
+fn make_output_path(base_dir: &std::path::Path) -> PathBuf {
+    let dir = base_dir.to_path_buf();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("Failed to create output directory {}: {e}", dir.display());
     }
@@ -238,7 +236,7 @@ mod tests {
 
     #[test]
     fn make_output_path_has_mp4_extension() {
-        let p = make_output_path();
+        let p = make_output_path(std::path::Path::new("."));
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
     }
 }

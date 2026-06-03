@@ -609,6 +609,7 @@ impl App {
                 source,
                 selected_devices,
                 Arc::clone(&self.frame_count),
+                &self.config.output_dir,
             );
             self.recording_start = Some(Instant::now());
         }
