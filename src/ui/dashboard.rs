@@ -9,6 +9,7 @@ use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
 
 // WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
@@ -27,6 +28,13 @@ use std::time::Instant;
                     const BG_BTN_STOP:  egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
                     const BG_BTN_IDLE:  egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
 
+enum ExportState {
+    Idle,
+    Running,
+    Done(PathBuf),
+    Failed(String),
+}
+
 pub struct App {
     config: Config,
     session: SessionManager,
@@ -41,6 +49,8 @@ pub struct App {
     output_dir_input: String,
     show_export_dialog: bool,
     export_track_selection: Vec<bool>,
+    export_state: ExportState,
+    export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     hotkey_listener: HotkeyListener,
 }
 
@@ -72,6 +82,8 @@ impl App {
             output_dir_input,
             show_export_dialog: false,
             export_track_selection,
+            export_state: ExportState::Idle,
+            export_result_rx: None,
             hotkey_listener,
         }
     }
@@ -81,6 +93,16 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_recording = self.session.is_recording();
         let frames = self.frame_count.load(Ordering::Relaxed);
+
+        // Poll export result channel
+        let export_result = self.export_result_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = export_result {
+            self.export_state = match result {
+                Ok(path) => ExportState::Done(path),
+                Err(msg) => ExportState::Failed(msg),
+            };
+            self.export_result_rx = None;
+        }
 
         // Poll hotkey events (non-blocking)
         while let Some(event) = self.hotkey_listener.try_recv() {
@@ -411,15 +433,22 @@ impl eframe::App for App {
                     });
                 if close {
                     self.show_export_dialog = false;
+                    self.export_state = ExportState::Idle;
+                    self.export_result_rx = None;
                 }
             } else {
                 self.show_export_dialog = false;
+                self.export_state = ExportState::Idle;
+                self.export_result_rx = None;
             }
         }
 
         if is_recording {
             // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        if matches!(self.export_state, ExportState::Running) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
