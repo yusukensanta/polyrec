@@ -273,9 +273,11 @@ impl eframe::App for App {
                     [tf_width, 22.0],
                     egui::TextEdit::singleline(&mut self.output_dir_input),
                 );
-                if tf.lost_focus() {
+                if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
                     self.config.output_dir = PathBuf::from(&self.output_dir_input);
-                    let _ = self.config.save();
+                    if let Err(e) = self.config.save() {
+                        tracing::error!("failed to save config: {e}");
+                    }
                 }
                 if ui.button("Browse…").clicked() {
                     if let Some(path) = FileDialog::new()
@@ -284,7 +286,9 @@ impl eframe::App for App {
                     {
                         self.output_dir_input = path.to_string_lossy().into_owned();
                         self.config.output_dir = path;
-                        let _ = self.config.save();
+                        if let Err(e) = self.config.save() {
+                            tracing::error!("failed to save config: {e}");
+                        }
                     }
                 }
             });
