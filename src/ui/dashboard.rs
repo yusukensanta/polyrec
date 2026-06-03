@@ -1,5 +1,6 @@
 use crate::capture::audio::enumerate_audio_devices;
 use crate::config::Config;
+use crate::encode::remux::remux;
 use crate::hotkeys::{HotkeyEvent, HotkeyListener};
 use crate::session::{state::SessionAction, SessionManager};
 use crate::sources::enumerate_sources;
@@ -422,14 +423,88 @@ impl eframe::App for App {
                         }
 
                         ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Open Folder").clicked() {
-                                open_folder(path.as_ref());
-                            }
+
+                        let done_path = if let ExportState::Done(p) = &self.export_state {
+                            Some(p.clone())
+                        } else {
+                            None
+                        };
+                        let failed_msg = if let ExportState::Failed(m) = &self.export_state {
+                            Some(m.clone())
+                        } else {
+                            None
+                        };
+                        let is_idle = matches!(self.export_state, ExportState::Idle);
+                        let is_running = matches!(self.export_state, ExportState::Running);
+
+                        if is_idle {
+                            ui.horizontal(|ui| {
+                                if ui.button("Export").clicked() {
+                                    if let Some(dest) = rfd::FileDialog::new()
+                                        .add_filter("MP4 video", &["mp4"])
+                                        .set_file_name("export.mp4")
+                                        .save_file()
+                                    {
+                                        let src = path.clone();
+                                        let indices: Vec<usize> = self
+                                            .export_track_selection
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, &sel)| sel)
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        let (tx, rx) = mpsc::channel();
+                                        std::thread::spawn(move || {
+                                            let result = remux(&src, &dest, &indices)
+                                                .map_err(|e| e.to_string());
+                                            let _ = tx.send(result);
+                                        });
+                                        self.export_result_rx = Some(rx);
+                                        self.export_state = ExportState::Running;
+                                    }
+                                }
+                                if ui.button("Open Folder").clicked() {
+                                    open_folder(path.as_ref());
+                                }
+                                if ui.button("Close").clicked() {
+                                    close = true;
+                                }
+                            });
+                        } else if is_running {
+                            section_header(ui, "EXPORTING…");
+                            ui.label(
+                                egui::RichText::new("Please wait…")
+                                    .size(11.0)
+                                    .color(TEXT_MUTED),
+                            );
+                        } else if let Some(export_path) = done_path {
+                            section_header(ui, "EXPORT COMPLETE");
+                            ui.label(
+                                egui::RichText::new(export_path.to_string_lossy().as_ref())
+                                    .size(11.0)
+                                    .color(TEXT_PRIMARY),
+                            );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Open Folder").clicked() {
+                                    open_folder(&export_path);
+                                }
+                                if ui.button("Close").clicked() {
+                                    close = true;
+                                }
+                            });
+                        } else if let Some(msg) = failed_msg {
+                            section_header(ui, "EXPORT FAILED");
+                            ui.label(
+                                egui::RichText::new(&msg)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(248, 80, 80)),
+                            );
+                            ui.add_space(4.0);
                             if ui.button("Close").clicked() {
                                 close = true;
                             }
-                        });
+                        }
                     });
                 if close {
                     self.show_export_dialog = false;
