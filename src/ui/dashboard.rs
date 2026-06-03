@@ -37,6 +37,7 @@ pub struct App {
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
     last_output_path: Option<PathBuf>,
+    output_dir_input: String,
     show_export_dialog: bool,
     export_track_selection: Vec<bool>,
     hotkey_listener: HotkeyListener,
@@ -46,6 +47,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
         setup_theme(&cc.egui_ctx);
         let overlay_enabled = config.overlay.enabled;
+        let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
         let selected_audio = vec![true; n];
@@ -66,6 +68,7 @@ impl App {
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             last_output_path: None,
+            output_dir_input,
             show_export_dialog: false,
             export_track_selection,
             hotkey_listener,
