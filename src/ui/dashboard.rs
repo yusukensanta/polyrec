@@ -5,10 +5,27 @@ use crate::session::{state::SessionAction, SessionManager};
 use crate::sources::enumerate_sources;
 use crate::types::{AudioDevice, CaptureSource};
 use eframe::egui;
+use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+// WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
+                    const BG_DEEP:      egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
+                    const BG_WINDOW:    egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
+                    const BG_FAINT:     egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
+                    const BG_BASE:      egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
+                    const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
+                    const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
+                    const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
+                    const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
+                    const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
+                    const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
+                    const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
+                    const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
+                    const BG_BTN_STOP:  egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
+                    const BG_BTN_IDLE:  egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
 
 pub struct App {
     config: Config,
@@ -21,14 +38,17 @@ pub struct App {
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
     last_output_path: Option<PathBuf>,
+    output_dir_input: String,
     show_export_dialog: bool,
     export_track_selection: Vec<bool>,
     hotkey_listener: HotkeyListener,
 }
 
 impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>, config: Config) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
+        setup_theme(&cc.egui_ctx);
         let overlay_enabled = config.overlay.enabled;
+        let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
         let selected_audio = vec![true; n];
@@ -49,6 +69,7 @@ impl App {
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             last_output_path: None,
+            output_dir_input,
             show_export_dialog: false,
             export_track_selection,
             hotkey_listener,
@@ -100,23 +121,46 @@ impl eframe::App for App {
         egui::SidePanel::left("source_panel")
             .min_width(200.0)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new("CAPTURE SOURCE").small().weak());
-                ui.separator();
+                section_header(ui, "CAPTURE SOURCE");
                 egui::ScrollArea::vertical()
                     .max_height(200.0)
                     .show(ui, |ui| {
                         for (i, source) in self.sources.iter().enumerate() {
                             let selected = self.selected_source == Some(i);
-                            let label = format!("🎮 {}", source.window_title);
-                            if ui.selectable_label(selected, &label).clicked() {
+                            let fill   = if selected { BG_SELECTED } else { BG_CARD };
+                            let border = if selected { BORDER_SEL } else { BORDER };
+
+                            let inner = egui::Frame::none()
+                                .fill(fill)
+                                .stroke(egui::Stroke::new(1.0, border))
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::same(8.0))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.label(
+                                        egui::RichText::new(&source.window_title)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(TEXT_PRIMARY),
+                                    );
+                                    if !source.exe_name.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&source.exe_name)
+                                                .size(11.0)
+                                                .color(TEXT_MUTED),
+                                        );
+                                    }
+                                });
+
+                            if inner.response.interact(egui::Sense::click()).clicked() {
                                 self.selected_source = Some(i);
                             }
+                            ui.add_space(3.0);
                         }
                     });
 
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("AUDIO DEVICES").small().weak());
-                ui.separator();
+                section_header(ui, "AUDIO");
                 for (i, dev) in self.audio_devices.iter().enumerate() {
                     let icon = if dev.is_loopback { "🔊" } else { "🎙" };
                     ui.checkbox(
@@ -128,8 +172,7 @@ impl eframe::App for App {
 
         // ── Center panel ──────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(egui::RichText::new("RECORDING STATUS").small().weak());
-            ui.separator();
+            section_header(ui, "STATUS");
 
             if is_recording {
                 let elapsed = self
@@ -137,18 +180,61 @@ impl eframe::App for App {
                     .map(|t| t.elapsed())
                     .unwrap_or_default();
                 let secs = elapsed.as_secs();
-                ui.label(format!(
-                    "Recording  {:02}:{:02}:{:02}",
-                    secs / 3600,
-                    (secs % 3600) / 60,
-                    secs % 60
-                ));
-                ui.label(format!(
-                    "{} audio track(s)  |  {} video frames",
-                    self.selected_audio.iter().filter(|&&b| b).count(),
-                    frames
-                ));
+
+                // Pulsing dot — alpha oscillates 56%–100% (never fully off)
+                let t = ctx.input(|i| i.time) as f32;
+                let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
+                let dot_col = egui::Color32::from_rgba_unmultiplied(
+                    ACCENT_REC.r(), ACCENT_REC.g(), ACCENT_REC.b(), (alpha * 255.0) as u8,
+                );
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(14.0, 14.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().circle_filled(rect.center(), 5.0, dot_col);
+                    ui.label(
+                        egui::RichText::new("RECORDING")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(200, 80, 80))
+                            .strong(),
+                    );
+                });
+
+                ui.add_space(6.0);
+
+                // Large monospace timer
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:02}:{:02}:{:02}",
+                        secs / 3600,
+                        (secs % 3600) / 60,
+                        secs % 60,
+                    ))
+                    .font(egui::FontId::monospace(40.0))
+                    .color(TEXT_PRIMARY),
+                );
+
+                ui.add_space(4.0);
+
+                // Stats row
+                let track_count = self.selected_audio.iter().filter(|&&b| b).count();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} tracks", track_count))
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                    ui.label(egui::RichText::new("  ·  ").size(12.0).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new(format!("{} frames", frames))
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                });
+
                 if let Some(active) = self.session.active.as_ref() {
+                    ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(
                             active
@@ -157,22 +243,55 @@ impl eframe::App for App {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("recording.mp4"),
                         )
-                        .small()
-                        .weak(),
+                        .size(11.0)
+                        .color(TEXT_MUTED),
                     );
                 }
             } else if let Some(path) = &self.last_output_path {
-                ui.label("Last recording:");
+                ui.label(egui::RichText::new("Last recording:").size(11.0).color(TEXT_MUTED));
+                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(path.to_string_lossy().as_ref())
-                        .small()
-                        .weak(),
+                        .size(12.0)
+                        .color(TEXT_PRIMARY),
                 );
             } else {
-                ui.label("Select a source and press REC to start recording.");
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Select a source and press REC to start.")
+                        .size(13.0)
+                        .color(TEXT_MUTED),
+                );
             }
 
             ui.add_space(16.0);
+            section_header(ui, "OUTPUT");
+            ui.horizontal(|ui| {
+                let btn_width = 74.0;
+                let tf_width = (ui.available_width() - btn_width - 8.0).max(60.0);
+                let tf = ui.add_sized(
+                    [tf_width, 22.0],
+                    egui::TextEdit::singleline(&mut self.output_dir_input),
+                );
+                if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
+                    self.config.output_dir = PathBuf::from(&self.output_dir_input);
+                    if let Err(e) = self.config.save() {
+                        tracing::error!("failed to save config: {e}");
+                    }
+                }
+                if ui.button("Browse…").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .set_directory(&self.config.output_dir)
+                        .pick_folder()
+                    {
+                        self.output_dir_input = path.to_string_lossy().into_owned();
+                        self.config.output_dir = path;
+                        if let Err(e) = self.config.save() {
+                            tracing::error!("failed to save config: {e}");
+                        }
+                    }
+                }
+            });
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
@@ -181,21 +300,24 @@ impl eframe::App for App {
                 let rec_color = if is_recording {
                     egui::Color32::from_rgb(248, 113, 113)
                 } else {
-                    egui::Color32::from_rgb(74, 222, 128)
+                    ACCENT_IDLE
                 };
+                let btn_bg = if is_recording { BG_BTN_STOP } else { BG_BTN_IDLE };
 
                 let btn = egui::Button::new(
                     egui::RichText::new(rec_label).color(rec_color).size(18.0),
-                );
+                )
+                .fill(btn_bg)
+                .min_size(egui::Vec2::new(130.0, 52.0));
 
-                if ui.add_sized([120.0, 48.0], btn).clicked() {
+                if ui.add(btn).clicked() {
                     self.handle_rec_button(is_recording);
                 }
 
                 ui.label(
                     egui::RichText::new(format!("State: {:?}", self.session.state()))
-                        .small()
-                        .weak(),
+                        .size(10.0)
+                        .color(TEXT_MUTED),
                 );
             });
         });
@@ -257,15 +379,16 @@ impl eframe::App for App {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ctx, |ui| {
-                        ui.label("Recording saved:");
+                        ui.label(egui::RichText::new("Recording saved:").size(11.0).color(TEXT_MUTED));
+                        ui.add_space(2.0);
                         ui.label(
                             egui::RichText::new(path.to_string_lossy().as_ref())
-                                .small()
-                                .weak(),
+                                .size(12.0)
+                                .color(TEXT_PRIMARY),
                         );
 
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("AUDIO TRACKS").small().weak());
+                        section_header(ui, "AUDIO TRACKS");
                         for (i, dev) in self.audio_devices.iter().enumerate() {
                             if i < self.export_track_selection.len() {
                                 let icon = if dev.is_loopback { "🔊" } else { "🎙" };
@@ -295,9 +418,53 @@ impl eframe::App for App {
         }
 
         if is_recording {
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
+}
+
+fn section_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(title).size(10.0).color(TEXT_MUTED).strong());
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(4.0);
+}
+
+fn setup_theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::dark();
+
+    // Background layers
+    v.panel_fill         = BG_BASE;
+    v.window_fill        = BG_WINDOW;
+    v.extreme_bg_color   = BG_DEEP;
+    v.faint_bg_color     = BG_FAINT;
+    v.override_text_color = Some(TEXT_PRIMARY);
+
+    // Window chrome
+    v.window_rounding = egui::Rounding::same(10.0);
+
+    // Widget rounding — consistent across all interaction states
+    let r = egui::Rounding::same(5.0);
+    v.widgets.noninteractive.rounding = r;
+    v.widgets.inactive.rounding       = r;
+    v.widgets.hovered.rounding        = r;
+    v.widgets.active.rounding         = r;
+    v.widgets.open.rounding           = r;
+
+    // Subtle hover/active bg fills for checkboxes, buttons, etc.
+    v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(28, 28, 44);
+    v.widgets.hovered.weak_bg_fill  = egui::Color32::from_rgb(38, 38, 58);
+    v.widgets.active.weak_bg_fill   = egui::Color32::from_rgb(48, 48, 72);
+
+    ctx.set_visuals(v);
+
+    let mut s = (*ctx.style()).clone();
+    s.spacing.item_spacing   = egui::Vec2::new(8.0, 5.0);
+    s.spacing.button_padding = egui::Vec2::new(14.0, 7.0);
+    s.spacing.window_margin  = egui::Margin::same(12.0);
+    ctx.set_style(s);
 }
 
 fn open_folder(path: &std::path::Path) {

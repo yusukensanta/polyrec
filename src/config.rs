@@ -104,6 +104,19 @@ mod tests {
     }
 
     #[test]
+    fn output_dir_survives_round_trip() {
+        let dir = tempdir().unwrap();
+        let expected = dir.path().join("recordings");
+        let cfg = Config {
+            output_dir: expected.clone(),
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.output_dir, expected);
+    }
+
+    #[test]
     fn save_and_load_roundtrip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
