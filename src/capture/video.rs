@@ -24,6 +24,7 @@ use windows::core::Interface;
 pub async fn run_video_capture(
     hwnd: HWND,
     clock: Arc<RecordingClock>,
+    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<VideoFrame>,
 ) -> Result<(), AppError> {
     unsafe {
@@ -106,6 +107,12 @@ pub async fn run_video_capture(
                 continue;
             }
         };
+
+        // Discard frame when paused — skip GPU readback to save CPU/memory bandwidth.
+        if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
+            continue;
+        }
 
         let surface = frame
             .Surface()
