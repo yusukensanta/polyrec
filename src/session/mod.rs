@@ -10,7 +10,7 @@ use crate::session::clock::RecordingClock;
 use crate::types::{AudioDevice, CaptureSource, SessionState, TrackId};
 use state::{transition, SessionAction};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -25,6 +25,7 @@ pub struct ActiveCapture {
     pub recorder_handle: JoinHandle<Result<PathBuf, AppError>>,
     pub recording_tx: mpsc::Sender<RecordingCommand>,
     pub clock: Arc<RecordingClock>,
+    pub pause_flag: Arc<AtomicBool>,
     pub output_path: PathBuf,
 }
 
@@ -62,11 +63,12 @@ impl SessionManager {
         source: CaptureSource,
         audio_devices: Vec<AudioDevice>,
         frame_count: Arc<AtomicU64>,
+        output_dir: &std::path::Path,
     ) -> PathBuf {
         let clock = RecordingClock::new();
+        let pause_flag = Arc::new(AtomicBool::new(false));
 
-        // Compute output path: ~/Videos/PolyRec/polyrec_<timestamp>.mp4
-        let output_path = make_output_path();
+        let output_path = make_output_path(output_dir);
 
         // Audio device specs for RecordingWriter (sample_rate, channels per track).
         // We use defaults here; the capture actor will start with WASAPI native format.
@@ -105,6 +107,7 @@ impl SessionManager {
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
         let hwnd_val = source.hwnd;
         let video_clock = Arc::clone(&clock);
+        let video_pause = Arc::clone(&pause_flag);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -115,7 +118,7 @@ impl SessionManager {
                 let hwnd = windows::Win32::Foundation::HWND(
                     hwnd_val as *mut core::ffi::c_void,
                 );
-                if let Err(e) = run_video_capture(hwnd, video_clock, video_tx).await {
+                if let Err(e) = run_video_capture(hwnd, video_clock, video_pause, video_tx).await {
                     tracing::error!("VideoCapture error: {e}");
                 }
             });
@@ -131,6 +134,7 @@ impl SessionManager {
             let track_id = TrackId::new(i as u32);
             let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
             let audio_clock = Arc::clone(&clock);
+            let audio_pause = Arc::clone(&pause_flag);
             let dev_id = dev.id.clone();
             let is_loopback = dev.is_loopback;
             let capture_handle = tokio::task::spawn_blocking(move || {
@@ -141,7 +145,7 @@ impl SessionManager {
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
                     if let Err(e) = run_audio_capture(
-                        dev_id, track_id, is_loopback, audio_clock, audio_tx,
+                        dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_tx,
                     )
                     .await
                     {
@@ -160,6 +164,7 @@ impl SessionManager {
             recorder_handle,
             recording_tx,
             clock,
+            pause_flag,
             output_path: output_path.clone(),
         });
 
@@ -190,6 +195,26 @@ impl SessionManager {
     pub fn is_idle(&self) -> bool {
         matches!(self.state, SessionState::Idle)
     }
+
+    pub fn pause_capture(&mut self) {
+        if let Some(active) = &self.active {
+            active.pause_flag.store(true, Ordering::SeqCst);
+            active.clock.pause();
+        }
+        self.apply(SessionAction::Pause);
+    }
+
+    pub fn resume_capture(&mut self) {
+        if let Some(active) = &self.active {
+            active.pause_flag.store(false, Ordering::SeqCst);
+            active.clock.resume();
+        }
+        self.apply(SessionAction::Resume);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        matches!(self.state, SessionState::Paused)
+    }
 }
 
 impl Default for SessionManager {
@@ -198,10 +223,8 @@ impl Default for SessionManager {
     }
 }
 
-fn make_output_path() -> PathBuf {
-    let base = dirs::video_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
-    let dir = base.join("PolyRec");
+fn make_output_path(base_dir: &std::path::Path) -> PathBuf {
+    let dir = base_dir.to_path_buf();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("Failed to create output directory {}: {e}", dir.display());
     }
@@ -238,7 +261,7 @@ mod tests {
 
     #[test]
     fn make_output_path_has_mp4_extension() {
-        let p = make_output_path();
+        let p = make_output_path(std::path::Path::new("."));
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
     }
 }

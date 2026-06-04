@@ -109,7 +109,7 @@ impl eframe::App for App {
         while let Some(event) = self.hotkey_listener.try_recv() {
             match event {
                 HotkeyEvent::StartStop => self.handle_rec_button(is_recording),
-                HotkeyEvent::Pause => {}
+                HotkeyEvent::Pause => self.handle_pause_button(),
                 HotkeyEvent::ToggleOverlay => {
                     self.overlay_enabled = !self.overlay_enabled;
                     self.config.overlay.enabled = self.overlay_enabled;
@@ -197,10 +197,13 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             section_header(ui, "STATUS");
 
-            if is_recording {
+            let is_paused = self.session.is_paused();
+            if is_recording || is_paused {
                 let elapsed = self
-                    .recording_start
-                    .map(|t| t.elapsed())
+                    .session
+                    .active
+                    .as_ref()
+                    .map(|a| a.clock.elapsed())
                     .unwrap_or_default();
                 let secs = elapsed.as_secs();
 
@@ -216,10 +219,16 @@ impl eframe::App for App {
                         egui::Sense::hover(),
                     );
                     ui.painter().circle_filled(rect.center(), 5.0, dot_col);
+                    let state_label = if is_paused { "PAUSED" } else { "RECORDING" };
+                    let state_color = if is_paused {
+                        egui::Color32::from_rgb(200, 160, 50)
+                    } else {
+                        egui::Color32::from_rgb(200, 80, 80)
+                    };
                     ui.label(
-                        egui::RichText::new("RECORDING")
+                        egui::RichText::new(state_label)
                             .size(10.0)
-                            .color(egui::Color32::from_rgb(200, 80, 80))
+                            .color(state_color)
                             .strong(),
                     );
                 });
@@ -319,29 +328,55 @@ impl eframe::App for App {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
 
-                let rec_label = if is_recording { "⏹ STOP" } else { "⏺ REC" };
-                let rec_color = if is_recording {
-                    egui::Color32::from_rgb(248, 113, 113)
-                } else {
-                    ACCENT_IDLE
-                };
-                let btn_bg = if is_recording { BG_BTN_STOP } else { BG_BTN_IDLE };
-
-                let btn = egui::Button::new(
-                    egui::RichText::new(rec_label).color(rec_color).size(18.0),
-                )
-                .fill(btn_bg)
-                .min_size(egui::Vec2::new(130.0, 52.0));
-
-                if ui.add(btn).clicked() {
-                    self.handle_rec_button(is_recording);
-                }
+                let is_paused = self.session.is_paused();
 
                 ui.label(
                     egui::RichText::new(format!("State: {:?}", self.session.state()))
                         .size(10.0)
                         .color(TEXT_MUTED),
                 );
+
+                if is_paused {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("▶ RESUME").color(ACCENT_IDLE).size(18.0),
+                    )
+                    .fill(BG_BTN_IDLE)
+                    .min_size(egui::Vec2::new(130.0, 52.0));
+                    if ui.add(btn).clicked() {
+                        self.handle_pause_button();
+                    }
+                } else if is_recording {
+                    ui.horizontal(|ui| {
+                        let stop_btn = egui::Button::new(
+                            egui::RichText::new("⏹ STOP")
+                                .color(egui::Color32::from_rgb(248, 113, 113))
+                                .size(18.0),
+                        )
+                        .fill(BG_BTN_STOP)
+                        .min_size(egui::Vec2::new(90.0, 52.0));
+                        if ui.add(stop_btn).clicked() {
+                            self.handle_rec_button(is_recording);
+                        }
+
+                        let pause_btn = egui::Button::new(
+                            egui::RichText::new("⏸").color(TEXT_MUTED).size(18.0),
+                        )
+                        .fill(egui::Color32::from_rgb(30, 30, 46))
+                        .min_size(egui::Vec2::new(36.0, 52.0));
+                        if ui.add(pause_btn).clicked() {
+                            self.handle_pause_button();
+                        }
+                    });
+                } else {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("⏺ REC").color(ACCENT_IDLE).size(18.0),
+                    )
+                    .fill(BG_BTN_IDLE)
+                    .min_size(egui::Vec2::new(130.0, 52.0));
+                    if ui.add(btn).clicked() {
+                        self.handle_rec_button(is_recording);
+                    }
+                }
             });
         });
 
@@ -349,8 +384,10 @@ impl eframe::App for App {
         if is_recording && self.overlay_enabled {
             let track_count = self.selected_audio.iter().filter(|&&b| b).count();
             let elapsed_secs = self
-                .recording_start
-                .map(|t| t.elapsed().as_secs())
+                .session
+                .active
+                .as_ref()
+                .map(|a| a.clock.elapsed().as_secs())
                 .unwrap_or(0);
 
             let screen_w = unsafe {
@@ -525,6 +562,9 @@ impl eframe::App for App {
         if matches!(self.export_state, ExportState::Running) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        if self.session.is_paused() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
     }
 }
 
@@ -577,8 +617,17 @@ fn open_folder(path: &std::path::Path) {
 }
 
 impl App {
+    fn handle_pause_button(&mut self) {
+        if self.session.is_recording() {
+            self.session.pause_capture();
+        } else if self.session.is_paused() {
+            self.session.resume_capture();
+        }
+    }
+
     fn handle_rec_button(&mut self, is_recording: bool) {
-        if is_recording {
+        let is_paused = self.session.is_paused();
+        if is_recording || is_paused {
             let path = self
                 .session
                 .active
@@ -609,6 +658,7 @@ impl App {
                 source,
                 selected_devices,
                 Arc::clone(&self.frame_count),
+                &self.config.output_dir,
             );
             self.recording_start = Some(Instant::now());
         }
