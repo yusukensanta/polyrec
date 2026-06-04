@@ -93,6 +93,7 @@ pub async fn run_audio_capture(
     track_id: TrackId,
     is_loopback: bool,
     clock: Arc<RecordingClock>,
+    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
 ) -> Result<(), AppError> {
     unsafe {
@@ -181,6 +182,11 @@ pub async fn run_audio_capture(
                     capture_client
                         .ReleaseBuffer(frames_available)
                         .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
+
+                    // Always release buffer first (above), then discard if paused.
+                    if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
 
                     let pts = clock.elapsed();
                     let audio = AudioSamples {
