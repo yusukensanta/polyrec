@@ -218,6 +218,44 @@ pub async fn run_audio_capture(
     Ok(())
 }
 
+/// Query the WASAPI mix format for a device without starting a capture stream.
+/// Returns `(sample_rate, channels)`. Falls back to `(48000, 2)` on any error.
+pub fn probe_audio_format(device_id: &str, is_loopback: bool) -> (u32, u16) {
+    unsafe { probe_audio_format_inner(device_id, is_loopback).unwrap_or((48000, 2)) }
+}
+
+unsafe fn probe_audio_format_inner(
+    device_id: &str,
+    is_loopback: bool,
+) -> Result<(u32, u16), ()> {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+    let enumerator: IMMDeviceEnumerator =
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|_| ())?;
+
+    let device = if device_id.is_empty() {
+        let flow = if is_loopback { eRender } else { eCapture };
+        enumerator
+            .GetDefaultAudioEndpoint(flow, eMultimedia)
+            .map_err(|_| ())?
+    } else {
+        let id: windows::core::HSTRING = device_id.into();
+        enumerator.GetDevice(&id).map_err(|_| ())?
+    };
+
+    let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
+    let mix_format = audio_client.GetMixFormat().map_err(|_| ())?;
+
+    let sample_rate = (*mix_format).nSamplesPerSec;
+    let channels = (*mix_format).nChannels;
+
+    if sample_rate == 0 || channels == 0 {
+        return Err(());
+    }
+
+    Ok((sample_rate, channels as u16))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +277,16 @@ mod tests {
             loopback.is_some(),
             "expected a loopback (render) device in the enumeration"
         );
+    }
+
+    #[test]
+    fn probe_audio_format_returns_valid_format() {
+        let devices = enumerate_audio_devices().expect("enumerate_audio_devices failed");
+        assert!(!devices.is_empty(), "need at least one device to probe");
+        for dev in &devices {
+            let (sample_rate, channels) = probe_audio_format(&dev.id, dev.is_loopback);
+            assert!(sample_rate > 0, "device '{}': sample_rate must be > 0", dev.name);
+            assert!(channels > 0, "device '{}': channels must be > 0", dev.name);
+        }
     }
 }
