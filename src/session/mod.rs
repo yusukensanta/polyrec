@@ -1,7 +1,7 @@
 pub mod clock;
 pub mod state;
 
-use crate::capture::audio::run_audio_capture;
+use crate::capture::audio::{probe_audio_format, run_audio_capture};
 use crate::capture::video::run_video_capture;
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::RecordingCommand;
@@ -70,12 +70,10 @@ impl SessionManager {
 
         let output_path = make_output_path(output_dir);
 
-        // Audio device specs for RecordingWriter (sample_rate, channels per track).
-        // We use defaults here; the capture actor will start with WASAPI native format.
-        // Plan 4 can wire the actual format back.
+        // Probe actual WASAPI mix format per device; fall back to (48000, 2) on error.
         let audio_specs: Vec<(u32, u16)> = audio_devices
             .iter()
-            .map(|_| (48000u32, 2u16))
+            .map(|dev| probe_audio_format(&dev.id, dev.is_loopback))
             .collect();
 
         // Resolve real window client dimensions via GetClientRect.
