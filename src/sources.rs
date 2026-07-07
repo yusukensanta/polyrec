@@ -125,13 +125,29 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
             let _ = DestroyIcon(hicon);
             return None;
         }
-        let width = bmp.bmWidth as u32;
-        let height = bmp.bmHeight as u32;
-        if width == 0 || height == 0 {
+        // BITMAP's width/height are signed (LONG); bmHeight in particular is
+        // legitimately negative for top-down DIBs, which is the normal
+        // representation for 32-bit alpha-channel icons. `as u32` on a negative
+        // value reinterprets the two's-complement bits into a huge positive
+        // number instead of erroring, which would then flow into the buffer-size
+        // multiplication below and the GetDIBits scanline count. Shell icons are
+        // always small, so bound them rather than trust an unusual value.
+        let width = bmp.bmWidth.unsigned_abs();
+        let height = bmp.bmHeight.unsigned_abs();
+        const MAX_ICON_DIMENSION: u32 = 512;
+        if width == 0 || height == 0 || width > MAX_ICON_DIMENSION || height > MAX_ICON_DIMENSION {
             let _ = DeleteObject(icon_info.hbmColor);
             let _ = DestroyIcon(hicon);
             return None;
         }
+        let Some(buffer_len) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(4))
+        else {
+            let _ = DeleteObject(icon_info.hbmColor);
+            let _ = DestroyIcon(hicon);
+            return None;
+        };
 
         let hdc = GetDC(None);
         let mut bmi = BITMAPINFO {
@@ -146,7 +162,7 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
             },
             ..Default::default()
         };
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let mut pixels = vec![0u8; buffer_len];
         let lines = GetDIBits(
             hdc,
             icon_info.hbmColor,

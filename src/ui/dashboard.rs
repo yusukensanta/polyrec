@@ -169,7 +169,7 @@ impl eframe::App for App {
         }
 
         // Show export dialog once recorder has finished writing the file
-        if self.finalizing_handle.as_ref().map_or(false, |h| h.is_finished()) {
+        if self.finalizing_handle.as_ref().is_some_and(|h| h.is_finished()) {
             let handle = self.finalizing_handle.take().unwrap();
             self.finalizing_path = None;
             match tokio::runtime::Handle::current().block_on(handle) {
@@ -225,7 +225,7 @@ impl eframe::App for App {
                             .on_hover_text("Click to open the release page")
                             .clicked();
                         if clicked {
-                            let _ = std::process::Command::new("explorer").arg(update_url).spawn();
+                            open_url(&update_url);
                         }
                     }
                 });
@@ -253,7 +253,9 @@ impl eframe::App for App {
                             let fill   = if selected { BG_SELECTED } else { BG_CARD };
                             let border = if selected { BORDER_SEL } else { BORDER };
 
-                            if !self.source_icon_textures.contains_key(&i) {
+                            if let std::collections::hash_map::Entry::Vacant(entry) =
+                                self.source_icon_textures.entry(i)
+                            {
                                 if let Some((rgba, w, h)) = &source.icon_rgba {
                                     let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
                                     let tex = ui.ctx().load_texture(
@@ -261,7 +263,7 @@ impl eframe::App for App {
                                         image,
                                         egui::TextureOptions::LINEAR,
                                     );
-                                    self.source_icon_textures.insert(i, tex);
+                                    entry.insert(tex);
                                 }
                             }
 
@@ -990,9 +992,29 @@ fn setup_theme(ctx: &egui::Context) {
     ctx.set_style(s);
 }
 
+/// Full path rather than a bare "explorer" name — avoids relying on Windows'
+/// executable search order (a directory ahead of System32 in PATH could
+/// otherwise shadow the real explorer.exe).
+const EXPLORER_EXE: &str = r"C:\Windows\explorer.exe";
+
 fn open_folder(path: &std::path::Path) {
     let folder = path.parent().unwrap_or(path);
-    let _ = std::process::Command::new("explorer").arg(folder).spawn();
+    let _ = std::process::Command::new(EXPLORER_EXE).arg(folder).spawn();
+}
+
+/// Only ever called with a GitHub release page URL (see `update_check.rs`), but
+/// validated anyway since it's the one place in the app that opens a string
+/// pulled from a network response rather than a local path: an `explorer.exe`
+/// argument that turned out to be a UNC path (`\\host\share`) rather than a URL
+/// would make Explorer silently attempt an SMB connection using the current
+/// Windows credentials -- a known NTLM-hash-leak technique. Requiring an
+/// `https://github.com/` prefix rules that out.
+fn open_url(url: &str) {
+    if !url.starts_with("https://github.com/") {
+        tracing::warn!("refusing to open unexpected update URL: {url}");
+        return;
+    }
+    let _ = std::process::Command::new(EXPLORER_EXE).arg(url).spawn();
 }
 
 impl App {
