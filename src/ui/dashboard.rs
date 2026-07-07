@@ -14,21 +14,26 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 // WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
-                    const BG_DEEP:      egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
-                    const BG_WINDOW:    egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
-                    const BG_FAINT:     egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
-                    const BG_BASE:      egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
-                    const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
-                    const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
-                    const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
-                    const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
-                    const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x86, 0x86, 0xCF);
-                    const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
-                    const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
-                    const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
-                    const ACCENT_IDLE:  egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
-                    const BG_BTN_STOP:  egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
-                    const BG_BTN_IDLE:  egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
+const BG_DEEP: egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
+const BG_WINDOW: egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
+const BG_FAINT: egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
+const BG_BASE: egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
+const BG_CARD: egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
+const BG_SELECTED: egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
+const BORDER: egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
+const BORDER_SEL: egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
+const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x86, 0x86, 0xCF);
+const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
+const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
+const ACCENT_REC: egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
+const ACCENT_IDLE: egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
+const ACCENT_PAUSE: egui::Color32 = egui::Color32::from_rgb(224, 178, 56);
+const BG_BTN_STOP: egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
+const BG_BTN_IDLE: egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
+/// Larger, pill-like rounding used only for the primary REC/STOP/RESUME
+/// action buttons, so they read as the one clearly primary action instead
+/// of blending into every other rounded rectangle in the UI.
+const ROUNDING_PRIMARY_BTN: f32 = 14.0;
 
 enum ExportState {
     Idle,
@@ -180,9 +185,17 @@ impl eframe::App for App {
 
         // ── Left panel ────────────────────────────────────────────────────────
         egui::SidePanel::left("source_panel")
-            .min_width(200.0)
+            .default_width(260.0)
+            .width_range(200.0..=380.0)
             .show(ctx, |ui| {
                 section_header(ui, "CAPTURE SOURCE");
+                if self.sources.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No visible windows found — try Refresh.")
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                }
                 egui::ScrollArea::vertical()
                     .max_height(200.0)
                     .show(ui, |ui| {
@@ -232,15 +245,26 @@ impl eframe::App for App {
                                     });
                                 });
 
-                            if inner.response.interact(egui::Sense::click()).clicked() {
+                            let response = inner
+                                .response
+                                .interact(egui::Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if response.clicked() {
                                 self.selected_source = Some(i);
                             }
-                            ui.add_space(3.0);
+                            ui.add_space(4.0);
                         }
                     });
 
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 section_header(ui, "AUDIO");
+                if self.audio_devices.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No audio devices found.")
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                }
                 for (i, dev) in self.audio_devices.iter().enumerate() {
                     let icon = if dev.is_loopback { "🔊" } else { "🎙" };
                     ui.checkbox(
@@ -299,11 +323,10 @@ impl eframe::App for App {
                     );
                     ui.painter().circle_filled(rect.center(), 5.0, dot_col);
                     let state_label = if is_paused { "PAUSED" } else { "RECORDING" };
-                    let state_color = if is_paused {
-                        egui::Color32::from_rgb(200, 160, 50)
-                    } else {
-                        egui::Color32::from_rgb(200, 80, 80)
-                    };
+                    // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
+                    // which previously computed to 4.18:1 contrast on BG_BASE (fails
+                    // WCAG AA's 4.5:1 minimum for normal text). ACCENT_REC is 5.54:1.
+                    let state_color = if is_paused { ACCENT_PAUSE } else { ACCENT_REC };
                     ui.label(
                         egui::RichText::new(state_label)
                             .size(10.0)
@@ -312,7 +335,7 @@ impl eframe::App for App {
                     );
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(8.0);
 
                 // Large monospace timer
                 ui.label(
@@ -387,11 +410,12 @@ impl eframe::App for App {
 
             if ui
                 .add(egui::Button::new(egui::RichText::new("⚙ Quality").color(ACCENT_SECONDARY)))
+                .on_hover_text("FPS, codec, resolution, and bitrate for the next recording")
                 .clicked()
             {
                 self.show_quality_popup = true;
             }
-            ui.add_space(4.0);
+            ui.add_space(8.0);
 
             ui.horizontal(|ui| {
                 let btn_width = 74.0;
@@ -436,6 +460,7 @@ impl eframe::App for App {
                         egui::RichText::new("▶ RESUME").color(ACCENT_IDLE).size(18.0),
                     )
                     .fill(BG_BTN_IDLE)
+                    .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     if ui.add(btn).clicked() {
                         self.handle_pause_button();
@@ -444,10 +469,11 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         let stop_btn = egui::Button::new(
                             egui::RichText::new("⏹ STOP")
-                                .color(egui::Color32::from_rgb(248, 113, 113))
+                                .color(ACCENT_REC)
                                 .size(18.0),
                         )
                         .fill(BG_BTN_STOP)
+                        .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
                         .min_size(egui::Vec2::new(90.0, 52.0));
                         if ui.add(stop_btn).clicked() {
                             self.handle_rec_button(is_recording);
@@ -457,8 +483,8 @@ impl eframe::App for App {
                             egui::RichText::new("⏸").color(TEXT_MUTED).size(18.0),
                         )
                         .fill(egui::Color32::from_rgb(30, 30, 46))
-                        .min_size(egui::Vec2::new(36.0, 52.0));
-                        if ui.add(pause_btn).clicked() {
+                        .min_size(egui::Vec2::new(44.0, 52.0));
+                        if ui.add(pause_btn).on_hover_text("Pause").clicked() {
                             self.handle_pause_button();
                         }
                     });
@@ -467,6 +493,7 @@ impl eframe::App for App {
                         egui::RichText::new("⏺ REC").color(ACCENT_IDLE).size(18.0),
                     )
                     .fill(BG_BTN_IDLE)
+                    .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     if ui.add(btn).clicked() {
                         self.handle_rec_button(is_recording);
@@ -690,7 +717,7 @@ impl eframe::App for App {
                             ui.label(
                                 egui::RichText::new(&msg)
                                     .size(11.0)
-                                    .color(egui::Color32::from_rgb(248, 80, 80)),
+                                    .color(ACCENT_REC),
                             );
                             ui.add_space(4.0);
                             if ui.button("Close").clicked() {
@@ -769,9 +796,15 @@ fn setup_theme(ctx: &egui::Context) {
     ctx.set_visuals(v);
 
     let mut s = (*ctx.style()).clone();
-    s.spacing.item_spacing   = egui::Vec2::new(8.0, 5.0);
-    s.spacing.button_padding = egui::Vec2::new(14.0, 7.0);
-    s.spacing.window_margin  = egui::Margin::same(12.0);
+    // egui's default interact_size.y (18.0) is well under Fluent's 32px / Material's
+    // 36-40dp desktop minimum control height — every button in the app (Refresh,
+    // Browse, Quality, Close, etc.) was inheriting that undersized floor. 32.0 is
+    // the Fluent minimum and lands on the 8px spacing grid used everywhere else here.
+    s.spacing.interact_size  = egui::Vec2::new(40.0, 32.0);
+    s.spacing.item_spacing   = egui::Vec2::new(8.0, 8.0);
+    s.spacing.button_padding = egui::Vec2::new(14.0, 8.0);
+    s.spacing.window_margin  = egui::Margin::same(16.0);
+    s.spacing.indent         = 16.0;
     ctx.set_style(s);
 }
 
