@@ -4,7 +4,7 @@ pub mod state;
 use crate::capture::audio::{
     run_audio_capture, run_process_loopback_capture, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
 };
-use crate::capture::video::run_video_capture;
+use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::RecordingCommand;
 use crate::error::AppError;
@@ -80,29 +80,39 @@ impl SessionManager {
             .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
             .collect();
 
-        // Resolve real window client dimensions via GetClientRect.
+        // Query the size Windows.Graphics.Capture will actually deliver frames at —
+        // NOT GetClientRect, which excludes the title bar/borders and doesn't match
+        // WGC's window capture size. Used to size the capture-side staging texture;
+        // does NOT need to match the encoder (frames are scaled to output_width/height
+        // below), only itself internally (frame pool vs. staging texture).
         let real_hwnd = windows::Win32::Foundation::HWND(
             source.hwnd as *mut core::ffi::c_void,
         );
-        let (width, height) = unsafe {
-            let mut rect = windows::Win32::Foundation::RECT::default();
-            if windows::Win32::UI::WindowsAndMessaging::GetClientRect(real_hwnd, &mut rect).is_ok() {
-                // H264 requires even width/height for 4:2:0 chroma subsampling;
-                // round down so SetInputMediaType doesn't reject odd client rects.
-                let w = ((rect.right - rect.left).max(2) as u32) & !1;
-                let h = ((rect.bottom - rect.top).max(2) as u32) & !1;
-                (w, h)
-            } else {
-                tracing::warn!("GetClientRect failed for hwnd {:x}; using 1920x1080", source.hwnd);
+        let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
+            Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
+            Err(e) => {
+                tracing::warn!("query_capture_size failed for hwnd {:x}: {e}; using 1920x1080", source.hwnd);
                 (1920u32, 1080u32)
+            }
+        };
+
+        // Recordings default to the display's native resolution, not the captured
+        // window's/game's own size — a game running windowed at a lower resolution
+        // shouldn't produce a smaller-than-expected recording. Captured frames are
+        // upscaled/downscaled to this before encoding (see capture::video::scale_bgra).
+        let (output_width, output_height) = match query_display_size(real_hwnd) {
+            Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
+            Err(e) => {
+                tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", source.hwnd);
+                (capture_width, capture_height)
             }
         };
 
         // Spawn RecordingActor
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
-            width,
-            height,
+            output_width,
+            output_height,
             RECORDING_FPS,
             audio_specs,
         );
@@ -122,7 +132,7 @@ impl SessionManager {
                 let hwnd = windows::Win32::Foundation::HWND(
                     hwnd_val as *mut core::ffi::c_void,
                 );
-                if let Err(e) = run_video_capture(hwnd, video_clock, video_pause, video_tx).await {
+                if let Err(e) = run_video_capture(hwnd, capture_width, capture_height, output_width, output_height, video_clock, video_pause, video_tx).await {
                     tracing::error!("VideoCapture error: {e}");
                 }
             });
@@ -292,6 +302,60 @@ mod tests {
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
     }
 
+    /// Verifies the recorded video's actual encoded resolution matches the display's
+    /// resolution, not the captured window's native size.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn recording_resolution_matches_display() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::capture::video::query_display_size;
+        use crate::sources::enumerate_sources;
+        use windows::Win32::Media::MediaFoundation::{MFCreateSourceReaderFromURL, MF_MT_FRAME_SIZE};
+
+        let sources = enumerate_sources();
+        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
+        let (expected_w, expected_h) = query_display_size(hwnd).expect("query_display_size failed");
+
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path());
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture returned None");
+        let finalized_path = handle.await.expect("recorder task panicked").expect("finalize failed");
+
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            let _ = windows::Win32::Media::MediaFoundation::MFStartup(
+                windows::Win32::Media::MediaFoundation::MF_VERSION,
+                windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
+            );
+            use windows::Win32::Media::MediaFoundation::{MFMediaType_Video, MF_MT_MAJOR_TYPE};
+            let url = windows::core::HSTRING::from(finalized_path.to_str().unwrap());
+            let reader: windows::Win32::Media::MediaFoundation::IMFSourceReader =
+                MFCreateSourceReaderFromURL(&url, None).expect("MFCreateSourceReaderFromURL");
+            // Container stream order isn't guaranteed — find the video stream by type.
+            let mut video_type = None;
+            for i in 0..4u32 {
+                if let Ok(t) = reader.GetNativeMediaType(i, 0) {
+                    if t.GetGUID(&MF_MT_MAJOR_TYPE).unwrap_or_default() == MFMediaType_Video {
+                        video_type = Some(t);
+                        break;
+                    }
+                }
+            }
+            let video_type = video_type.expect("no video stream found");
+            let packed = video_type.GetUINT64(&MF_MT_FRAME_SIZE).expect("GetUINT64 frame_size");
+            let actual_w = (packed >> 32) as u32;
+            let actual_h = (packed & 0xFFFF_FFFF) as u32;
+            println!("display: {expected_w}x{expected_h}, encoded: {actual_w}x{actual_h}");
+            assert_eq!(actual_w, expected_w.max(2) & !1);
+            assert_eq!(actual_h, expected_h.max(2) & !1);
+        }
+    }
+
     /// End-to-end: real window capture + real audio devices, through the same
     /// start_capture/stop_capture path the GUI uses. Needs a display and audio
     /// endpoints, so it's ignored by default — run with `--ignored --nocapture`.
@@ -322,6 +386,16 @@ mod tests {
         assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
         println!("frames captured: {}", frame_count.load(Ordering::Relaxed));
         println!("output size: {} bytes", metadata.len());
+
+        // Confirm the remux stream-type discovery fix: exporting with all audio
+        // tracks selected must still succeed and produce a valid, non-empty file
+        // regardless of physical stream order in the container.
+        let export_out = dir.path().join("export_check.mp4");
+        let export_result = crate::encode::remux::remux(&finalized_path, &export_out, &[0, 1])
+            .expect("remux with both audio tracks failed");
+        let export_meta = std::fs::metadata(&export_result).expect("remuxed export file missing");
+        println!("export size: {} bytes", export_meta.len());
+        assert!(export_meta.len() > 0, "exported file is empty");
     }
 
     /// Same as `full_capture_produces_nonempty_file` but with `app_audio_only = true`,

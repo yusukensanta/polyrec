@@ -28,8 +28,12 @@ pub const TARGET_CHANNELS: u16 = 2;
 /// Convert interleaved `input` (native `channels` per frame) to interleaved stereo.
 /// - 1 channel: duplicated to L=R (no information loss)
 /// - 2 channels: passed through unchanged
-/// - >2 channels: all channels averaged equally into both L and R (simple,
-///   safe fold-down; not a proper Lo/Ro downmix)
+/// - >2 channels: take channels 0/1 (front-left/front-right) directly. Per the
+///   WAVEFORMATEXTENSIBLE channel-mask convention, front L/R are always present at
+///   indices 0/1 regardless of total channel count — averaging all N channels
+///   instead (an earlier version of this code did) dilutes the signal severely
+///   whenever surround/center/LFE channels are silent, which is the common case:
+///   most content is plain stereo upmixed into the device's wider mix format.
 fn to_stereo(input: &[f32], channels: u16) -> Vec<f32> {
     match channels {
         0 => Vec::new(),
@@ -39,10 +43,7 @@ fn to_stereo(input: &[f32], channels: u16) -> Vec<f32> {
             let n = n as usize;
             input
                 .chunks_exact(n)
-                .flat_map(|frame| {
-                    let avg = frame.iter().sum::<f32>() / n as f32;
-                    [avg, avg]
-                })
+                .flat_map(|frame| [frame[0], frame[1]])
                 .collect()
         }
     }
@@ -567,10 +568,10 @@ mod tests {
     }
 
     #[test]
-    fn to_stereo_multichannel_folds_down() {
-        // 4 channels, one frame: [1,2,3,4] -> avg 2.5 -> [2.5, 2.5]
+    fn to_stereo_multichannel_takes_front_lr() {
+        // 4 channels, one frame: [FL, FR, C, LFE] -> keep FL/FR, drop the rest
         let out = to_stereo(&[1.0, 2.0, 3.0, 4.0], 4);
-        assert_eq!(out, vec![2.5, 2.5]);
+        assert_eq!(out, vec![1.0, 2.0]);
     }
 
     #[test]

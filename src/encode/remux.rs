@@ -4,11 +4,40 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{FALSE, TRUE};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateSinkWriterFromURL,
-    MFCreateSourceReaderFromURL, MFShutdown, MFStartup, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_VERSION, MFSTARTUP_FULL,
+    MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video, MFShutdown, MFStartup,
+    MF_MT_MAJOR_TYPE, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFSTARTUP_FULL,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::core::HSTRING;
+
+/// Media Foundation's sink writer does not guarantee output track order matches
+/// `AddStream` call order — it can depend on which encoder actually flushes first.
+/// Never assume "stream 0 = video, 1.. = audio"; always find streams by major type.
+struct StreamLayout {
+    video: u32,
+    audio: Vec<u32>,
+}
+
+unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<StreamLayout, AppError> {
+    let mut video = None;
+    let mut audio = Vec::new();
+    for i in 0.. {
+        let t: IMFMediaType = match reader.GetNativeMediaType(i, 0) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        let major = t
+            .GetGUID(&MF_MT_MAJOR_TYPE)
+            .map_err(|e| AppError::Encode(format!("GetGUID major_type (stream {i}): {e}")))?;
+        if major == MFMediaType_Video {
+            video = video.or(Some(i));
+        } else if major == MFMediaType_Audio {
+            audio.push(i);
+        }
+    }
+    let video = video.ok_or_else(|| AppError::Encode("no video stream found in input".into()))?;
+    Ok(StreamLayout { video, audio })
+}
 
 // 0xFFFFFFFE = MF_SOURCE_READER_ANY_STREAM
 const MF_SOURCE_READER_ANY_STREAM: u32 = 0xFFFF_FFFE;
@@ -50,19 +79,25 @@ unsafe fn do_remux(
     let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&input_url, None)
         .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL: {e}")))?;
 
+    let layout = discover_stream_layout(&reader)?;
+
     // Disable all streams, then re-enable desired ones
     reader
         .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE)
         .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
     reader
-        .SetStreamSelection(0, TRUE)
+        .SetStreamSelection(layout.video, TRUE)
         .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
-    // PolyRec recordings always have exactly one video stream at index 0
-    // followed by N audio streams at indices 1..=N in capture order.
-    // audio_track_indices are 0-based logical audio indices → stream idx+1.
+    // audio_track_indices are 0-based logical indices into the discovered audio
+    // stream list (in the order they appear in the source), NOT raw stream indices —
+    // the sink writer does not guarantee AddStream order matches output track order.
     for &idx in audio_track_indices {
+        let src_idx = *layout
+            .audio
+            .get(idx)
+            .ok_or_else(|| AppError::Encode(format!("no audio track at logical index {idx}")))?;
         reader
-            .SetStreamSelection((idx + 1) as u32, TRUE)
+            .SetStreamSelection(src_idx, TRUE)
             .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {idx}): {e}")))?;
     }
 
@@ -71,16 +106,15 @@ unsafe fn do_remux(
     // SetCurrentMediaType with that same type tells the reader to emit
     // compressed bytes without decoding.
     let video_type: IMFMediaType = reader
-        .GetNativeMediaType(0, 0)
+        .GetNativeMediaType(layout.video, 0)
         .map_err(|e| AppError::Encode(format!("GetNativeMediaType(video): {e}")))?;
     reader
-        .SetCurrentMediaType(0, None, &video_type)
+        .SetCurrentMediaType(layout.video, None, &video_type)
         .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(video): {e}")))?;
 
     let mut audio_types: Vec<(u32, IMFMediaType)> = Vec::new();
-    // Same index mapping as above: audio_track_indices are 0-based → stream idx+1.
     for &idx in audio_track_indices {
-        let src_idx = (idx + 1) as u32;
+        let src_idx = layout.audio[idx];
         let t: IMFMediaType = reader
             .GetNativeMediaType(src_idx, 0)
             .map_err(|e| AppError::Encode(format!("GetNativeMediaType(audio {idx}): {e}")))?;
@@ -103,7 +137,7 @@ unsafe fn do_remux(
     writer
         .SetInputMediaType(vsink, &video_type, None)
         .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
-    source_to_sink.insert(0, vsink);
+    source_to_sink.insert(layout.video, vsink);
 
     for (src_idx, audio_type) in &audio_types {
         let asink = writer
@@ -173,6 +207,7 @@ unsafe fn do_remux(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::encode::RecordingWriter;
     use crate::types::{AudioSamples, TrackId, VideoFrame};
     use std::time::Duration;

@@ -7,8 +7,8 @@ use windows::Win32::Media::MediaFoundation::{
     MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_ARGB32, MFVideoFormat_H264,
     MFVideoInterlace_Progressive, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
     MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
-    MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFSTARTUP_FULL,
+    MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFSTARTUP_FULL,
 };
 use windows::core::HSTRING;
 
@@ -198,6 +198,12 @@ unsafe fn make_video_input_type(
         MFVideoInterlace_Progressive.0 as u32,
     )
     .map_err(|e| AppError::Encode(format!("SetUINT32 interlace: {e}")))?;
+    // Our pixel buffer is top-down (D3D11's natural row order, preserved by the
+    // straight row-by-row copy in capture/video.rs). Without this, the color
+    // converter defaults to assuming bottom-up (classic DIB convention), which
+    // flips the encoded video vertically. Positive stride = top-down.
+    t.SetUINT32(&MF_MT_DEFAULT_STRIDE, width * 4)
+        .map_err(|e| AppError::Encode(format!("SetUINT32 default_stride: {e}")))?;
     Ok(t)
 }
 

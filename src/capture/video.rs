@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem,
 };
+use windows::Graphics::SizeInt32;
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HWND;
@@ -20,9 +21,82 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::Interface;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+
+/// Query the actual size Windows.Graphics.Capture will deliver frames at for this
+/// window. This is what `run_video_capture` below captures at — NOT `GetClientRect`,
+/// which excludes the title bar/borders and does not match WGC's window capture size.
+/// Callers must use this (not GetClientRect) to size the encoder, or captured frames
+/// will be written at the wrong stride and appear skewed/distorted.
+pub fn query_capture_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+        let interop: IGraphicsCaptureItemInterop =
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .map_err(|e| AppError::Capture(format!("IGraphicsCaptureItemInterop factory: {e}")))?;
+        let item: GraphicsCaptureItem = interop
+            .CreateForWindow(hwnd)
+            .map_err(|e| AppError::Capture(format!("CreateForWindow: {e}")))?;
+        let size = item
+            .Size()
+            .map_err(|e| AppError::Capture(format!("item.Size: {e}")))?;
+        Ok((size.Width as u32, size.Height as u32))
+    }
+}
+
+/// Query the resolution of the monitor a window is on. Used so recordings default to
+/// the display's native resolution rather than whatever size the captured window/game
+/// happens to be rendering at (a game running in a smaller windowed/internal
+/// resolution shouldn't produce a smaller-than-expected recording — captured frames
+/// are upscaled to this size before encoding).
+pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
+    unsafe {
+        let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmonitor, &mut info).as_bool() {
+            return Err(AppError::Capture("GetMonitorInfoW failed".into()));
+        }
+        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
+        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
+        Ok((w, h))
+    }
+}
+
+/// Nearest-neighbor resize of an interleaved BGRA8 buffer. Used to upscale/downscale
+/// captured window content to the target encoder resolution (the display's, not the
+/// window's native size).
+fn scale_bgra(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
+    if src_w == dst_w && src_h == dst_h {
+        return src.to_vec();
+    }
+    let (src_w, src_h, dst_w, dst_h) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
+    let mut dst = vec![0u8; dst_w * dst_h * 4];
+    for y in 0..dst_h {
+        let src_y = (y * src_h) / dst_h;
+        for x in 0..dst_w {
+            let src_x = (x * src_w) / dst_w;
+            let src_idx = (src_y * src_w + src_x) * 4;
+            let dst_idx = (y * dst_w + x) * 4;
+            dst[dst_idx..dst_idx + 4].copy_from_slice(&src[src_idx..src_idx + 4]);
+        }
+    }
+    dst
+}
 
 pub async fn run_video_capture(
     hwnd: HWND,
+    capture_width: u32,
+    capture_height: u32,
+    output_width: u32,
+    output_height: u32,
     clock: Arc<RecordingClock>,
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<VideoFrame>,
@@ -59,11 +133,14 @@ pub async fn run_video_capture(
             .map_err(|e| AppError::Capture(format!("CreateForWindow: {e}")))?
     };
 
-    let size = item
-        .Size()
-        .map_err(|e| AppError::Capture(format!("item.Size: {e}")))?;
-    let width = size.Width as u32;
-    let height = size.Height as u32;
+    // Use the caller-supplied (already-clamped-even) size for the frame pool, not
+    // item.Size() — this must match exactly what the encoder was configured with.
+    // WGC crops/pads delivered frames to fit a requested size different from the
+    // item's natural size, so this is safe even if it differs by a pixel or two.
+    let size = SizeInt32 {
+        Width: capture_width as i32,
+        Height: capture_height as i32,
+    };
 
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &winrt_device,
@@ -83,8 +160,8 @@ pub async fn run_video_capture(
 
     // Staging texture descriptor — created once, reused each frame.
     let staging_desc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
+        Width: capture_width,
+        Height: capture_height,
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -157,9 +234,9 @@ pub async fn run_video_capture(
                 .map_err(|e| AppError::Capture(format!("Map: {e}")))?;
 
             let row_pitch = mapped.RowPitch as usize;
-            let packed_row = width as usize * 4;
-            let mut pixel_data = vec![0u8; height as usize * packed_row];
-            for row in 0..height as usize {
+            let packed_row = capture_width as usize * 4;
+            let mut pixel_data = vec![0u8; capture_height as usize * packed_row];
+            for row in 0..capture_height as usize {
                 let src = (mapped.pData as *const u8).add(row * row_pitch);
                 let dst = pixel_data.as_mut_ptr().add(row * packed_row);
                 std::ptr::copy_nonoverlapping(src, dst, packed_row);
@@ -167,7 +244,9 @@ pub async fn run_video_capture(
             device.d3d_context.Unmap(&staging_res, 0);
 
             pts = clock.elapsed();
-            data = pixel_data;
+            // Upscale/downscale to the target output resolution (the display's, not
+            // necessarily the captured window's native size).
+            data = scale_bgra(&pixel_data, capture_width, capture_height, output_width, output_height);
         }
 
         let video_frame = VideoFrame { pts, data };
@@ -180,4 +259,36 @@ pub async fn run_video_capture(
     let _ = frame_pool.Close();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_bgra_identity_when_sizes_match() {
+        let src = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let out = scale_bgra(&src, 2, 1, 2, 1);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn scale_bgra_upscales_2x() {
+        // 1x1 BGRA pixel -> 2x2, every output pixel should equal the source pixel
+        let src = vec![10u8, 20, 30, 40];
+        let out = scale_bgra(&src, 1, 1, 2, 2);
+        assert_eq!(out.len(), 2 * 2 * 4);
+        for chunk in out.chunks(4) {
+            assert_eq!(chunk, &[10, 20, 30, 40]);
+        }
+    }
+
+    #[test]
+    fn scale_bgra_downscales() {
+        // 2x2 -> 1x1: nearest-neighbor picks one of the four source pixels
+        let src: Vec<u8> = (0..16).collect();
+        let out = scale_bgra(&src, 2, 2, 1, 1);
+        assert_eq!(out.len(), 4);
+        assert!(src.chunks(4).any(|px| px == out.as_slice()));
+    }
 }
