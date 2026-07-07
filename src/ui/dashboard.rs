@@ -2,9 +2,10 @@ use crate::capture::audio::enumerate_audio_devices;
 use crate::config::Config;
 use crate::encode::remux::remux;
 use crate::hotkeys::{HotkeyEvent, HotkeyListener};
+use crate::i18n::Strings;
 use crate::session::{state::SessionAction, EncodeSettings, SessionManager};
 use crate::sources::enumerate_sources;
-use crate::types::{AudioDevice, CaptureSource};
+use crate::types::{AudioDevice, CaptureSource, SessionState};
 use eframe::egui;
 use rfd::FileDialog;
 use std::path::PathBuf;
@@ -143,6 +144,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_recording = self.session.is_recording();
         let frames = self.frame_count.load(Ordering::Relaxed);
+        let s: &'static Strings = self.config.lang().strings();
 
         // Poll update-check result (one-shot; None result also clears the receiver
         // so we stop polling a channel whose sender has already sent its one message)
@@ -205,22 +207,18 @@ impl eframe::App for App {
                     self.last_output_path = Some(path);
                     self.show_export_dialog = true;
                     if disk_full {
-                        self.error_message = Some(
-                            "Recording stopped automatically — your disk ran low on free \
-                             space (below 500 MB). The recording up to that point was saved."
-                                .to_string(),
-                        );
+                        self.error_message = Some(s.disk_full_mid_recording.to_string());
                     }
                 }
                 Ok(Err(e)) => {
                     tracing::error!("recording finalize failed: {e}");
                     self.show_export_dialog = false;
-                    self.error_message = Some(format!("Recording failed: {e}"));
+                    self.error_message = Some(format!("{}{e}", s.recording_failed_prefix));
                 }
                 Err(e) => {
                     tracing::error!("recorder task did not complete cleanly: {e}");
                     self.show_export_dialog = false;
-                    self.error_message = Some(format!("Recording ended unexpectedly: {e}"));
+                    self.error_message = Some(format!("{}{e}", s.recording_ended_unexpectedly_prefix));
                 }
             }
         }
@@ -240,7 +238,7 @@ impl eframe::App for App {
                         .color(TEXT_MUTED),
                 );
                 ui.separator();
-                if ui.add(accent_button("⟳ Refresh", ACCENT_SECONDARY)).clicked() {
+                if ui.add(accent_button(s.refresh, ACCENT_SECONDARY)).clicked() {
                     self.sources = enumerate_sources();
                     self.source_icon_textures.clear();
                     self.selected_source = None;
@@ -250,16 +248,23 @@ impl eframe::App for App {
                     self.export_track_selection = vec![true; n];
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.overlay_enabled { "Overlay: ON" } else { "Overlay: OFF" };
+                    let label = if self.overlay_enabled { s.overlay_on } else { s.overlay_off };
                     if ui.add(accent_button(label, ACCENT_SECONDARY)).clicked() {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
                     }
+                    let lang = self.config.lang();
+                    if ui.add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY)).clicked() {
+                        self.config.language = lang.toggle().config_value().to_string();
+                        if let Err(e) = self.config.save() {
+                            tracing::error!("failed to save config: {e}");
+                        }
+                    }
                     if let Some(update) = &self.update_available {
                         let update_url = update.url.clone();
                         let clicked = ui
-                            .add(accent_button(&format!("⬆ {} available", update.version), ACCENT_SECONDARY))
-                            .on_hover_text("Click to open the release page")
+                            .add(accent_button(&format!("⬆ {} {}", update.version, s.update_available_suffix), ACCENT_SECONDARY))
+                            .on_hover_text(s.update_tooltip)
                             .clicked();
                         if clicked {
                             open_url(&update_url);
@@ -274,10 +279,10 @@ impl eframe::App for App {
             .default_width(260.0)
             .width_range(200.0..=380.0)
             .show(ctx, |ui| {
-                section_header(ui, "CAPTURE SOURCE");
+                section_header(ui, s.capture_source_header);
                 if self.sources.is_empty() {
                     ui.label(
-                        egui::RichText::new("No visible windows found — try Refresh.")
+                        egui::RichText::new(s.no_windows_found)
                             .size(12.0)
                             .color(TEXT_MUTED),
                     );
@@ -345,10 +350,10 @@ impl eframe::App for App {
                     });
 
                 ui.add_space(12.0);
-                section_header(ui, "AUDIO");
+                section_header(ui, s.audio_header);
                 if self.audio_devices.is_empty() {
                     ui.label(
-                        egui::RichText::new("No audio devices found.")
+                        egui::RichText::new(s.no_audio_devices)
                             .size(12.0)
                             .color(TEXT_MUTED),
                     );
@@ -371,15 +376,15 @@ impl eframe::App for App {
                 ui.add_enabled_ui(loopback_selected && has_source, |ui| {
                     ui.checkbox(
                         &mut self.app_audio_only,
-                        egui::RichText::new("🎯 App audio only (exclude other system sounds)")
+                        egui::RichText::new(s.app_audio_only_label)
                             .color(ACCENT_SECONDARY),
                     )
                     .on_hover_text(if !has_loopback_device {
-                        "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present)."
+                        s.tooltip_no_loopback_device
                     } else if !loopback_selected {
-                        "Check the system audio (🔊) box above first."
+                        s.tooltip_check_loopback_first
                     } else {
-                        "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working."
+                        s.tooltip_app_audio_only
                     });
                 });
             });
@@ -393,7 +398,7 @@ impl eframe::App for App {
             // window just reopens empty right-side space rather than the
             // window becoming more useful.
             ui.set_max_width(440.0);
-            section_header(ui, "STATUS");
+            section_header(ui, s.status_header);
 
             let is_paused = self.session.is_paused();
             if is_recording || is_paused {
@@ -417,7 +422,7 @@ impl eframe::App for App {
                         egui::Sense::hover(),
                     );
                     ui.painter().circle_filled(rect.center(), 5.0, dot_col);
-                    let state_label = if is_paused { "PAUSED" } else { "RECORDING" };
+                    let state_label = if is_paused { s.state_paused } else { s.state_recording };
                     // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
                     // which previously computed to 4.18:1 contrast on BG_BASE (fails
                     // WCAG AA's 4.5:1 minimum for normal text). ACCENT_REC is 5.54:1.
@@ -450,13 +455,13 @@ impl eframe::App for App {
                 let track_count = self.selected_audio.iter().filter(|&&b| b).count();
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(format!("{} tracks", track_count))
+                        egui::RichText::new(format!("{track_count} {}", s.tracks_word))
                             .size(12.0)
                             .color(TEXT_MUTED),
                     );
                     ui.label(egui::RichText::new("  ·  ").size(12.0).color(TEXT_MUTED));
                     ui.label(
-                        egui::RichText::new(format!("{} frames", frames))
+                        egui::RichText::new(format!("{frames} {}", s.frames_word))
                             .size(12.0)
                             .color(TEXT_MUTED),
                     );
@@ -479,12 +484,12 @@ impl eframe::App for App {
             } else if self.finalizing_handle.is_some() {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new("Saving recording…")
+                    egui::RichText::new(s.saving_recording)
                         .size(13.0)
                         .color(TEXT_MUTED),
                 );
             } else if let Some(path) = &self.last_output_path {
-                ui.label(egui::RichText::new("Last recording:").size(11.0).color(TEXT_MUTED));
+                ui.label(egui::RichText::new(s.last_recording_label).size(11.0).color(TEXT_MUTED));
                 ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(path.to_string_lossy().as_ref())
@@ -494,26 +499,26 @@ impl eframe::App for App {
             } else {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new("Select a source and press REC to start.")
+                    egui::RichText::new(s.select_source_prompt)
                         .size(13.0)
                         .color(TEXT_MUTED),
                 );
             }
 
             ui.add_space(16.0);
-            section_header(ui, "OUTPUT");
+            section_header(ui, s.output_header);
 
             ui.horizontal(|ui| {
                 if ui
-                    .add(accent_button("⚙ Quality", ACCENT_SECONDARY))
-                    .on_hover_text("FPS, codec, resolution, and bitrate for the next recording")
+                    .add(accent_button(s.quality_button, ACCENT_SECONDARY))
+                    .on_hover_text(s.quality_tooltip)
                     .clicked()
                 {
                     self.show_quality_popup = true;
                 }
                 if ui
-                    .add(accent_button("⌨ Hotkeys", ACCENT_SECONDARY))
-                    .on_hover_text("Rebind the start/stop, pause, and overlay-toggle shortcuts")
+                    .add(accent_button(s.hotkeys_button, ACCENT_SECONDARY))
+                    .on_hover_text(s.hotkeys_tooltip)
                     .clicked()
                 {
                     self.show_hotkeys_popup = true;
@@ -534,7 +539,7 @@ impl eframe::App for App {
                         tracing::error!("failed to save config: {e}");
                     }
                 }
-                if ui.add(accent_button("Browse…", ACCENT_SECONDARY)).clicked() {
+                if ui.add(accent_button(s.browse_button, ACCENT_SECONDARY)).clicked() {
                     if let Some(path) = FileDialog::new()
                         .set_directory(&self.config.output_dir)
                         .pick_folder()
@@ -553,15 +558,20 @@ impl eframe::App for App {
 
                 let is_paused = self.session.is_paused();
 
+                let state_name = match self.session.state() {
+                    SessionState::Idle => s.session_state_idle,
+                    SessionState::Recording => s.session_state_recording,
+                    SessionState::Paused => s.session_state_paused,
+                };
                 ui.label(
-                    egui::RichText::new(format!("State: {:?}", self.session.state()))
+                    egui::RichText::new(format!("{}{state_name}", s.state_prefix))
                         .size(10.0)
                         .color(TEXT_MUTED),
                 );
 
                 if is_paused {
                     let btn = egui::Button::new(
-                        egui::RichText::new("▶ RESUME").color(ACCENT_IDLE).size(18.0),
+                        egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(18.0),
                     )
                     .fill(BG_BTN_IDLE)
                     .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
@@ -572,7 +582,7 @@ impl eframe::App for App {
                 } else if is_recording {
                     ui.horizontal(|ui| {
                         let stop_btn = egui::Button::new(
-                            egui::RichText::new("⏹ STOP")
+                            egui::RichText::new(s.stop_button)
                                 .color(ACCENT_REC)
                                 .size(18.0),
                         )
@@ -588,13 +598,13 @@ impl eframe::App for App {
                         )
                         .fill(egui::Color32::from_rgb(30, 30, 46))
                         .min_size(egui::Vec2::new(44.0, 52.0));
-                        if ui.add(pause_btn).on_hover_text("Pause").clicked() {
+                        if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
                             self.handle_pause_button();
                         }
                     });
                 } else {
                     let btn = egui::Button::new(
-                        egui::RichText::new("⏺ REC").color(ACCENT_IDLE).size(18.0),
+                        egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(18.0),
                     )
                     .fill(BG_BTN_IDLE)
                     .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
@@ -621,6 +631,8 @@ impl eframe::App for App {
                     windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
                 ) as f32
             };
+            let tracks_word = s.tracks_word;
+            let stop_word = s.overlay_hud_stop_word;
 
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("polyrec_overlay"),
@@ -642,11 +654,10 @@ impl eframe::App for App {
                         .show(ctx, |ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "● {:02}:{:02}:{:02}  |  {} tracks  |  F9 stop",
+                                    "● {:02}:{:02}:{:02}  |  {track_count} {tracks_word}  |  F9 {stop_word}",
                                     elapsed_secs / 3600,
                                     (elapsed_secs % 3600) / 60,
                                     elapsed_secs % 60,
-                                    track_count,
                                 ))
                                 .color(egui::Color32::WHITE)
                                 .size(13.0),
@@ -659,52 +670,52 @@ impl eframe::App for App {
         // ── Quality settings popup ────────────────────────────────────────────
         if self.show_quality_popup {
             let mut close = false;
-            egui::Window::new("Quality Settings")
+            egui::Window::new(s.quality_title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    section_header(ui, "FPS");
+                    section_header(ui, s.fps_header);
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.config.encode.fps, 30, "30");
                         ui.selectable_value(&mut self.config.encode.fps, 60, "60");
                     });
 
-                    section_header(ui, "CODEC");
+                    section_header(ui, s.codec_header);
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.config.encode.codec, "h264".into(), "H264");
                         ui.selectable_value(&mut self.config.encode.codec, "h265".into(), "H265");
                     });
 
-                    section_header(ui, "RESOLUTION");
+                    section_header(ui, s.resolution_header);
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), "Native (window)");
-                        ui.selectable_value(&mut self.config.encode.resolution_mode, "display".into(), "Match display");
-                        ui.selectable_value(&mut self.config.encode.resolution_mode, "custom".into(), "Custom");
+                        ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), s.resolution_native);
+                        ui.selectable_value(&mut self.config.encode.resolution_mode, "display".into(), s.resolution_display);
+                        ui.selectable_value(&mut self.config.encode.resolution_mode, "custom".into(), s.resolution_custom);
                     });
                     if self.config.encode.resolution_mode == "custom" {
                         ui.horizontal(|ui| {
-                            ui.label("W:");
+                            ui.label(s.width_label);
                             ui.add(egui::DragValue::new(&mut self.config.encode.custom_width).range(2..=7680));
-                            ui.label("H:");
+                            ui.label(s.height_label);
                             ui.add(egui::DragValue::new(&mut self.config.encode.custom_height).range(2..=4320));
                         });
                     }
 
-                    section_header(ui, "BITRATE");
+                    section_header(ui, s.bitrate_header);
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "auto".into(), "Auto");
-                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "manual".into(), "Manual");
+                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "auto".into(), s.bitrate_auto);
+                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "manual".into(), s.bitrate_manual);
                     });
                     if self.config.encode.bitrate_mode == "manual" {
                         ui.horizontal(|ui| {
-                            ui.label("Mbps:");
+                            ui.label(s.mbps_label);
                             ui.add(egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps).range(1..=100));
                         });
                     }
 
                     ui.add_space(8.0);
-                    if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                    if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                         close = true;
                     }
                 });
@@ -722,26 +733,26 @@ impl eframe::App for App {
                 "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
             ];
             let mut close = false;
-            egui::Window::new("Hotkeys")
+            egui::Window::new(s.hotkeys_title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    section_header(ui, "START / STOP RECORDING");
+                    section_header(ui, s.hotkey_start_stop_header);
                     ui.horizontal_wrapped(|ui| {
                         for key in FUNCTION_KEYS {
                             ui.selectable_value(&mut self.config.hotkeys.start_stop, key.to_string(), key);
                         }
                     });
 
-                    section_header(ui, "PAUSE / RESUME");
+                    section_header(ui, s.hotkey_pause_header);
                     ui.horizontal_wrapped(|ui| {
                         for key in FUNCTION_KEYS {
                             ui.selectable_value(&mut self.config.hotkeys.pause, key.to_string(), key);
                         }
                     });
 
-                    section_header(ui, "TOGGLE OVERLAY");
+                    section_header(ui, s.hotkey_overlay_header);
                     ui.horizontal_wrapped(|ui| {
                         for key in FUNCTION_KEYS {
                             ui.selectable_value(&mut self.config.hotkeys.toggle_overlay, key.to_string(), key);
@@ -759,14 +770,14 @@ impl eframe::App for App {
                     if has_collision {
                         ui.add_space(8.0);
                         ui.label(
-                            egui::RichText::new("⚠ Two actions share the same key — only one will respond.")
+                            egui::RichText::new(s.hotkey_collision_warning)
                                 .size(11.0)
                                 .color(ACCENT_PAUSE),
                         );
                     }
 
                     ui.add_space(8.0);
-                    if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                    if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                         close = true;
                     }
                 });
@@ -793,14 +804,14 @@ impl eframe::App for App {
         // ── Error banner ──────────────────────────────────────────────────────
         if let Some(msg) = self.error_message.clone() {
             let mut close = false;
-            egui::Window::new("Error")
+            egui::Window::new(s.error_title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.label(egui::RichText::new(&msg).size(13.0).color(ACCENT_REC));
                     ui.add_space(8.0);
-                    if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                    if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                         close = true;
                     }
                 });
@@ -813,12 +824,12 @@ impl eframe::App for App {
         if self.show_export_dialog {
             if let Some(path) = self.last_output_path.clone() {
                 let mut close = false;
-                egui::Window::new("Recording Complete")
+                egui::Window::new(s.export_dialog_title)
                     .collapsible(false)
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ctx, |ui| {
-                        ui.label(egui::RichText::new("Recording saved:").size(11.0).color(TEXT_MUTED));
+                        ui.label(egui::RichText::new(s.recording_saved_label).size(11.0).color(TEXT_MUTED));
                         ui.add_space(2.0);
                         ui.label(
                             egui::RichText::new(path.to_string_lossy().as_ref())
@@ -827,7 +838,7 @@ impl eframe::App for App {
                         );
 
                         ui.add_space(8.0);
-                        section_header(ui, "AUDIO TRACKS");
+                        section_header(ui, s.audio_tracks_header);
                         for (i, dev) in self.audio_devices.iter().enumerate() {
                             if i < self.export_track_selection.len() {
                                 let icon = if dev.is_loopback { "🔊" } else { "🎙" };
@@ -855,7 +866,7 @@ impl eframe::App for App {
 
                         if is_idle {
                             ui.horizontal(|ui| {
-                                if ui.add(accent_button("Export", ACCENT_IDLE)).clicked() {
+                                if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked() {
                                     if let Some(dest) = rfd::FileDialog::new()
                                         .add_filter("MP4 video", &["mp4"])
                                         .set_file_name("export.mp4")
@@ -879,22 +890,22 @@ impl eframe::App for App {
                                         self.export_state = ExportState::Running;
                                     }
                                 }
-                                if ui.add(accent_button("Open Folder", ACCENT_SECONDARY)).clicked() {
+                                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
                                     open_folder(path.as_ref());
                                 }
-                                if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                                     close = true;
                                 }
                             });
                         } else if is_running {
-                            section_header(ui, "EXPORTING…");
+                            section_header(ui, s.exporting_header);
                             ui.label(
-                                egui::RichText::new("Please wait…")
+                                egui::RichText::new(s.please_wait)
                                     .size(11.0)
                                     .color(TEXT_MUTED),
                             );
                         } else if let Some(export_path) = done_path {
-                            section_header(ui, "EXPORT COMPLETE");
+                            section_header(ui, s.export_complete_header);
                             ui.label(
                                 egui::RichText::new(export_path.to_string_lossy().as_ref())
                                     .size(11.0)
@@ -902,22 +913,22 @@ impl eframe::App for App {
                             );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                if ui.add(accent_button("Open Folder", ACCENT_SECONDARY)).clicked() {
+                                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
                                     open_folder(&export_path);
                                 }
-                                if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                                     close = true;
                                 }
                             });
                         } else if let Some(msg) = failed_msg {
-                            section_header(ui, "EXPORT FAILED");
+                            section_header(ui, s.export_failed_header);
                             ui.label(
                                 egui::RichText::new(&msg)
                                     .size(11.0)
                                     .color(ACCENT_REC),
                             );
                             ui.add_space(4.0);
-                            if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                            if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                                 close = true;
                             }
                         }
@@ -1173,7 +1184,8 @@ impl App {
                 self.recording_start = Some(Instant::now());
             }
             Err(e) => {
-                self.error_message = Some(format!("Couldn't start recording: {e}"));
+                let prefix = self.config.lang().strings().couldnt_start_recording_prefix;
+                self.error_message = Some(format!("{prefix}{e}"));
             }
         }
     }

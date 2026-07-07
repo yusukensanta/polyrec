@@ -5,6 +5,7 @@ mod config;
 mod disk_space;
 mod encode;
 mod hotkeys;
+mod i18n;
 mod error;
 mod session;
 mod sources;

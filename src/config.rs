@@ -8,6 +8,9 @@ pub struct Config {
     pub hotkeys: HotkeyConfig,
     pub overlay: OverlayConfig,
     pub encode: EncodeConfig,
+    /// "en" | "ja" — see `crate::i18n::Lang`. Unknown values fall back to
+    /// English, same convention as the other mode fields in this file.
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -101,11 +104,19 @@ impl Default for Config {
                 bitrate_mode: "auto".into(),
                 manual_bitrate_mbps: 12,
             },
+            language: "en".into(),
         }
     }
 }
 
 impl Config {
+    pub fn lang(&self) -> crate::i18n::Lang {
+        match self.language.as_str() {
+            "ja" => crate::i18n::Lang::Ja,
+            _ => crate::i18n::Lang::En,
+        }
+    }
+
     pub fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -246,6 +257,30 @@ mod tests {
         assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(1_000_000)));
         c.encode.manual_bitrate_mbps = 500;
         assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(100_000_000)));
+    }
+
+    #[test]
+    fn default_language_is_english() {
+        assert_eq!(Config::default().language, "en");
+        assert!(matches!(Config::default().lang(), crate::i18n::Lang::En));
+    }
+
+    #[test]
+    fn lang_recognizes_japanese() {
+        let c = Config {
+            language: "ja".into(),
+            ..Config::default()
+        };
+        assert!(matches!(c.lang(), crate::i18n::Lang::Ja));
+    }
+
+    #[test]
+    fn lang_unknown_string_falls_back_to_english() {
+        let c = Config {
+            language: "fr".into(),
+            ..Config::default()
+        };
+        assert!(matches!(c.lang(), crate::i18n::Lang::En));
     }
 
     #[test]
