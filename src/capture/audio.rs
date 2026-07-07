@@ -536,6 +536,62 @@ mod tests {
         handle.abort();
     }
 
+    /// DIAGNOSTIC (temporary): captures the default loopback device for ~3s while a
+    /// system WAV plays, and reports the peak sample magnitude actually received.
+    /// Run: cargo test --lib diag_default_loopback -- --ignored --nocapture
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn diag_default_loopback_captures_real_signal() {
+        let (tx, mut rx) = mpsc::channel::<AudioSamples>(256);
+        let clock = RecordingClock::new();
+        let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("capture runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let _ = run_audio_capture(
+                    String::new(), TrackId::new(0), true, clock, pause_flag, tx,
+                )
+                .await;
+            });
+        });
+
+        std::process::Command::new("powershell")
+            .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
+            .spawn()
+            .expect("failed to spawn powershell sound player");
+
+        let mut peak = 0.0f32;
+        let mut packet_count = 0usize;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(samples)) => {
+                    packet_count += 1;
+                    for &s in &samples.samples {
+                        if s.abs() > peak {
+                            peak = s.abs();
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        handle.abort();
+        println!("DIAG: packets={packet_count} peak_abs_sample={peak}");
+        assert!(packet_count > 0, "no audio packets received at all");
+        assert!(peak > 0.01, "peak sample magnitude {peak} looks like silence, not the played WAV");
+    }
+
     #[test]
     fn enumerate_audio_devices_finds_at_least_one() {
         let devices = enumerate_audio_devices().expect("enumerate_audio_devices failed");

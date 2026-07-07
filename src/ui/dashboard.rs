@@ -65,7 +65,13 @@ impl App {
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
-        let selected_audio = vec![true; n];
+        // Default to loopback (system/game audio) only. The MP4 container's physical
+        // stream order doesn't follow AddStream() call order (see writer.rs/remux.rs),
+        // so when multiple audio tracks are muxed, naive players picking "the first
+        // audio stream" can land on a different track than intended. Recording just
+        // the loopback device by default keeps the common case to a single,
+        // deterministically audible track; mic capture remains an opt-in checkbox.
+        let selected_audio: Vec<bool> = audio_devices.iter().map(|d| d.is_loopback).collect();
         let export_track_selection = vec![true; n];
         let hotkey_listener = HotkeyListener::spawn(
             &config.hotkeys.start_stop,
@@ -153,7 +159,7 @@ impl eframe::App for App {
                     self.selected_source = None;
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
                     let n = self.audio_devices.len();
-                    self.selected_audio = vec![true; n];
+                    self.selected_audio = self.audio_devices.iter().map(|d| d.is_loopback).collect();
                     self.export_track_selection = vec![true; n];
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

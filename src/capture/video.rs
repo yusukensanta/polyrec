@@ -21,9 +21,6 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::Interface;
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-};
 
 /// Query the actual size Windows.Graphics.Capture will deliver frames at for this
 /// window. This is what `run_video_capture` below captures at — NOT `GetClientRect`,
@@ -49,30 +46,9 @@ pub fn query_capture_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
     }
 }
 
-/// Query the resolution of the monitor a window is on. Used so recordings default to
-/// the display's native resolution rather than whatever size the captured window/game
-/// happens to be rendering at (a game running in a smaller windowed/internal
-/// resolution shouldn't produce a smaller-than-expected recording — captured frames
-/// are upscaled to this size before encoding).
-pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
-    unsafe {
-        let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(hmonitor, &mut info).as_bool() {
-            return Err(AppError::Capture("GetMonitorInfoW failed".into()));
-        }
-        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
-        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
-        Ok((w, h))
-    }
-}
-
-/// Nearest-neighbor resize of an interleaved BGRA8 buffer. Used to upscale/downscale
-/// captured window content to the target encoder resolution (the display's, not the
-/// window's native size).
+/// Nearest-neighbor resize of an interleaved BGRA8 buffer. `run_video_capture` sizes
+/// the encoder to match the capture size 1:1, so this is normally a no-op; kept as a
+/// safety net for whatever mismatch might occur between the two.
 fn scale_bgra(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
     if src_w == dst_w && src_h == dst_h {
         return src.to_vec();
@@ -244,8 +220,6 @@ pub async fn run_video_capture(
             device.d3d_context.Unmap(&staging_res, 0);
 
             pts = clock.elapsed();
-            // Upscale/downscale to the target output resolution (the display's, not
-            // necessarily the captured window's native size).
             data = scale_bgra(&pixel_data, capture_width, capture_height, output_width, output_height);
         }
 

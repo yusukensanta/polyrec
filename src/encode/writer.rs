@@ -12,8 +12,19 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::HSTRING;
 
-const VIDEO_BITRATE_BPS: u32 = 8_000_000;
 const AUDIO_BITRATE_BPS: u32 = 192_000;
+
+/// Bits per pixel per frame at the target quality — mid-range for H264 screen/gaming
+/// content with real motion. A flat bitrate regardless of resolution/fps previously
+/// starved anything above ~720p60, and H264's in-loop deblocking filter over-smooths
+/// detail when it can't hit the target bitrate, which reads as blur rather than the
+/// blockiness you'd expect from under-provisioning.
+const VIDEO_BITS_PER_PIXEL_PER_FRAME: f64 = 0.1;
+
+fn video_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
+    let raw = width as f64 * height as f64 * fps as f64 * VIDEO_BITS_PER_PIXEL_PER_FRAME;
+    raw.round() as u32
+}
 
 pub struct RecordingWriter {
     writer: IMFSinkWriter,
@@ -166,7 +177,7 @@ unsafe fn make_video_output_type(
         .map_err(|e| AppError::Encode(format!("SetUINT64 frame_size: {e}")))?;
     t.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(fps, 1))
         .map_err(|e| AppError::Encode(format!("SetUINT64 frame_rate: {e}")))?;
-    t.SetUINT32(&MF_MT_AVG_BITRATE, VIDEO_BITRATE_BPS)
+    t.SetUINT32(&MF_MT_AVG_BITRATE, video_bitrate_bps(width, height, fps))
         .map_err(|e| AppError::Encode(format!("SetUINT32 bitrate: {e}")))?;
     // MFVideoInterlace_Progressive = MFVideoInterlaceMode(2i32)
     t.SetUINT32(
@@ -292,6 +303,17 @@ fn pack_u64(high: u32, low: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_bitrate_scales_with_resolution_and_fps() {
+        let p1080_60 = video_bitrate_bps(1920, 1080, 60);
+        let p1440_60 = video_bitrate_bps(2560, 1440, 60);
+        let p1080_30 = video_bitrate_bps(1920, 1080, 30);
+        assert!(p1440_60 > p1080_60, "1440p should need a higher bitrate than 1080p at the same fps");
+        assert!(p1080_60 > p1080_30, "60fps should need a higher bitrate than 30fps at the same resolution");
+        // Sanity check against common streaming-quality guidance for 1080p60 (~8-12 Mbps).
+        assert!(p1080_60 > 8_000_000 && p1080_60 < 16_000_000, "1080p60 bitrate {p1080_60} out of expected range");
+    }
 
     #[test]
     fn pack_u64_encodes_correctly() {

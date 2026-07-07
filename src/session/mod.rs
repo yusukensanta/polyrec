@@ -4,7 +4,7 @@ pub mod state;
 use crate::capture::audio::{
     run_audio_capture, run_process_loopback_capture, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
 };
-use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
+use crate::capture::video::{query_capture_size, run_video_capture};
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::RecordingCommand;
 use crate::error::AppError;
@@ -96,17 +96,13 @@ impl SessionManager {
             }
         };
 
-        // Recordings default to the display's native resolution, not the captured
-        // window's/game's own size — a game running windowed at a lower resolution
-        // shouldn't produce a smaller-than-expected recording. Captured frames are
-        // upscaled/downscaled to this before encoding (see capture::video::scale_bgra).
-        let (output_width, output_height) = match query_display_size(real_hwnd) {
-            Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
-            Err(e) => {
-                tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", source.hwnd);
-                (capture_width, capture_height)
-            }
-        };
+        // Recordings default to the captured window's own resolution. Upscaling to
+        // the display's native resolution was tried previously, but nearest-neighbor
+        // scaling a smaller window up to a much larger, non-integer-ratio display size
+        // produces visible blocky/grainy artifacts, and a fixed encoder bitrate tuned
+        // for the window's own size becomes far too low once the frame is stretched.
+        // Recording 1:1 avoids both problems (scale_bgra becomes a no-op).
+        let (output_width, output_height) = (capture_width, capture_height);
 
         // Spawn RecordingActor
         let (recording_tx, recorder_handle) = spawn_recording_actor(
@@ -302,20 +298,22 @@ mod tests {
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
     }
 
-    /// Verifies the recorded video's actual encoded resolution matches the display's
-    /// resolution, not the captured window's native size.
+    /// Verifies the recorded video's actual encoded resolution matches the captured
+    /// window's own native size (not upscaled/downscaled to the display's resolution —
+    /// that upscaling was reverted because nearest-neighbor scaling to a much larger,
+    /// non-integer-ratio display size produced visible blocky/grainy artifacts).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
-    async fn recording_resolution_matches_display() {
+    async fn recording_resolution_matches_window() {
         use crate::capture::audio::enumerate_audio_devices;
-        use crate::capture::video::query_display_size;
+        use crate::capture::video::query_capture_size;
         use crate::sources::enumerate_sources;
         use windows::Win32::Media::MediaFoundation::{MFCreateSourceReaderFromURL, MF_MT_FRAME_SIZE};
 
         let sources = enumerate_sources();
         let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
-        let (expected_w, expected_h) = query_display_size(hwnd).expect("query_display_size failed");
+        let (expected_w, expected_h) = query_capture_size(hwnd).expect("query_capture_size failed");
 
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let dir = tempfile::tempdir().unwrap();
@@ -350,7 +348,7 @@ mod tests {
             let packed = video_type.GetUINT64(&MF_MT_FRAME_SIZE).expect("GetUINT64 frame_size");
             let actual_w = (packed >> 32) as u32;
             let actual_h = (packed & 0xFFFF_FFFF) as u32;
-            println!("display: {expected_w}x{expected_h}, encoded: {actual_w}x{actual_h}");
+            println!("window: {expected_w}x{expected_h}, encoded: {actual_w}x{actual_h}");
             assert_eq!(actual_w, expected_w.max(2) & !1);
             assert_eq!(actual_h, expected_h.max(2) & !1);
         }
@@ -396,6 +394,109 @@ mod tests {
         let export_meta = std::fs::metadata(&export_result).expect("remuxed export file missing");
         println!("export size: {} bytes", export_meta.len());
         assert!(export_meta.len() > 0, "exported file is empty");
+    }
+
+    /// DIAGNOSTIC (temporary): records real window + default audio devices while a
+    /// system WAV plays, then decodes the finalized MP4's audio track back to PCM via
+    /// Media Foundation and reports the peak sample magnitude actually stored in the
+    /// file. Isolates whether silence is introduced downstream of audio.rs (which
+    /// diag_default_loopback_captures_real_signal already proved captures real signal).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn diag_recorded_audio_track_has_signal() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+        use windows::Win32::Media::MediaFoundation::{
+            MFAudioFormat_PCM, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
+            MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+        };
+
+        let sources = enumerate_sources();
+        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices: Vec<_> = enumerate_audio_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.is_loopback)
+            .collect();
+        assert!(!audio_devices.is_empty(), "need a loopback audio device");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path());
+
+        std::process::Command::new("powershell")
+            .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
+            .spawn()
+            .expect("failed to spawn powershell sound player");
+
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+        let result = handle.await.expect("recorder task panicked/aborted");
+        let finalized_path = result.expect("finalize() returned an error");
+        println!("output: {}", finalized_path.display());
+
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            let _ = windows::Win32::Media::MediaFoundation::MFStartup(
+                windows::Win32::Media::MediaFoundation::MF_VERSION,
+                windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
+            );
+            let url = windows::core::HSTRING::from(finalized_path.to_str().unwrap());
+            let reader = MFCreateSourceReaderFromURL(&url, None).expect("MFCreateSourceReaderFromURL");
+
+            // Force decode to PCM so we can inspect raw samples.
+            let pcm_type = MFCreateMediaType().unwrap();
+            pcm_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).unwrap();
+            pcm_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).unwrap();
+            reader
+                .SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, None, &pcm_type)
+                .expect("SetCurrentMediaType PCM failed — no audio stream in file?");
+
+            let mut peak = 0i32;
+            let mut total_bytes = 0usize;
+            loop {
+                let mut stream_index = 0u32;
+                let mut flags = 0u32;
+                let mut timestamp = 0i64;
+                let mut sample = None;
+                reader
+                    .ReadSample(
+                        MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
+                        0,
+                        Some(&mut stream_index),
+                        Some(&mut flags),
+                        Some(&mut timestamp),
+                        Some(&mut sample),
+                    )
+                    .expect("ReadSample failed");
+
+                const MF_SOURCE_READERF_ENDOFSTREAM: u32 = 0x2;
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM != 0 {
+                    break;
+                }
+                let Some(sample) = sample else { continue };
+                let buffer = sample.ConvertToContiguousBuffer().expect("ConvertToContiguousBuffer");
+                let mut data: *mut u8 = std::ptr::null_mut();
+                let mut len = 0u32;
+                buffer.Lock(&mut data, None, Some(&mut len)).expect("Lock");
+                let bytes = std::slice::from_raw_parts(data, len as usize);
+                for chunk in bytes.chunks_exact(2) {
+                    let v = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                    if v.abs() > peak {
+                        peak = v.abs();
+                    }
+                }
+                total_bytes += bytes.len();
+                buffer.Unlock().expect("Unlock");
+            }
+
+            println!("DIAG: total_audio_bytes={total_bytes} peak_pcm16={peak}");
+            assert!(total_bytes > 0, "audio track had zero bytes decoded");
+            assert!(peak > 300, "peak PCM16 sample {peak} looks like silence in the recorded file");
+        }
     }
 
     /// Same as `full_capture_produces_nonempty_file` but with `app_audio_only = true`,
