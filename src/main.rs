@@ -9,6 +9,7 @@ mod session;
 mod sources;
 mod types;
 mod ui;
+mod update_check;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();

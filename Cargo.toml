@@ -23,6 +23,8 @@ dirs = "5"
 rfd = "0.14"
 windows-core = "0.58"
 chrono = "0.4"
+semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dependencies.windows]
 version = "0.58"

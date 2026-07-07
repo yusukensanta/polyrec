@@ -64,6 +64,8 @@ pub struct App {
     hotkey_listener: Option<HotkeyListener>,
     finalizing_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
     finalizing_path: Option<PathBuf>,
+    update_available: Option<crate::update_check::AvailableUpdate>,
+    update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
 }
 
 impl App {
@@ -87,6 +89,16 @@ impl App {
             &config.hotkeys.pause,
             &config.hotkeys.toggle_overlay,
         );
+
+        // Fire-and-forget: checked once at startup, polled in `update()`. Any failure
+        // (offline, GitHub unreachable, no releases yet) just means no banner shows —
+        // see update_check::check_for_update's doc comment.
+        let (update_tx, update_check_rx) = mpsc::channel();
+        tokio::spawn(async move {
+            let result = crate::update_check::check_for_update(env!("CARGO_PKG_VERSION")).await;
+            let _ = update_tx.send(result);
+        });
+
         Self {
             config,
             session: SessionManager::new(),
@@ -109,6 +121,8 @@ impl App {
             hotkey_listener: Some(hotkey_listener),
             finalizing_handle: None,
             finalizing_path: None,
+            update_available: None,
+            update_check_rx: Some(update_check_rx),
         }
     }
 }
@@ -117,6 +131,15 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_recording = self.session.is_recording();
         let frames = self.frame_count.load(Ordering::Relaxed);
+
+        // Poll update-check result (one-shot; None result also clears the receiver
+        // so we stop polling a channel whose sender has already sent its one message)
+        if let Some(rx) = &self.update_check_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.update_available = result;
+                self.update_check_rx = None;
+            }
+        }
 
         // Poll export result channel
         let export_result = self.export_result_rx.as_ref().and_then(|rx| rx.try_recv().ok());
@@ -179,6 +202,19 @@ impl eframe::App for App {
                     if ui.button(label).clicked() {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
+                    }
+                    if let Some(update) = &self.update_available {
+                        let update_url = update.url.clone();
+                        let clicked = ui
+                            .add(egui::Button::new(
+                                egui::RichText::new(format!("⬆ {} available", update.version))
+                                    .color(ACCENT_SECONDARY),
+                            ))
+                            .on_hover_text("Click to open the release page")
+                            .clicked();
+                        if clicked {
+                            let _ = std::process::Command::new("explorer").arg(update_url).spawn();
+                        }
                     }
                 });
             });
