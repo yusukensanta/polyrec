@@ -8,9 +8,18 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// Spawns the RecordingActor on a dedicated blocking OS thread.
-/// Returns (command_sender, handle_resolving_to_output_path).
+///
+/// Recording is written to `temp_path` throughout (Media Foundation's sink writer needs
+/// a fixed destination from the moment it opens the file, before the finish time is
+/// known). Once `finalize()` closes the file, it's renamed to `<app_name>_<finish
+/// timestamp>.mp4` inside `output_dir` — the filename reflects when the recording
+/// actually finished, not when it started.
+///
+/// Returns (command_sender, handle_resolving_to_the_final_renamed_path).
 pub fn spawn_recording_actor(
-    output_path: PathBuf,
+    temp_path: PathBuf,
+    output_dir: PathBuf,
+    app_name: String,
     width: u32,
     height: u32,
     fps: u32,
@@ -24,7 +33,7 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(&output_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs)?;
+        let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs)?;
         writer.begin_writing()?;
 
         while let Some(cmd) = rx.blocking_recv() {
@@ -44,7 +53,17 @@ pub fn spawn_recording_actor(
             }
         }
 
-        writer.finalize()
+        let finished_temp_path = writer.finalize()?;
+        let finish_stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
+        let final_path = output_dir.join(format!("{app_name}_{finish_stamp}.mp4"));
+        std::fs::rename(&finished_temp_path, &final_path).map_err(|e| {
+            AppError::Encode(format!(
+                "failed to rename {} to {}: {e}",
+                finished_temp_path.display(),
+                final_path.display()
+            ))
+        })?;
+        Ok(final_path)
     });
 
     (tx, handle)

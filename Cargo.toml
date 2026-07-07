@@ -22,6 +22,7 @@ anyhow = "1"
 dirs = "5"
 rfd = "0.14"
 windows-core = "0.58"
+chrono = "0.4"
 
 [dependencies.windows]
 version = "0.58"

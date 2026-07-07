@@ -97,7 +97,8 @@ impl SessionManager {
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(AtomicBool::new(false));
 
-        let output_path = make_output_path(output_dir);
+        let app_name = app_name_from_exe(&source.exe_name);
+        let (output_path, polyrec_dir) = prepare_recording_paths(output_dir, &app_name);
 
         // All captured audio is downmixed/resampled to this fixed target in
         // run_audio_capture, regardless of each device's native mix format.
@@ -146,6 +147,8 @@ impl SessionManager {
         // Spawn RecordingActor
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
+            polyrec_dir,
+            app_name,
             output_width,
             output_height,
             encode.fps,
@@ -283,16 +286,41 @@ impl Default for SessionManager {
     }
 }
 
-fn make_output_path(base_dir: &std::path::Path) -> PathBuf {
-    let dir = base_dir.to_path_buf();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("Failed to create output directory {}: {e}", dir.display());
+/// Derives a filesystem-safe app name from a window's exe name (e.g. "vivaldi.exe"
+/// -> "vivaldi"), used as the recording filename's prefix. Falls back to "recording"
+/// if the exe name is empty or sanitizes away to nothing.
+fn app_name_from_exe(exe_name: &str) -> String {
+    let trimmed = if exe_name.len() >= 4 && exe_name[exe_name.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &exe_name[..exe_name.len() - 4]
+    } else {
+        exe_name
+    };
+    let sanitized: String = trimmed
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        "recording".to_string()
+    } else {
+        sanitized
     }
-    let ts = std::time::SystemTime::now()
+}
+
+/// Creates `<base_dir>/polyrec/` and returns (temp_recording_path, polyrec_dir).
+/// The temp path is what the encoder actually writes to — its name doesn't matter
+/// beyond being unique, since `spawn_recording_actor` renames it to
+/// `<app_name>_<finish timestamp>.mp4` once the recording finishes.
+fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathBuf, PathBuf) {
+    let polyrec_dir = base_dir.join("polyrec");
+    if let Err(e) = std::fs::create_dir_all(&polyrec_dir) {
+        tracing::warn!("Failed to create output directory {}: {e}", polyrec_dir.display());
+    }
+    let start_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    dir.join(format!("polyrec_{ts}.mp4"))
+        .as_millis();
+    let temp_path = polyrec_dir.join(format!("{app_name}_recording_{start_ts}.tmp.mp4"));
+    (temp_path, polyrec_dir)
 }
 
 /// Pure resolution-mode resolution — no I/O, so it's directly unit-testable without
@@ -349,9 +377,31 @@ mod tests {
     }
 
     #[test]
-    fn make_output_path_has_mp4_extension() {
-        let p = make_output_path(std::path::Path::new("."));
-        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
+    fn app_name_from_exe_strips_exe_suffix() {
+        assert_eq!(app_name_from_exe("vivaldi.exe"), "vivaldi");
+        assert_eq!(app_name_from_exe("Notepad.EXE"), "Notepad");
+    }
+
+    #[test]
+    fn app_name_from_exe_sanitizes_invalid_filename_chars() {
+        assert_eq!(app_name_from_exe("weird name!.exe"), "weird_name_");
+    }
+
+    #[test]
+    fn app_name_from_exe_empty_falls_back_to_recording() {
+        assert_eq!(app_name_from_exe(""), "recording");
+        assert_eq!(app_name_from_exe(".exe"), "recording");
+    }
+
+    #[test]
+    fn prepare_recording_paths_creates_polyrec_subdir_with_temp_mp4() {
+        let dir = tempfile::tempdir().unwrap();
+        let (temp_path, polyrec_dir) = prepare_recording_paths(dir.path(), "vivaldi");
+        assert_eq!(polyrec_dir, dir.path().join("polyrec"));
+        assert!(polyrec_dir.is_dir(), "polyrec subdirectory should be created");
+        assert_eq!(temp_path.parent(), Some(polyrec_dir.as_path()));
+        assert_eq!(temp_path.extension().and_then(|e| e.to_str()), Some("mp4"));
+        assert!(temp_path.file_name().unwrap().to_str().unwrap().starts_with("vivaldi_"));
     }
 
     #[test]
@@ -460,7 +510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let output_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
+        let temp_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -469,7 +519,11 @@ mod tests {
         let result = handle.await.expect("recorder task panicked/aborted");
         let finalized_path = result.expect("finalize() returned an error");
 
-        assert_eq!(finalized_path, output_path);
+        // The temp path start_capture returned gets renamed to its finish-timestamped
+        // final name inside polyrec/ once the recording completes — they're not equal.
+        assert_ne!(finalized_path, temp_path);
+        assert!(!temp_path.exists(), "temp recording file should have been renamed away");
+        assert_eq!(finalized_path.parent(), Some(dir.path().join("polyrec")).as_deref());
         let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
         assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
         println!("frames captured: {}", frame_count.load(Ordering::Relaxed));
@@ -612,7 +666,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let output_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
+        let temp_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -621,7 +675,8 @@ mod tests {
         let result = handle.await.expect("recorder task panicked/aborted");
         let finalized_path = result.expect("finalize() returned an error");
 
-        assert_eq!(finalized_path, output_path);
+        assert_ne!(finalized_path, temp_path);
+        assert_eq!(finalized_path.parent(), Some(dir.path().join("polyrec")).as_deref());
         let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
         assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
         println!("output size: {} bytes", metadata.len());
