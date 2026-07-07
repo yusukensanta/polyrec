@@ -16,6 +16,10 @@ use tokio::task::JoinHandle;
 /// actually finished, not when it started.
 ///
 /// Returns (command_sender, handle_resolving_to_the_final_renamed_path).
+// Each param is an independently-resolved piece the caller already has on hand
+// (paths, encoder settings, audio specs) -- a param struct would just move this
+// same list into a type definition without changing what start_capture passes.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_recording_actor(
     temp_path: PathBuf,
     output_dir: PathBuf,

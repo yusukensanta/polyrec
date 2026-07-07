@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn f32_to_pcm16_conversion_clamps() {
-        let samples = vec![0.0f32, 1.0, -1.0, 2.0, -2.0];
+        let samples = [0.0f32, 1.0, -1.0, 2.0, -2.0];
         let pcm: Vec<i16> = samples
             .iter()
             .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)

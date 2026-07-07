@@ -90,6 +90,10 @@ fn scale_bgra(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec
     dst
 }
 
+// Each param here is independently resolved by the caller (capture vs. output
+// size are deliberately separate concepts, see scale_bgra) -- a param struct
+// would just rename this same list without adding clarity at this call boundary.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_video_capture(
     hwnd: HWND,
     capture_width: u32,

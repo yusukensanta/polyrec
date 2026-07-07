@@ -105,7 +105,7 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         let t1 = clock.elapsed();
         let t2 = clone.elapsed();
-        let diff = if t1 > t2 { t1 - t2 } else { t2 - t1 };
+        let diff = t1.abs_diff(t2);
         assert!(diff.as_micros() < 1000, "two reads of same clock should be within 1ms");
     }
 

@@ -569,6 +569,10 @@ mod tests {
         let frame_count = Arc::new(AtomicU64::new(0));
         sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
 
+        // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
+        // process until the sound finishes, but we want it playing concurrently
+        // with the recording below, not blocking this thread until done.
+        #[allow(clippy::zombie_processes)]
         std::process::Command::new("powershell")
             .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
             .spawn()

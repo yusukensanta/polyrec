@@ -28,12 +28,7 @@ pub const TARGET_CHANNELS: u16 = 2;
 /// Convert interleaved `input` (native `channels` per frame) to interleaved stereo.
 /// - 1 channel: duplicated to L=R (no information loss)
 /// - 2 channels: passed through unchanged
-/// - >2 channels: take channels 0/1 (front-left/front-right) directly. Per the
-///   WAVEFORMATEXTENSIBLE channel-mask convention, front L/R are always present at
-///   indices 0/1 regardless of total channel count — averaging all N channels
-///   instead (an earlier version of this code did) dilutes the signal severely
-///   whenever surround/center/LFE channels are silent, which is the common case:
-///   most content is plain stereo upmixed into the device's wider mix format.
+/// - \>2 channels: take channels 0/1 (front-left/front-right) directly. Per the WAVEFORMATEXTENSIBLE channel-mask convention, front L/R are always present at indices 0/1 regardless of total channel count — averaging all N channels instead (an earlier version of this code did) dilutes the signal severely whenever surround/center/LFE channels are silent, which is the common case: most content is plain stereo upmixed into the device's wider mix format.
 fn to_stereo(input: &[f32], channels: u16) -> Vec<f32> {
     match channels {
         0 => Vec::new(),
@@ -309,6 +304,11 @@ pub async fn run_process_loopback_capture(
 /// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
 /// encoder target, and forwards `AudioSamples` until the receiver drops or the client
 /// is stopped from outside (abort).
+// Grouping these into a struct wouldn't add clarity here -- each param is an
+// independent piece the WASAPI setup already resolved (format fields, sync
+// primitives, output channel); a param struct would just add indirection at
+// this thread-spawn boundary without changing what the caller has to pass.
+#[allow(clippy::too_many_arguments)]
 async unsafe fn run_capture_loop(
     audio_client: IAudioClient,
     sample_rate: u32,
@@ -340,10 +340,10 @@ async unsafe fn run_capture_loop(
                 let sample_count = frames_available as usize * channels as usize;
                 let mut samples = vec![0.0f32; sample_count];
 
-                for i in 0..sample_count {
+                for (i, sample) in samples.iter_mut().enumerate() {
                     let byte_offset = i * bytes_per_sample;
                     let sample_ptr = data.add(byte_offset);
-                    samples[i] = if bytes_per_sample == 4 {
+                    *sample = if bytes_per_sample == 4 {
                         *(sample_ptr as *const f32)
                     } else if bytes_per_sample == 2 {
                         *(sample_ptr as *const i16) as f32 / 32768.0
@@ -560,6 +560,10 @@ mod tests {
             });
         });
 
+        // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
+        // process until the sound finishes, but we want it playing concurrently
+        // with our own capture loop below, not blocking this thread until done.
+        #[allow(clippy::zombie_processes)]
         std::process::Command::new("powershell")
             .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
             .spawn()
