@@ -69,6 +69,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
         setup_theme(&cc.egui_ctx);
+        setup_fonts(&cc.egui_ctx);
         let overlay_enabled = config.overlay.enabled;
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
@@ -765,6 +766,41 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(4.0);
+}
+
+/// egui's bundled default font only covers Latin + a small symbol set — window
+/// titles/exe names containing CJK or other multi-byte characters (and any
+/// future localized UI text) render as tofu boxes without a fallback font.
+/// Loads a system CJK font (Yu Gothic, standard on Windows 10/11) and appends
+/// it after the default font in both families, so it's only used for glyphs
+/// the default font can't cover — Latin text keeps its existing appearance.
+/// Best-effort: if the font file isn't present on this Windows install, logs
+/// a warning and leaves the default (Latin-only) fonts in place.
+fn setup_fonts(ctx: &egui::Context) {
+    const CJK_FONT_PATH: &str = r"C:\Windows\Fonts\YuGothR.ttc";
+    const CJK_FONT_KEY: &str = "cjk_fallback";
+
+    let font_bytes = match std::fs::read(CJK_FONT_PATH) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("CJK fallback font not loaded from {CJK_FONT_PATH}: {e}");
+            return;
+        }
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        CJK_FONT_KEY.to_owned(),
+        egui::FontData::from_owned(font_bytes),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push(CJK_FONT_KEY.to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 fn setup_theme(ctx: &egui::Context) {
