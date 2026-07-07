@@ -46,7 +46,7 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs)?;
+        let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, true)?;
         writer.begin_writing()?;
 
         let mut last_disk_check = Instant::now();

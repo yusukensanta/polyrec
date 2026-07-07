@@ -37,6 +37,7 @@ pub struct RecordingWriter {
 }
 
 impl RecordingWriter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         output_path: &Path,
         width: u32,
@@ -45,6 +46,7 @@ impl RecordingWriter {
         codec: &str,
         bitrate_bps: u32,
         audio_tracks: &[(u32, u16)],
+        allow_hardware_encode: bool,
     ) -> Result<Self, AppError> {
         unsafe {
             MFStartup(MF_VERSION, MFSTARTUP_FULL)
@@ -54,7 +56,14 @@ impl RecordingWriter {
                 .to_str()
                 .ok_or_else(|| AppError::Encode("output path is not valid UTF-8".into()))?;
             let url = HSTRING::from(path_str);
-            // Create attributes to force software encoding (needed for CI/headless test environments)
+            // `allow_hardware_encode` should be true for every real recording -- false
+            // here previously (unconditionally, for every caller including the actual
+            // shipped app) forced Media Foundation onto a pure-software encoder even
+            // when a GPU hardware MFT (NVENC/QSV/AMF) was available, which is enough
+            // CPU load at 1080p60+ to visibly steal frame time from whatever's being
+            // recorded (e.g. a game). Only the test suite passes false here, since
+            // some CI/headless runners lack a real GPU and this keeps them exercising
+            // the same known-working path they always have.
             use windows::Win32::Media::MediaFoundation::{MFCreateAttributes, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS};
             use windows::Win32::Media::MediaFoundation::IMFAttributes;
             let mut attrs_opt: Option<IMFAttributes> = None;
@@ -63,7 +72,7 @@ impl RecordingWriter {
             let attrs = attrs_opt
                 .ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
             attrs
-                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 0)
+                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, allow_hardware_encode as u32)
                 .map_err(|e| AppError::Encode(format!("SetUINT32 hw_transforms: {e}")))?;
             let writer: IMFSinkWriter =
                 MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
@@ -337,7 +346,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("h264_test.mp4");
-        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &[])
+        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &[], false)
             .expect("RecordingWriter::new with explicit bitrate failed");
         writer.begin_writing().expect("begin_writing failed");
         writer
@@ -358,7 +367,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("h265_test.mp4");
-        let writer = RecordingWriter::new(&output, 64, 64, 30, "h265", 500_000, &[])
+        let writer = RecordingWriter::new(&output, 64, 64, 30, "h265", 500_000, &[], false)
             .expect("RecordingWriter::new with h265 (or its fallback) failed");
         writer.begin_writing().expect("begin_writing failed");
         writer
@@ -398,7 +407,7 @@ mod tests {
 
         // 64×64 at 30fps, one stereo 48kHz audio track
         let audio_tracks = vec![(48000u32, 2u16)];
-        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &audio_tracks);
+        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &audio_tracks, false);
         assert!(writer.is_ok(), "RecordingWriter::new failed: {:?}", writer.err());
         let writer = writer.unwrap();
 

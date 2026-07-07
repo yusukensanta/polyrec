@@ -214,7 +214,7 @@ mod tests {
 
     fn make_test_mp4(dir: &std::path::Path) -> PathBuf {
         let path = dir.join("source.mp4");
-        let writer = RecordingWriter::new(&path, 64, 64, 30, "h264", 500_000, &[(48000u32, 2u16)])
+        let writer = RecordingWriter::new(&path, 64, 64, 30, "h264", 500_000, &[(48000u32, 2u16)], false)
             .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");
         writer

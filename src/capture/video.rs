@@ -71,10 +71,13 @@ pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
 
 /// Nearest-neighbor resize of an interleaved BGRA8 buffer. `run_video_capture` sizes
 /// the encoder to match the capture size 1:1, so this is normally a no-op; kept as a
-/// safety net for whatever mismatch might occur between the two.
-fn scale_bgra(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
+/// safety net for whatever mismatch might occur between the two. Takes `src` by value
+/// so the identity (common/default) path returns it straight back with no copy at
+/// all, instead of cloning a full frame (several MB at 1080p+) every frame for
+/// nothing -- only the actual mismatch path needs to allocate a new buffer.
+fn scale_bgra(src: Vec<u8>, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
     if src_w == dst_w && src_h == dst_h {
-        return src.to_vec();
+        return src;
     }
     let (src_w, src_h, dst_w, dst_h) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
     let mut dst = vec![0u8; dst_w * dst_h * 4];
@@ -161,7 +164,11 @@ pub async fn run_video_capture(
         .StartCapture()
         .map_err(|e| AppError::Capture(format!("StartCapture: {e}")))?;
 
-    // Staging texture descriptor — created once, reused each frame.
+    // Staging texture — created once here and reused every frame via CopyResource.
+    // This used to be recreated inside the loop despite this comment already
+    // claiming otherwise: allocating a fresh GPU resource every frame (at 60fps)
+    // is a driver round-trip per frame for no reason, since CopyResource just
+    // overwrites the same staging texture's contents each time regardless.
     let staging_desc = D3D11_TEXTURE2D_DESC {
         Width: capture_width,
         Height: capture_height,
@@ -177,6 +184,17 @@ pub async fn run_video_capture(
         BindFlags: 0,
         CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
         MiscFlags: 0,
+    };
+    let staging_res: ID3D11Resource = unsafe {
+        let mut staging: Option<ID3D11Texture2D> = None;
+        device
+            .d3d_device
+            .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+            .map_err(|e| AppError::Capture(format!("CreateTexture2D staging: {e}")))?;
+        staging
+            .expect("CreateTexture2D succeeded but staging is None")
+            .cast()
+            .map_err(|e| AppError::Capture(format!("cast staging to ID3D11Resource: {e}")))?
     };
 
     loop {
@@ -211,17 +229,6 @@ pub async fn run_video_capture(
         let pts;
         let data;
         unsafe {
-            let mut staging: Option<ID3D11Texture2D> = None;
-            device
-                .d3d_device
-                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
-                .map_err(|e| AppError::Capture(format!("CreateTexture2D staging: {e}")))?;
-            let staging = staging.expect("CreateTexture2D succeeded but staging is None");
-
-            // Cast textures to ID3D11Resource for CopyResource / Map / Unmap.
-            let staging_res: ID3D11Resource = staging
-                .cast()
-                .map_err(|e| AppError::Capture(format!("cast staging to ID3D11Resource: {e}")))?;
             let src_res: ID3D11Resource = texture
                 .cast()
                 .map_err(|e| AppError::Capture(format!("cast texture to ID3D11Resource: {e}")))?;
@@ -247,7 +254,7 @@ pub async fn run_video_capture(
             device.d3d_context.Unmap(&staging_res, 0);
 
             pts = clock.elapsed();
-            data = scale_bgra(&pixel_data, capture_width, capture_height, output_width, output_height);
+            data = scale_bgra(pixel_data, capture_width, capture_height, output_width, output_height);
         }
 
         let video_frame = VideoFrame { pts, data };
@@ -269,15 +276,16 @@ mod tests {
     #[test]
     fn scale_bgra_identity_when_sizes_match() {
         let src = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
-        let out = scale_bgra(&src, 2, 1, 2, 1);
-        assert_eq!(out, src);
+        let expected = src.clone();
+        let out = scale_bgra(src, 2, 1, 2, 1);
+        assert_eq!(out, expected);
     }
 
     #[test]
     fn scale_bgra_upscales_2x() {
         // 1x1 BGRA pixel -> 2x2, every output pixel should equal the source pixel
         let src = vec![10u8, 20, 30, 40];
-        let out = scale_bgra(&src, 1, 1, 2, 2);
+        let out = scale_bgra(src, 1, 1, 2, 2);
         assert_eq!(out.len(), 2 * 2 * 4);
         for chunk in out.chunks(4) {
             assert_eq!(chunk, &[10, 20, 30, 40]);
@@ -288,9 +296,10 @@ mod tests {
     fn scale_bgra_downscales() {
         // 2x2 -> 1x1: nearest-neighbor picks one of the four source pixels
         let src: Vec<u8> = (0..16).collect();
-        let out = scale_bgra(&src, 2, 2, 1, 1);
+        let expected = src.clone();
+        let out = scale_bgra(src, 2, 2, 1, 1);
         assert_eq!(out.len(), 4);
-        assert!(src.chunks(4).any(|px| px == out.as_slice()));
+        assert!(expected.chunks(4).any(|px| px == out.as_slice()));
     }
 
     #[test]
