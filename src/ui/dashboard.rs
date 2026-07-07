@@ -22,6 +22,7 @@ use std::time::Instant;
                     const BG_SELECTED:  egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
                     const BORDER:       egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
                     const BORDER_SEL:   egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
+                    const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x86, 0x86, 0xCF);
                     const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
                     const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
                     const ACCENT_REC:   egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
@@ -45,6 +46,8 @@ pub struct App {
     selected_audio: Vec<bool>,
     app_audio_only: bool,
     overlay_enabled: bool,
+    show_quality_popup: bool,
+    source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
     last_output_path: Option<PathBuf>,
@@ -87,6 +90,8 @@ impl App {
             selected_audio,
             app_audio_only: false,
             overlay_enabled,
+            show_quality_popup: false,
+            source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             last_output_path: None,
@@ -156,6 +161,7 @@ impl eframe::App for App {
                 ui.separator();
                 if ui.button("⟳ Refresh").clicked() {
                     self.sources = enumerate_sources();
+                    self.source_icon_textures.clear();
                     self.selected_source = None;
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
                     let n = self.audio_devices.len();
@@ -185,6 +191,18 @@ impl eframe::App for App {
                             let fill   = if selected { BG_SELECTED } else { BG_CARD };
                             let border = if selected { BORDER_SEL } else { BORDER };
 
+                            if !self.source_icon_textures.contains_key(&i) {
+                                if let Some((rgba, w, h)) = &source.icon_rgba {
+                                    let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+                                    let tex = ui.ctx().load_texture(
+                                        format!("source_icon_{i}"),
+                                        image,
+                                        egui::TextureOptions::LINEAR,
+                                    );
+                                    self.source_icon_textures.insert(i, tex);
+                                }
+                            }
+
                             let inner = egui::Frame::none()
                                 .fill(fill)
                                 .stroke(egui::Stroke::new(1.0, border))
@@ -192,19 +210,26 @@ impl eframe::App for App {
                                 .inner_margin(egui::Margin::same(8.0))
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
-                                    ui.label(
-                                        egui::RichText::new(&source.window_title)
-                                            .size(13.0)
-                                            .strong()
-                                            .color(TEXT_PRIMARY),
-                                    );
-                                    if !source.exe_name.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(&source.exe_name)
-                                                .size(11.0)
-                                                .color(TEXT_MUTED),
-                                        );
-                                    }
+                                    ui.horizontal(|ui| {
+                                        if let Some(tex) = self.source_icon_textures.get(&i) {
+                                            ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                                        }
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(&source.window_title)
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(TEXT_PRIMARY),
+                                            );
+                                            if !source.exe_name.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(&source.exe_name)
+                                                        .size(11.0)
+                                                        .color(TEXT_MUTED),
+                                                );
+                                            }
+                                        });
+                                    });
                                 });
 
                             if inner.response.interact(egui::Sense::click()).clicked() {
@@ -229,12 +254,21 @@ impl eframe::App for App {
                     .iter()
                     .zip(self.selected_audio.iter())
                     .any(|(dev, &sel)| dev.is_loopback && sel);
+                let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
                 let has_source = self.selected_source.is_some();
                 ui.add_enabled_ui(loopback_selected && has_source, |ui| {
                     ui.checkbox(
                         &mut self.app_audio_only,
-                        "🎯 App audio only (exclude other system sounds)",
-                    );
+                        egui::RichText::new("🎯 App audio only (exclude other system sounds)")
+                            .color(ACCENT_SECONDARY),
+                    )
+                    .on_hover_text(if !has_loopback_device {
+                        "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present)."
+                    } else if !loopback_selected {
+                        "Check the system audio (🔊) box above first."
+                    } else {
+                        "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working."
+                    });
                 });
             });
 
@@ -350,6 +384,15 @@ impl eframe::App for App {
 
             ui.add_space(16.0);
             section_header(ui, "OUTPUT");
+
+            if ui
+                .add(egui::Button::new(egui::RichText::new("⚙ Quality").color(ACCENT_SECONDARY)))
+                .clicked()
+            {
+                self.show_quality_popup = true;
+            }
+            ui.add_space(4.0);
+
             ui.horizontal(|ui| {
                 let btn_width = 74.0;
                 let tf_width = (ui.available_width() - btn_width - 8.0).max(60.0);
@@ -480,6 +523,66 @@ impl eframe::App for App {
                         });
                 },
             );
+        }
+
+        // ── Quality settings popup ────────────────────────────────────────────
+        if self.show_quality_popup {
+            let mut close = false;
+            egui::Window::new("Quality Settings")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    section_header(ui, "FPS");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.config.encode.fps, 30, "30");
+                        ui.selectable_value(&mut self.config.encode.fps, 60, "60");
+                    });
+
+                    section_header(ui, "CODEC");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.config.encode.codec, "h264".into(), "H264");
+                        ui.selectable_value(&mut self.config.encode.codec, "h265".into(), "H265");
+                    });
+
+                    section_header(ui, "RESOLUTION");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), "Native (window)");
+                        ui.selectable_value(&mut self.config.encode.resolution_mode, "display".into(), "Match display");
+                        ui.selectable_value(&mut self.config.encode.resolution_mode, "custom".into(), "Custom");
+                    });
+                    if self.config.encode.resolution_mode == "custom" {
+                        ui.horizontal(|ui| {
+                            ui.label("W:");
+                            ui.add(egui::DragValue::new(&mut self.config.encode.custom_width).range(2..=7680));
+                            ui.label("H:");
+                            ui.add(egui::DragValue::new(&mut self.config.encode.custom_height).range(2..=4320));
+                        });
+                    }
+
+                    section_header(ui, "BITRATE");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "auto".into(), "Auto");
+                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "manual".into(), "Manual");
+                    });
+                    if self.config.encode.bitrate_mode == "manual" {
+                        ui.horizontal(|ui| {
+                            ui.label("Mbps:");
+                            ui.add(egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps).range(1..=100));
+                        });
+                    }
+
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if close {
+                self.show_quality_popup = false;
+                if let Err(e) = self.config.save() {
+                    tracing::error!("failed to save config: {e}");
+                }
+            }
         }
 
         // ── Export dialog ─────────────────────────────────────────────────────
@@ -713,8 +816,6 @@ impl App {
                 .map(|(dev, _)| dev.clone())
                 .collect();
             self.session.apply(SessionAction::Start);
-            // TODO(Task 5): build this from dashboard-level user input instead of the
-            // persisted config directly, once the settings UI exists.
             let encode = EncodeSettings {
                 codec: self.config.encode.codec.clone(),
                 fps: self.config.encode.fps,
