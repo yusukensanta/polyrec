@@ -24,7 +24,10 @@ const BORDER: egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
 const BORDER_SEL: egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
 const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x86, 0x86, 0xCF);
 const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
-const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(130, 130, 155);
+// 140/140/165, not 130/130/155: the darker value passed WCAG AA (4.5:1) on panel
+// backgrounds but only hit 4.49:1 on button fill (28,28,44) -- brightening it here
+// only ever increases contrast on every other background it's already used on.
+const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(140, 140, 165);
 const ACCENT_REC: egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
 const ACCENT_IDLE: egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
 const ACCENT_PAUSE: egui::Color32 = egui::Color32::from_rgb(224, 178, 56);
@@ -200,7 +203,7 @@ impl eframe::App for App {
                         .color(TEXT_MUTED),
                 );
                 ui.separator();
-                if ui.button("⟳ Refresh").clicked() {
+                if ui.add(accent_button("⟳ Refresh", ACCENT_SECONDARY)).clicked() {
                     self.sources = enumerate_sources();
                     self.source_icon_textures.clear();
                     self.selected_source = None;
@@ -211,17 +214,14 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled { "Overlay: ON" } else { "Overlay: OFF" };
-                    if ui.button(label).clicked() {
+                    if ui.add(accent_button(label, ACCENT_SECONDARY)).clicked() {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
                     }
                     if let Some(update) = &self.update_available {
                         let update_url = update.url.clone();
                         let clicked = ui
-                            .add(egui::Button::new(
-                                egui::RichText::new(format!("⬆ {} available", update.version))
-                                    .color(ACCENT_SECONDARY),
-                            ))
+                            .add(accent_button(&format!("⬆ {} available", update.version), ACCENT_SECONDARY))
                             .on_hover_text("Click to open the release page")
                             .clicked();
                         if clicked {
@@ -459,14 +459,14 @@ impl eframe::App for App {
 
             ui.horizontal(|ui| {
                 if ui
-                    .add(egui::Button::new(egui::RichText::new("⚙ Quality").color(ACCENT_SECONDARY)))
+                    .add(accent_button("⚙ Quality", ACCENT_SECONDARY))
                     .on_hover_text("FPS, codec, resolution, and bitrate for the next recording")
                     .clicked()
                 {
                     self.show_quality_popup = true;
                 }
                 if ui
-                    .add(egui::Button::new(egui::RichText::new("⌨ Hotkeys").color(ACCENT_SECONDARY)))
+                    .add(accent_button("⌨ Hotkeys", ACCENT_SECONDARY))
                     .on_hover_text("Rebind the start/stop, pause, and overlay-toggle shortcuts")
                     .clicked()
                 {
@@ -488,7 +488,7 @@ impl eframe::App for App {
                         tracing::error!("failed to save config: {e}");
                     }
                 }
-                if ui.button("Browse…").clicked() {
+                if ui.add(accent_button("Browse…", ACCENT_SECONDARY)).clicked() {
                     if let Some(path) = FileDialog::new()
                         .set_directory(&self.config.output_dir)
                         .pick_folder()
@@ -658,7 +658,7 @@ impl eframe::App for App {
                     }
 
                     ui.add_space(8.0);
-                    if ui.button("Close").clicked() {
+                    if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
                         close = true;
                     }
                 });
@@ -720,7 +720,7 @@ impl eframe::App for App {
                     }
 
                     ui.add_space(8.0);
-                    if ui.button("Close").clicked() {
+                    if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
                         close = true;
                     }
                 });
@@ -790,7 +790,7 @@ impl eframe::App for App {
 
                         if is_idle {
                             ui.horizontal(|ui| {
-                                if ui.button("Export").clicked() {
+                                if ui.add(accent_button("Export", ACCENT_IDLE)).clicked() {
                                     if let Some(dest) = rfd::FileDialog::new()
                                         .add_filter("MP4 video", &["mp4"])
                                         .set_file_name("export.mp4")
@@ -814,10 +814,10 @@ impl eframe::App for App {
                                         self.export_state = ExportState::Running;
                                     }
                                 }
-                                if ui.button("Open Folder").clicked() {
+                                if ui.add(accent_button("Open Folder", ACCENT_SECONDARY)).clicked() {
                                     open_folder(path.as_ref());
                                 }
-                                if ui.button("Close").clicked() {
+                                if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
                                     close = true;
                                 }
                             });
@@ -837,10 +837,10 @@ impl eframe::App for App {
                             );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                if ui.button("Open Folder").clicked() {
+                                if ui.add(accent_button("Open Folder", ACCENT_SECONDARY)).clicked() {
                                     open_folder(&export_path);
                                 }
-                                if ui.button("Close").clicked() {
+                                if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
                                     close = true;
                                 }
                             });
@@ -852,7 +852,7 @@ impl eframe::App for App {
                                     .color(ACCENT_REC),
                             );
                             ui.add_space(4.0);
-                            if ui.button("Close").clicked() {
+                            if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
                                 close = true;
                             }
                         }
@@ -889,6 +889,18 @@ impl eframe::App for App {
             h.stop();
         }
     }
+}
+
+/// A button whose label is tinted to signal what kind of action it is, rather
+/// than every button reading as identical plain text. Three tiers used
+/// consistently across the app: ACCENT_IDLE/ACCENT_REC for the one primary
+/// go/stop action per screen, ACCENT_SECONDARY for useful-but-not-primary
+/// actions (opens a panel, refreshes, browses), TEXT_MUTED for low-emphasis
+/// dismiss actions (Close). Explicit on every button rather than leaving some
+/// unstyled — an unstyled button next to styled ones reads as an oversight,
+/// not a deliberate "this one's less important."
+fn accent_button(text: &str, color: egui::Color32) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text.to_string()).color(color))
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str) {
