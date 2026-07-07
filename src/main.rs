@@ -2,6 +2,7 @@
 
 mod capture;
 mod config;
+mod disk_space;
 mod encode;
 mod hotkeys;
 mod error;
@@ -35,8 +36,12 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("PolyRec")
-            .with_inner_size([900.0, 600.0])
-            .with_min_inner_size([700.0, 450.0])
+            // 900px left a large empty gap on the right of the center panel —
+            // actual content (Quality/Hotkeys buttons, output-dir row, REC
+            // button) tops out around 420-450px; 760 keeps the resizable
+            // 200-380px source-list panel comfortable without the excess.
+            .with_inner_size([760.0, 600.0])
+            .with_min_inner_size([620.0, 450.0])
             .with_icon(icon),
         ..Default::default()
     };

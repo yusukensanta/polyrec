@@ -16,6 +16,13 @@ pub enum AppError {
 
     #[error("Windows API error: {0}")]
     Windows(String),
+
+    // The MB figure is a plain string literal, not computed from
+    // disk_space::MIN_FREE_BYTES -- thiserror's #[error(...)] can't mix a
+    // field reference ({0}) with an extra formatted expression unambiguously.
+    // Keep this in sync with MIN_FREE_BYTES if that constant ever changes.
+    #[error("Not enough disk space on {0} (less than 500 MB free)")]
+    DiskFull(std::path::PathBuf),
 }
 
 #[cfg(test)]

@@ -68,8 +68,13 @@ pub struct App {
     hotkey_listener: Option<HotkeyListener>,
     finalizing_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
     finalizing_path: Option<PathBuf>,
+    finalizing_disk_full: Option<Arc<std::sync::atomic::AtomicBool>>,
     update_available: Option<crate::update_check::AvailableUpdate>,
     update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
+    /// User-facing error banner (disk-full refusal to start, disk-full
+    /// mid-recording stop, or a finalize failure) — cleared by the "Close"
+    /// button in its popup.
+    error_message: Option<String>,
 }
 
 impl App {
@@ -126,8 +131,10 @@ impl App {
             hotkey_listener: Some(hotkey_listener),
             finalizing_handle: None,
             finalizing_path: None,
+            finalizing_disk_full: None,
             update_available: None,
             update_check_rx: Some(update_check_rx),
+            error_message: None,
         }
     }
 }
@@ -168,22 +175,52 @@ impl eframe::App for App {
             }
         }
 
+        // The recorder can stop itself early (disk full — see disk_space.rs)
+        // without the user pressing stop. Detect that and run the normal stop
+        // sequence so the now-pointless capture/pump tasks get aborted and the
+        // result flows through the same finalize handling below as any other
+        // stop, instead of the UI being stuck showing "Recording" forever for
+        // a capture that already ended on its own.
+        if (is_recording || self.session.is_paused())
+            && self.finalizing_handle.is_none()
+            && self
+                .session
+                .active
+                .as_ref()
+                .is_some_and(|a| a.recorder_handle.is_finished())
+        {
+            self.stop_recording();
+        }
+
         // Show export dialog once recorder has finished writing the file
         if self.finalizing_handle.as_ref().is_some_and(|h| h.is_finished()) {
             let handle = self.finalizing_handle.take().unwrap();
             self.finalizing_path = None;
+            let disk_full = self
+                .finalizing_disk_full
+                .take()
+                .is_some_and(|f| f.load(Ordering::Relaxed));
             match tokio::runtime::Handle::current().block_on(handle) {
                 Ok(Ok(path)) => {
                     self.last_output_path = Some(path);
                     self.show_export_dialog = true;
+                    if disk_full {
+                        self.error_message = Some(
+                            "Recording stopped automatically — your disk ran low on free \
+                             space (below 500 MB). The recording up to that point was saved."
+                                .to_string(),
+                        );
+                    }
                 }
                 Ok(Err(e)) => {
                     tracing::error!("recording finalize failed: {e}");
                     self.show_export_dialog = false;
+                    self.error_message = Some(format!("Recording failed: {e}"));
                 }
                 Err(e) => {
                     tracing::error!("recorder task did not complete cleanly: {e}");
                     self.show_export_dialog = false;
+                    self.error_message = Some(format!("Recording ended unexpectedly: {e}"));
                 }
             }
         }
@@ -349,6 +386,13 @@ impl eframe::App for App {
 
         // ── Center panel ──────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Cap content width instead of letting it stretch to fill however
+            // wide the window happens to be resized -- actual content here
+            // (status text, the two settings buttons, the output-dir row) has
+            // a natural width well under this; without the cap, widening the
+            // window just reopens empty right-side space rather than the
+            // window becoming more useful.
+            ui.set_max_width(440.0);
             section_header(ui, "STATUS");
 
             let is_paused = self.session.is_paused();
@@ -746,6 +790,25 @@ impl eframe::App for App {
             }
         }
 
+        // ── Error banner ──────────────────────────────────────────────────────
+        if let Some(msg) = self.error_message.clone() {
+            let mut close = false;
+            egui::Window::new("Error")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new(&msg).size(13.0).color(ACCENT_REC));
+                    ui.add_space(8.0);
+                    if ui.add(accent_button("Close", TEXT_MUTED)).clicked() {
+                        close = true;
+                    }
+                });
+            if close {
+                self.error_message = None;
+            }
+        }
+
         // ── Export dialog ─────────────────────────────────────────────────────
         if self.show_export_dialog {
             if let Some(path) = self.last_output_path.clone() {
@@ -906,8 +969,11 @@ fn accent_button(text: &str, color: egui::Color32) -> egui::Button<'static> {
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str) {
+    // 14pt: up from 10pt (too small to read comfortably as a section label),
+    // still clearly below the "PolyRec" heading's default 18pt so it reads as
+    // a subordinate label, not competing with it.
     ui.add_space(4.0);
-    ui.label(egui::RichText::new(title).size(10.0).color(TEXT_MUTED).strong());
+    ui.label(egui::RichText::new(title).size(14.0).color(TEXT_MUTED).strong());
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(4.0);
@@ -1063,9 +1129,15 @@ impl App {
             .active
             .as_ref()
             .map(|a| a.output_path.clone());
+        let disk_full = self
+            .session
+            .active
+            .as_ref()
+            .map(|a| Arc::clone(&a.disk_full_flag));
         self.session.apply(SessionAction::Stop);
         self.finalizing_handle = self.session.stop_capture();
         self.finalizing_path = path;
+        self.finalizing_disk_full = disk_full;
         self.recording_start = None;
         self.frame_count.store(0, Ordering::Relaxed);
         self.export_track_selection = self.selected_audio.clone();
@@ -1079,22 +1151,31 @@ impl App {
             .filter(|(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
-        self.session.apply(SessionAction::Start);
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps,
             resolution_mode: self.config.encode.resolution_mode(),
             bitrate_mode: self.config.encode.bitrate_mode(),
         };
-        self.session.start_capture(
+        // Only transition to the Recording state once start_capture actually
+        // succeeds -- otherwise a disk-full refusal would leave the UI showing
+        // "Recording" for a capture that never started.
+        match self.session.start_capture(
             source,
             selected_devices,
             self.app_audio_only,
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
             encode,
-        );
-        self.recording_start = Some(Instant::now());
+        ) {
+            Ok(_) => {
+                self.session.apply(SessionAction::Start);
+                self.recording_start = Some(Instant::now());
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Couldn't start recording: {e}"));
+            }
+        }
     }
 }
 

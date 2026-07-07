@@ -54,6 +54,11 @@ pub struct ActiveCapture {
     pub clock: Arc<RecordingClock>,
     pub pause_flag: Arc<AtomicBool>,
     pub output_path: PathBuf,
+    /// Set by the recorder actor if it stopped itself early because free disk
+    /// space dropped below `disk_space::MIN_FREE_BYTES` — the file up to that
+    /// point is still finalized normally, this just tells the caller *why* the
+    /// recording ended without the user pressing stop, so it can be surfaced.
+    pub disk_full_flag: Arc<AtomicBool>,
 }
 
 pub struct SessionManager {
@@ -93,12 +98,17 @@ impl SessionManager {
         frame_count: Arc<AtomicU64>,
         output_dir: &std::path::Path,
         encode: EncodeSettings,
-    ) -> PathBuf {
+    ) -> Result<PathBuf, AppError> {
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(AtomicBool::new(false));
 
         let app_name = app_name_from_exe(&source.exe_name);
         let (output_path, polyrec_dir) = prepare_recording_paths(output_dir, &app_name);
+
+        let free = crate::disk_space::free_bytes(&polyrec_dir)?;
+        if free < crate::disk_space::MIN_FREE_BYTES {
+            return Err(AppError::DiskFull(polyrec_dir));
+        }
 
         // All captured audio is downmixed/resampled to this fixed target in
         // run_audio_capture, regardless of each device's native mix format.
@@ -145,6 +155,7 @@ impl SessionManager {
         };
 
         // Spawn RecordingActor
+        let disk_full_flag = Arc::new(AtomicBool::new(false));
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
             polyrec_dir,
@@ -155,6 +166,7 @@ impl SessionManager {
             encode.codec.clone(),
             bitrate_bps,
             audio_specs,
+            Arc::clone(&disk_full_flag),
         );
 
         // Spawn video capture + pump
@@ -229,9 +241,10 @@ impl SessionManager {
             clock,
             pause_flag,
             output_path: output_path.clone(),
+            disk_full_flag,
         });
 
-        output_path
+        Ok(output_path)
     }
 
     /// Stops all capture and recording actors. Sends Stop to the recorder so it finalizes.
@@ -459,7 +472,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
+        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+            .expect("start_capture failed");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture returned None");
         let finalized_path = handle.await.expect("recorder task panicked").expect("finalize failed");
@@ -510,7 +524,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let temp_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
+        let temp_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+            .expect("start_capture failed");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -567,7 +582,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
+        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+            .expect("start_capture failed");
 
         // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
         // process until the sound finishes, but we want it playing concurrently
@@ -670,7 +686,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let temp_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
+        let temp_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+            .expect("start_capture failed");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
