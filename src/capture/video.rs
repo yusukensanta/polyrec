@@ -21,6 +21,9 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::Interface;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 
 /// Query the actual size Windows.Graphics.Capture will deliver frames at for this
 /// window. This is what `run_video_capture` below captures at — NOT `GetClientRect`,
@@ -43,6 +46,26 @@ pub fn query_capture_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
             .Size()
             .map_err(|e| AppError::Capture(format!("item.Size: {e}")))?;
         Ok((size.Width as u32, size.Height as u32))
+    }
+}
+
+/// Query the resolution of the monitor a window is on. Only used when the user
+/// explicitly picks resolution_mode = "display" — NOT the default (see the
+/// resolution-regression fix: forcing this by default caused nearest-neighbor
+/// upscale artifacts combined with an under-provisioned bitrate).
+pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
+    unsafe {
+        let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmonitor, &mut info).as_bool() {
+            return Err(AppError::Capture("GetMonitorInfoW failed".into()));
+        }
+        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
+        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
+        Ok((w, h))
     }
 }
 
@@ -264,5 +287,13 @@ mod tests {
         let out = scale_bgra(&src, 2, 2, 1, 1);
         assert_eq!(out.len(), 4);
         assert!(src.chunks(4).any(|px| px == out.as_slice()));
+    }
+
+    #[test]
+    fn query_display_size_returns_positive_dimensions() {
+        use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+        let hwnd = unsafe { GetDesktopWindow() };
+        let (w, h) = query_display_size(hwnd).expect("query_display_size failed");
+        assert!(w > 0 && h > 0, "expected positive display dimensions, got {w}x{h}");
     }
 }
