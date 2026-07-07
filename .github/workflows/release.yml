@@ -1,18 +1,44 @@
 name: Release
 
+# Two independent triggers, since both are valid ways to cut a release:
+# 1. push a v*.*.* tag directly -- softprops/action-gh-release creates the
+#    GitHub Release itself in that case.
+# 2. publish a Release through the GitHub UI/API against an existing tag --
+#    no new tag push happens, so trigger 1 alone would never fire for this.
+#    action-gh-release detects the already-existing release by tag name and
+#    just uploads the zip to it instead of erroring.
 on:
   push:
     tags:
       - "v*.*.*"
+  release:
+    types: [published]
 
 permissions:
   contents: write
+
+# Creating a Release via the GitHub UI against a brand-new tag fires BOTH
+# triggers above (the tag push, then the release publish) -- queue the second
+# run instead of letting it race the first for the same release's assets.
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
   build-and-release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "release") {
+            "${{ github.event.release.tag_name }}"
+          } else {
+            "${{ github.ref_name }}"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -22,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $tagVersion = "${{ steps.tag.outputs.tag }}".TrimStart('v')
           if ($cargoVersion -ne $tagVersion) {
             Write-Error "Tag v$tagVersion does not match Cargo.toml's version ($cargoVersion) -- bump Cargo.toml and retag."
             exit 1
@@ -34,7 +60,7 @@ jobs:
       - name: Package zip
         shell: pwsh
         run: |
-          $ver = "${{ github.ref_name }}"
+          $ver = "${{ steps.tag.outputs.tag }}"
           $stagingDir = "polyrec-$ver-windows-x64"
           New-Item -ItemType Directory -Path $stagingDir | Out-Null
           Copy-Item target/release/polyrec.exe $stagingDir/
@@ -42,8 +68,9 @@ jobs:
           Copy-Item LICENSE $stagingDir/
           Compress-Archive -Path $stagingDir/* -DestinationPath "$stagingDir.zip"
 
-      - name: Create GitHub Release
+      - name: Create/update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: polyrec-*.zip
           generate_release_notes: true
