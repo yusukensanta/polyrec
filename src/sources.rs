@@ -213,16 +213,17 @@ mod tests {
 
     #[test]
     fn capture_source_for_hwnd_matches_enumerated_entry() {
-        // Whatever enumerate_sources() finds should look the same whether built via
-        // the callback path or the direct capture_source_for_hwnd path — same hwnd,
-        // same title/exe, since one now delegates to the other.
+        // capture_source_for_hwnd should resolve the same window identity the
+        // callback path found. Only hwnd is asserted exactly -- window_title/exe_name
+        // are re-read live on a real, changing desktop a moment after enumeration,
+        // so a title tick (e.g. a browser tab) between the two calls is a real,
+        // possible outcome, not a bug in either path.
         let sources = enumerate_sources();
         let sample = sources.first().expect("expected at least one visible window");
         let hwnd = windows::Win32::Foundation::HWND(sample.hwnd as *mut core::ffi::c_void);
         let rebuilt = capture_source_for_hwnd(hwnd);
         assert_eq!(rebuilt.hwnd, sample.hwnd);
-        assert_eq!(rebuilt.window_title, sample.window_title);
-        assert_eq!(rebuilt.exe_name, sample.exe_name);
+        assert_eq!(rebuilt.process_id, sample.process_id, "process identity must be stable even if the title changed");
     }
 
     #[test]

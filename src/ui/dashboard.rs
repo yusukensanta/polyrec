@@ -52,6 +52,7 @@ pub struct App {
     app_audio_only: bool,
     overlay_enabled: bool,
     show_quality_popup: bool,
+    show_hotkeys_popup: bool,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -109,6 +110,7 @@ impl App {
             app_audio_only: false,
             overlay_enabled,
             show_quality_popup: false,
+            show_hotkeys_popup: false,
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
@@ -187,6 +189,16 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PolyRec");
+                // Single source of truth for the app's version: Cargo.toml's `version`
+                // field, baked in at compile time. Never hardcode a version string
+                // elsewhere — the release CI also checks the git tag against this
+                // same field before publishing, so this label always matches what
+                // update_check compares against.
+                ui.label(
+                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .size(11.0)
+                        .color(TEXT_MUTED),
+                );
                 ui.separator();
                 if ui.button("⟳ Refresh").clicked() {
                     self.sources = enumerate_sources();
@@ -445,13 +457,22 @@ impl eframe::App for App {
             ui.add_space(16.0);
             section_header(ui, "OUTPUT");
 
-            if ui
-                .add(egui::Button::new(egui::RichText::new("⚙ Quality").color(ACCENT_SECONDARY)))
-                .on_hover_text("FPS, codec, resolution, and bitrate for the next recording")
-                .clicked()
-            {
-                self.show_quality_popup = true;
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("⚙ Quality").color(ACCENT_SECONDARY)))
+                    .on_hover_text("FPS, codec, resolution, and bitrate for the next recording")
+                    .clicked()
+                {
+                    self.show_quality_popup = true;
+                }
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("⌨ Hotkeys").color(ACCENT_SECONDARY)))
+                    .on_hover_text("Rebind the start/stop, pause, and overlay-toggle shortcuts")
+                    .clicked()
+                {
+                    self.show_hotkeys_popup = true;
+                }
+            });
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
@@ -646,6 +667,80 @@ impl eframe::App for App {
                 if let Err(e) = self.config.save() {
                     tracing::error!("failed to save config: {e}");
                 }
+            }
+        }
+
+        // ── Hotkeys settings popup ────────────────────────────────────────────
+        if self.show_hotkeys_popup {
+            const FUNCTION_KEYS: [&str; 12] = [
+                "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+            ];
+            let mut close = false;
+            egui::Window::new("Hotkeys")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    section_header(ui, "START / STOP RECORDING");
+                    ui.horizontal_wrapped(|ui| {
+                        for key in FUNCTION_KEYS {
+                            ui.selectable_value(&mut self.config.hotkeys.start_stop, key.to_string(), key);
+                        }
+                    });
+
+                    section_header(ui, "PAUSE / RESUME");
+                    ui.horizontal_wrapped(|ui| {
+                        for key in FUNCTION_KEYS {
+                            ui.selectable_value(&mut self.config.hotkeys.pause, key.to_string(), key);
+                        }
+                    });
+
+                    section_header(ui, "TOGGLE OVERLAY");
+                    ui.horizontal_wrapped(|ui| {
+                        for key in FUNCTION_KEYS {
+                            ui.selectable_value(&mut self.config.hotkeys.toggle_overlay, key.to_string(), key);
+                        }
+                    });
+
+                    let bindings = [
+                        &self.config.hotkeys.start_stop,
+                        &self.config.hotkeys.pause,
+                        &self.config.hotkeys.toggle_overlay,
+                    ];
+                    let has_collision = bindings[0] == bindings[1]
+                        || bindings[0] == bindings[2]
+                        || bindings[1] == bindings[2];
+                    if has_collision {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("⚠ Two actions share the same key — only one will respond.")
+                                .size(11.0)
+                                .color(ACCENT_PAUSE),
+                        );
+                    }
+
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if close {
+                self.show_hotkeys_popup = false;
+                if let Err(e) = self.config.save() {
+                    tracing::error!("failed to save config: {e}");
+                }
+                // The listener registers its hotkeys once at spawn time, so a rebind
+                // needs a fresh thread — stop() unregisters the old bindings before
+                // the new listener registers the (possibly changed) ones, avoiding a
+                // stuck registration on a key the user just reassigned elsewhere.
+                if let Some(old) = self.hotkey_listener.take() {
+                    old.stop();
+                }
+                self.hotkey_listener = Some(HotkeyListener::spawn(
+                    &self.config.hotkeys.start_stop,
+                    &self.config.hotkeys.pause,
+                    &self.config.hotkeys.toggle_overlay,
+                ));
             }
         }
 
