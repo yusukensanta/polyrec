@@ -27,7 +27,11 @@ jobs:
   build-and-release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit SHA, not a mutable version tag -- a compromised or
+      # re-tagged upstream action can't silently swap in different code this
+      # way. Comment notes the version the SHA corresponds to, for humans and
+      # for Dependabot to track updates against.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve tag
         id: tag
@@ -40,9 +44,15 @@ jobs:
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain doesn't tag releases -- "stable" is a real,
+      # continuously-updated branch in that repo (this is its documented
+      # normal usage), so pinning here means the exact commit currently at
+      # the tip of that branch rather than a version.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Verify tag matches Cargo.toml version
         shell: pwsh
@@ -69,7 +79,7 @@ jobs:
           Compress-Archive -Path $stagingDir/* -DestinationPath "$stagingDir.zip"
 
       - name: Create/update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: polyrec-*.zip
