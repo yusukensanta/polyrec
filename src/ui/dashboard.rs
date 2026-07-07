@@ -131,7 +131,7 @@ impl eframe::App for App {
         // Poll hotkey events (non-blocking)
         while let Some(event) = self.hotkey_listener.as_ref().and_then(|h| h.try_recv()) {
             match event {
-                HotkeyEvent::StartStop => self.handle_rec_button(is_recording),
+                HotkeyEvent::StartStop => self.handle_hotkey_start_stop(is_recording),
                 HotkeyEvent::Pause => self.handle_pause_button(),
                 HotkeyEvent::ToggleOverlay => {
                     self.overlay_enabled = !self.overlay_enabled;
@@ -864,45 +864,90 @@ impl App {
     fn handle_rec_button(&mut self, is_recording: bool) {
         let is_paused = self.session.is_paused();
         if is_recording || is_paused {
-            let path = self
-                .session
-                .active
-                .as_ref()
-                .map(|a| a.output_path.clone());
-            self.session.apply(SessionAction::Stop);
-            self.finalizing_handle = self.session.stop_capture();
-            self.finalizing_path = path;
-            self.recording_start = None;
-            self.frame_count.store(0, Ordering::Relaxed);
-            self.export_track_selection = self.selected_audio.clone();
+            self.stop_recording();
         } else if let Some(idx) = self.selected_source {
             let Some(source) = self.sources.get(idx).cloned() else {
                 self.selected_source = None;
                 return;
             };
-            let selected_devices: Vec<_> = self
-                .audio_devices
-                .iter()
-                .zip(self.selected_audio.iter())
-                .filter(|(_, &sel)| sel)
-                .map(|(dev, _)| dev.clone())
-                .collect();
-            self.session.apply(SessionAction::Start);
-            let encode = EncodeSettings {
-                codec: self.config.encode.codec.clone(),
-                fps: self.config.encode.fps,
-                resolution_mode: self.config.encode.resolution_mode(),
-                bitrate_mode: self.config.encode.bitrate_mode(),
-            };
-            self.session.start_capture(
-                source,
-                selected_devices,
-                self.app_audio_only,
-                Arc::clone(&self.frame_count),
-                &self.config.output_dir,
-                encode,
-            );
-            self.recording_start = Some(Instant::now());
+            self.start_recording_with_source(source);
         }
+    }
+
+    /// F9 (or whatever start/stop hotkey is configured) works globally, without the
+    /// PolyRec window needing focus — so unlike the REC button, it can't rely on a
+    /// manual source-list selection. It captures whatever window is currently in the
+    /// foreground instead, so "press hotkey, record what I'm doing right now" works
+    /// while alt-tabbed into a game with the dashboard never brought to front.
+    fn handle_hotkey_start_stop(&mut self, is_recording: bool) {
+        let is_paused = self.session.is_paused();
+        if is_recording || is_paused {
+            self.stop_recording();
+        } else if let Some(source) = foreground_capture_source() {
+            self.start_recording_with_source(source);
+        } else {
+            tracing::warn!(
+                "start/stop hotkey pressed but the foreground window isn't capturable (or it's PolyRec itself)"
+            );
+        }
+    }
+
+    fn stop_recording(&mut self) {
+        let path = self
+            .session
+            .active
+            .as_ref()
+            .map(|a| a.output_path.clone());
+        self.session.apply(SessionAction::Stop);
+        self.finalizing_handle = self.session.stop_capture();
+        self.finalizing_path = path;
+        self.recording_start = None;
+        self.frame_count.store(0, Ordering::Relaxed);
+        self.export_track_selection = self.selected_audio.clone();
+    }
+
+    fn start_recording_with_source(&mut self, source: CaptureSource) {
+        let selected_devices: Vec<_> = self
+            .audio_devices
+            .iter()
+            .zip(self.selected_audio.iter())
+            .filter(|(_, &sel)| sel)
+            .map(|(dev, _)| dev.clone())
+            .collect();
+        self.session.apply(SessionAction::Start);
+        let encode = EncodeSettings {
+            codec: self.config.encode.codec.clone(),
+            fps: self.config.encode.fps,
+            resolution_mode: self.config.encode.resolution_mode(),
+            bitrate_mode: self.config.encode.bitrate_mode(),
+        };
+        self.session.start_capture(
+            source,
+            selected_devices,
+            self.app_audio_only,
+            Arc::clone(&self.frame_count),
+            &self.config.output_dir,
+            encode,
+        );
+        self.recording_start = Some(Instant::now());
+    }
+}
+
+/// The window currently in the foreground, as a `CaptureSource` — or `None` if
+/// there isn't one, or it belongs to this process (PolyRec's own dashboard/overlay
+/// windows), which would otherwise let a hotkey press while focused on our own
+/// window "record" it instead of whatever the user actually meant to capture.
+fn foreground_capture_source() -> Option<CaptureSource> {
+    unsafe {
+        let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == std::process::id() {
+            return None;
+        }
+        Some(crate::sources::capture_source_for_hwnd(hwnd))
     }
 }

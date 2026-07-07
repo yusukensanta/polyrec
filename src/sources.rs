@@ -32,36 +32,51 @@ unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
         return BOOL(1);
     }
 
-    let title_len = GetWindowTextLengthW(hwnd);
-    if title_len == 0 {
+    if GetWindowTextLengthW(hwnd) == 0 {
         return BOOL(1);
     }
 
-    let mut title_buf = vec![0u16; (title_len + 1) as usize];
-    GetWindowTextW(hwnd, &mut title_buf);
-    let window_title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
-
-    let mut process_id = 0u32;
-    GetWindowThreadProcessId(hwnd, Some(&mut process_id));
-
-    let exe_path = get_exe_path(process_id);
-    let exe_name = exe_path
-        .as_deref()
-        .and_then(|p| std::path::Path::new(p).file_name())
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "Unknown".into());
-    let icon_rgba = exe_path.as_deref().and_then(extract_exe_icon_rgba);
-
-    sources.push(CaptureSource {
-        process_id,
-        window_title,
-        exe_name,
-        hwnd: hwnd.0 as usize,
-        icon_rgba,
-    });
+    sources.push(capture_source_for_hwnd(hwnd));
 
     BOOL(1)
+}
+
+/// Builds a `CaptureSource` for an arbitrary window handle — used both by the
+/// enumeration above (for windows that already passed its visible/titled filter)
+/// and directly for a specific window the caller already knows about (e.g. the
+/// current foreground window for a hotkey-triggered recording), where there's no
+/// other candidate to fall back to if the title happens to be empty.
+pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
+    unsafe {
+        let title_len = GetWindowTextLengthW(hwnd);
+        let window_title = if title_len > 0 {
+            let mut title_buf = vec![0u16; (title_len + 1) as usize];
+            GetWindowTextW(hwnd, &mut title_buf);
+            String::from_utf16_lossy(&title_buf[..title_len as usize])
+        } else {
+            String::new()
+        };
+
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+
+        let exe_path = get_exe_path(process_id);
+        let exe_name = exe_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Unknown".into());
+        let icon_rgba = exe_path.as_deref().and_then(extract_exe_icon_rgba);
+
+        CaptureSource {
+            process_id,
+            window_title,
+            exe_name,
+            hwnd: hwnd.0 as usize,
+            icon_rgba,
+        }
+    }
 }
 
 fn get_exe_path(pid: u32) -> Option<String> {
@@ -194,6 +209,20 @@ mod tests {
             sources.iter().any(|s| s.icon_rgba.is_some()),
             "expected at least one source with an extractable icon"
         );
+    }
+
+    #[test]
+    fn capture_source_for_hwnd_matches_enumerated_entry() {
+        // Whatever enumerate_sources() finds should look the same whether built via
+        // the callback path or the direct capture_source_for_hwnd path — same hwnd,
+        // same title/exe, since one now delegates to the other.
+        let sources = enumerate_sources();
+        let sample = sources.first().expect("expected at least one visible window");
+        let hwnd = windows::Win32::Foundation::HWND(sample.hwnd as *mut core::ffi::c_void);
+        let rebuilt = capture_source_for_hwnd(hwnd);
+        assert_eq!(rebuilt.hwnd, sample.hwnd);
+        assert_eq!(rebuilt.window_title, sample.window_title);
+        assert_eq!(rebuilt.exe_name, sample.exe_name);
     }
 
     #[test]
