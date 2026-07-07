@@ -4,8 +4,10 @@ pub mod state;
 use crate::capture::audio::{
     run_audio_capture, run_process_loopback_capture, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
 };
-use crate::capture::video::{query_capture_size, run_video_capture};
+use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
+use crate::config::{BitrateMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
+use crate::encode::writer::video_bitrate_bps;
 use crate::encode::RecordingCommand;
 use crate::error::AppError;
 use crate::session::clock::RecordingClock;
@@ -19,7 +21,30 @@ use tokio::task::JoinHandle;
 
 const VIDEO_CHANNEL_CAPACITY: usize = 4;
 const AUDIO_CHANNEL_CAPACITY: usize = 64;
-const RECORDING_FPS: u32 = 60;
+
+/// Resolved encoder settings for one recording — built by the caller (the dashboard,
+/// from `Config::encode`) and passed into `start_capture`.
+#[derive(Debug, Clone)]
+pub struct EncodeSettings {
+    pub codec: String,
+    pub fps: u32,
+    pub resolution_mode: ResolutionMode,
+    pub bitrate_mode: BitrateMode,
+}
+
+impl Default for EncodeSettings {
+    fn default() -> Self {
+        let d = crate::config::Config::default().encode;
+        let resolution_mode = d.resolution_mode();
+        let bitrate_mode = d.bitrate_mode();
+        Self {
+            codec: d.codec,
+            fps: d.fps,
+            resolution_mode,
+            bitrate_mode,
+        }
+    }
+}
 
 pub struct ActiveCapture {
     capture_handles: Vec<JoinHandle<()>>,
@@ -67,6 +92,7 @@ impl SessionManager {
         app_audio_only: bool,
         frame_count: Arc<AtomicU64>,
         output_dir: &std::path::Path,
+        encode: EncodeSettings,
     ) -> PathBuf {
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(AtomicBool::new(false));
@@ -96,20 +122,35 @@ impl SessionManager {
             }
         };
 
-        // Recordings default to the captured window's own resolution. Upscaling to
-        // the display's native resolution was tried previously, but nearest-neighbor
-        // scaling a smaller window up to a much larger, non-integer-ratio display size
-        // produces visible blocky/grainy artifacts, and a fixed encoder bitrate tuned
-        // for the window's own size becomes far too low once the frame is stretched.
-        // Recording 1:1 avoids both problems (scale_bgra becomes a no-op).
-        let (output_width, output_height) = (capture_width, capture_height);
+        // Only query the display when the user explicitly asked for it — this is not
+        // the default (see the resolution-regression fix). No wasted syscall otherwise.
+        let display_size = if matches!(encode.resolution_mode, ResolutionMode::Display) {
+            match query_display_size(real_hwnd) {
+                Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
+                Err(e) => {
+                    tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", source.hwnd);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (output_width, output_height) =
+            resolve_output_size(&encode.resolution_mode, (capture_width, capture_height), display_size);
+
+        let bitrate_bps = match encode.bitrate_mode {
+            BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
+            BitrateMode::Manual(bps) => bps,
+        };
 
         // Spawn RecordingActor
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
             output_width,
             output_height,
-            RECORDING_FPS,
+            encode.fps,
+            encode.codec.clone(),
+            bitrate_bps,
             audio_specs,
         );
 
@@ -254,6 +295,21 @@ fn make_output_path(base_dir: &std::path::Path) -> PathBuf {
     dir.join(format!("polyrec_{ts}.mp4"))
 }
 
+/// Pure resolution-mode resolution — no I/O, so it's directly unit-testable without
+/// touching real monitor/capture APIs. `display_size` is `None` when the caller didn't
+/// query it (mode != Display) or the query failed.
+fn resolve_output_size(
+    mode: &ResolutionMode,
+    capture_size: (u32, u32),
+    display_size: Option<(u32, u32)>,
+) -> (u32, u32) {
+    match mode {
+        ResolutionMode::Native => capture_size,
+        ResolutionMode::Display => display_size.unwrap_or(capture_size),
+        ResolutionMode::Custom(w, h) => (*w, *h),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +354,40 @@ mod tests {
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
     }
 
+    #[test]
+    fn resolve_output_size_native_uses_capture_size() {
+        let size = resolve_output_size(&crate::config::ResolutionMode::Native, (1280, 720), Some((2560, 1440)));
+        assert_eq!(size, (1280, 720));
+    }
+
+    #[test]
+    fn resolve_output_size_display_uses_display_size_when_available() {
+        let size = resolve_output_size(&crate::config::ResolutionMode::Display, (1280, 720), Some((2560, 1440)));
+        assert_eq!(size, (2560, 1440));
+    }
+
+    #[test]
+    fn resolve_output_size_display_falls_back_to_capture_size_when_query_failed() {
+        let size = resolve_output_size(&crate::config::ResolutionMode::Display, (1280, 720), None);
+        assert_eq!(size, (1280, 720));
+    }
+
+    #[test]
+    fn resolve_output_size_custom_uses_explicit_values() {
+        let size = resolve_output_size(&crate::config::ResolutionMode::Custom(1920, 1080), (1280, 720), Some((2560, 1440)));
+        assert_eq!(size, (1920, 1080));
+    }
+
+    #[test]
+    fn encode_settings_default_matches_config_default() {
+        let settings = EncodeSettings::default();
+        let config_default = crate::config::Config::default().encode;
+        assert_eq!(settings.fps, config_default.fps);
+        assert_eq!(settings.codec, config_default.codec);
+        assert!(matches!(settings.resolution_mode, crate::config::ResolutionMode::Native));
+        assert!(matches!(settings.bitrate_mode, crate::config::BitrateMode::Auto));
+    }
+
     /// Verifies the recorded video's actual encoded resolution matches the captured
     /// window's own native size (not upscaled/downscaled to the display's resolution —
     /// that upscaling was reverted because nearest-neighbor scaling to a much larger,
@@ -319,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path());
+        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture returned None");
         let finalized_path = handle.await.expect("recorder task panicked").expect("finalize failed");
@@ -370,7 +460,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let output_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path());
+        let output_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -423,7 +513,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path());
+        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
 
         std::process::Command::new("powershell")
             .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
@@ -522,7 +612,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let output_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path());
+        let output_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default());
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 

@@ -14,6 +14,8 @@ pub fn spawn_recording_actor(
     width: u32,
     height: u32,
     fps: u32,
+    codec: String,
+    bitrate_bps: u32,
     audio_device_specs: Vec<(u32, u16)>,
 ) -> (
     mpsc::Sender<RecordingCommand>,
@@ -22,7 +24,7 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(&output_path, width, height, fps, &audio_device_specs)?;
+        let writer = RecordingWriter::new(&output_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs)?;
         writer.begin_writing()?;
 
         while let Some(cmd) = rx.blocking_recv() {

@@ -5,11 +5,13 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSinkWriter, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateMediaType,
     MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
     MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_ARGB32, MFVideoFormat_H264,
+    MFVideoFormat_HEVC,
     MFVideoInterlace_Progressive, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
     MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
     MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFSTARTUP_FULL,
 };
+use windows::core::GUID;
 use windows::core::HSTRING;
 
 const AUDIO_BITRATE_BPS: u32 = 192_000;
@@ -21,7 +23,7 @@ const AUDIO_BITRATE_BPS: u32 = 192_000;
 /// blockiness you'd expect from under-provisioning.
 const VIDEO_BITS_PER_PIXEL_PER_FRAME: f64 = 0.1;
 
-fn video_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
+pub(crate) fn video_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
     let raw = width as f64 * height as f64 * fps as f64 * VIDEO_BITS_PER_PIXEL_PER_FRAME;
     raw.round() as u32
 }
@@ -40,6 +42,8 @@ impl RecordingWriter {
         width: u32,
         height: u32,
         fps: u32,
+        codec: &str,
+        bitrate_bps: u32,
         audio_tracks: &[(u32, u16)],
     ) -> Result<Self, AppError> {
         unsafe {
@@ -65,11 +69,20 @@ impl RecordingWriter {
                 MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
                     .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
 
-            let video_out = make_video_output_type(width, height, fps)?;
+            let requested_subtype = if codec == "h265" { MFVideoFormat_HEVC } else { MFVideoFormat_H264 };
+            let video_out = make_video_output_type(width, height, fps, requested_subtype, bitrate_bps)?;
+            let video_stream = match writer.AddStream(&video_out) {
+                Ok(idx) => idx,
+                Err(e) if requested_subtype == MFVideoFormat_HEVC => {
+                    tracing::warn!("HEVC AddStream failed ({e}), falling back to H264");
+                    let fallback_out = make_video_output_type(width, height, fps, MFVideoFormat_H264, bitrate_bps)?;
+                    writer
+                        .AddStream(&fallback_out)
+                        .map_err(|e| AppError::Encode(format!("AddStream video (H264 fallback): {e}")))?
+                }
+                Err(e) => return Err(AppError::Encode(format!("AddStream video: {e}"))),
+            };
             let video_in = make_video_input_type(width, height, fps)?;
-            let video_stream = writer
-                .AddStream(&video_out)
-                .map_err(|e| AppError::Encode(format!("AddStream video: {e}")))?;
             writer
                 .SetInputMediaType(video_stream, &video_in, None)
                 .map_err(|e| AppError::Encode(format!("SetInputMediaType video: {e}")))?;
@@ -166,18 +179,20 @@ unsafe fn make_video_output_type(
     width: u32,
     height: u32,
     fps: u32,
+    subtype: GUID,
+    bitrate_bps: u32,
 ) -> Result<IMFMediaType, AppError> {
     let t =
         MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
     t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
         .map_err(|e| AppError::Encode(format!("SetGUID MajorType: {e}")))?;
-    t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
-        .map_err(|e| AppError::Encode(format!("SetGUID H264: {e}")))?;
+    t.SetGUID(&MF_MT_SUBTYPE, &subtype)
+        .map_err(|e| AppError::Encode(format!("SetGUID subtype: {e}")))?;
     t.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
         .map_err(|e| AppError::Encode(format!("SetUINT64 frame_size: {e}")))?;
     t.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(fps, 1))
         .map_err(|e| AppError::Encode(format!("SetUINT64 frame_rate: {e}")))?;
-    t.SetUINT32(&MF_MT_AVG_BITRATE, video_bitrate_bps(width, height, fps))
+    t.SetUINT32(&MF_MT_AVG_BITRATE, bitrate_bps)
         .map_err(|e| AppError::Encode(format!("SetUINT32 bitrate: {e}")))?;
     // MFVideoInterlace_Progressive = MFVideoInterlaceMode(2i32)
     t.SetUINT32(
@@ -316,6 +331,44 @@ mod tests {
     }
 
     #[test]
+    fn writer_accepts_explicit_bitrate_and_h264_codec() {
+        use std::time::Duration;
+        use crate::types::VideoFrame;
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("h264_test.mp4");
+        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &[])
+            .expect("RecordingWriter::new with explicit bitrate failed");
+        writer.begin_writing().expect("begin_writing failed");
+        writer
+            .write_video(VideoFrame { pts: Duration::ZERO, data: vec![0u8; 64 * 64 * 4] })
+            .expect("write_video failed");
+        let path = writer.finalize().expect("finalize failed");
+        assert!(path.metadata().unwrap().len() > 0, "output file is empty");
+    }
+
+    /// HEVC MFT availability varies by Windows version/install — this exercises the
+    /// real encoder (or its automatic H264 fallback) rather than asserting a specific
+    /// codec landed in the file, since either outcome is a pass for this codebase.
+    #[tokio::test]
+    #[ignore]
+    async fn writer_accepts_h265_codec_or_falls_back_cleanly() {
+        use std::time::Duration;
+        use crate::types::VideoFrame;
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("h265_test.mp4");
+        let writer = RecordingWriter::new(&output, 64, 64, 30, "h265", 500_000, &[])
+            .expect("RecordingWriter::new with h265 (or its fallback) failed");
+        writer.begin_writing().expect("begin_writing failed");
+        writer
+            .write_video(VideoFrame { pts: Duration::ZERO, data: vec![0u8; 64 * 64 * 4] })
+            .expect("write_video failed");
+        let path = writer.finalize().expect("finalize failed");
+        assert!(path.metadata().unwrap().len() > 0, "output file is empty");
+    }
+
+    #[test]
     fn pack_u64_encodes_correctly() {
         assert_eq!(pack_u64(1920, 1080), 0x0000_0780_0000_0438);
         assert_eq!(pack_u64(60, 1), 0x0000_003C_0000_0001);
@@ -345,7 +398,7 @@ mod tests {
 
         // 64×64 at 30fps, one stereo 48kHz audio track
         let audio_tracks = vec![(48000u32, 2u16)];
-        let writer = RecordingWriter::new(&output, 64, 64, 30, &audio_tracks);
+        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &audio_tracks);
         assert!(writer.is_ok(), "RecordingWriter::new failed: {:?}", writer.err());
         let writer = writer.unwrap();
 

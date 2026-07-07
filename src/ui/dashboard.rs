@@ -2,7 +2,7 @@ use crate::capture::audio::enumerate_audio_devices;
 use crate::config::Config;
 use crate::encode::remux::remux;
 use crate::hotkeys::{HotkeyEvent, HotkeyListener};
-use crate::session::{state::SessionAction, SessionManager};
+use crate::session::{state::SessionAction, EncodeSettings, SessionManager};
 use crate::sources::enumerate_sources;
 use crate::types::{AudioDevice, CaptureSource};
 use eframe::egui;
@@ -713,12 +713,21 @@ impl App {
                 .map(|(dev, _)| dev.clone())
                 .collect();
             self.session.apply(SessionAction::Start);
+            // TODO(Task 5): build this from dashboard-level user input instead of the
+            // persisted config directly, once the settings UI exists.
+            let encode = EncodeSettings {
+                codec: self.config.encode.codec.clone(),
+                fps: self.config.encode.fps,
+                resolution_mode: self.config.encode.resolution_mode(),
+                bitrate_mode: self.config.encode.bitrate_mode(),
+            };
             self.session.start_capture(
                 source,
                 selected_devices,
                 self.app_audio_only,
                 Arc::clone(&self.frame_count),
                 &self.config.output_dir,
+                encode,
             );
             self.recording_start = Some(Instant::now());
         }
