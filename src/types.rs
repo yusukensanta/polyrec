@@ -22,6 +22,8 @@ pub struct CaptureSource {
     pub window_title: String,
     pub exe_name: String,
     pub hwnd: usize,
+    /// (RGBA bytes, width, height) of the source exe's small icon, if extractable.
+    pub icon_rgba: Option<(Vec<u8>, u32, u32)>,
 }
 
 /// Captured video frame — CPU-mapped BGRA bytes (Plan 2).
