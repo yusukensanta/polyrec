@@ -3,13 +3,108 @@ use crate::session::clock::RecordingClock;
 use crate::types::{AudioDevice, AudioSamples, TrackId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use windows::core::{implement, Interface};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eMultimedia, eRender, IAudioCaptureClient, IAudioClient,
-    IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_LOOPBACK,
+    eCapture, eConsole, eMultimedia, eRender, ActivateAudioInterfaceAsync,
+    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+    IMMDeviceEnumerator, MMDeviceEnumerator, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, WAVEFORMATEX,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ};
 use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
+use windows::core::PROPVARIANT;
+
+/// Fixed target format all captured audio is normalized to before it reaches the
+/// encoder. Devices report all kinds of native mix formats (e.g. 96kHz/8ch);
+/// the AAC MFT doesn't accept most of those directly, so we always downmix/resample
+/// to this before packaging `AudioSamples`.
+pub const TARGET_SAMPLE_RATE: u32 = 48000;
+pub const TARGET_CHANNELS: u16 = 2;
+
+/// Convert interleaved `input` (native `channels` per frame) to interleaved stereo.
+/// - 1 channel: duplicated to L=R (no information loss)
+/// - 2 channels: passed through unchanged
+/// - >2 channels: all channels averaged equally into both L and R (simple,
+///   safe fold-down; not a proper Lo/Ro downmix)
+fn to_stereo(input: &[f32], channels: u16) -> Vec<f32> {
+    match channels {
+        0 => Vec::new(),
+        1 => input.iter().flat_map(|&s| [s, s]).collect(),
+        2 => input.to_vec(),
+        n => {
+            let n = n as usize;
+            input
+                .chunks_exact(n)
+                .flat_map(|frame| {
+                    let avg = frame.iter().sum::<f32>() / n as f32;
+                    [avg, avg]
+                })
+                .collect()
+        }
+    }
+}
+
+/// Stateful linear-interpolation resampler. Carries fractional position and the
+/// last input frame across calls so buffer boundaries (WASAPI delivers ~10ms
+/// chunks continuously) don't introduce discontinuities.
+struct LinearResampler {
+    channels: usize,
+    ratio: f64,
+    pos: f64,
+    prev_frame: Vec<f32>,
+}
+
+impl LinearResampler {
+    fn new(in_rate: u32, out_rate: u32, channels: u16) -> Self {
+        Self {
+            channels: channels as usize,
+            ratio: in_rate as f64 / out_rate as f64,
+            pos: 1.0,
+            prev_frame: vec![0.0; channels as usize],
+        }
+    }
+
+    /// `input` is interleaved f32 at `self.channels` channels/frame.
+    /// Returns resampled interleaved f32, same channel count.
+    fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+        let ch = self.channels;
+        let in_frames = input.len() / ch;
+        fn frame_at<'a>(i: usize, input: &'a [f32], prev: &'a [f32], ch: usize) -> &'a [f32] {
+            if i == 0 { prev } else { &input[(i - 1) * ch..i * ch] }
+        }
+
+        let mut out = Vec::new();
+        while (self.pos.floor() as usize) <= in_frames {
+            let i0 = self.pos.floor() as usize;
+            let i1 = i0 + 1;
+            let frac = self.pos - i0 as f64;
+            let f0 = frame_at(i0, input, &self.prev_frame, ch);
+            let f1_owned;
+            let f1: &[f32] = if i1 <= in_frames {
+                frame_at(i1, input, &self.prev_frame, ch)
+            } else {
+                f1_owned = f0.to_vec();
+                &f1_owned
+            };
+            for c in 0..ch {
+                let sample = f0[c] as f64 * (1.0 - frac) + f1[c] as f64 * frac;
+                out.push(sample as f32);
+            }
+            self.pos += self.ratio;
+        }
+
+        self.pos -= in_frames as f64;
+        self.prev_frame.copy_from_slice(&input[(in_frames - 1) * ch..in_frames * ch]);
+        out
+    }
+}
 
 /// Enumerate default render (loopback) and default capture (microphone) endpoints.
 pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
@@ -141,124 +236,304 @@ pub async fn run_audio_capture(
             )
             .map_err(|e| AppError::Windows(format!("IAudioClient::Initialize: {e}")))?;
 
-        let capture_client: IAudioCaptureClient = audio_client
-            .GetService()
-            .map_err(|e| AppError::Windows(format!("GetService IAudioCaptureClient: {e}")))?;
-
-        audio_client
-            .Start()
-            .map_err(|e| AppError::Windows(format!("IAudioClient::Start: {e}")))?;
-
         let sample_rate = (*mix_format).nSamplesPerSec;
         let channels = (*mix_format).nChannels;
         if channels == 0 {
             return Err(AppError::Windows("WASAPI mix format has 0 channels".into()));
         }
+        let bytes_per_frame = (*mix_format).nBlockAlign as usize;
 
-        loop {
-            let mut data: *mut u8 = std::ptr::null_mut();
-            let mut frames_available: u32 = 0;
-            let mut flags: u32 = 0;
+        run_capture_loop(audio_client, sample_rate, channels, bytes_per_frame, track_id, clock, pause_flag, tx).await
+    }
+}
 
-            match capture_client.GetBuffer(&mut data, &mut frames_available, &mut flags, None, None) {
-                Ok(()) if frames_available > 0 => {
-                    let bytes_per_frame = (*mix_format).nBlockAlign as usize;
-                    let bytes_per_sample = bytes_per_frame / channels as usize;
-                    let sample_count = frames_available as usize * channels as usize;
-                    let mut samples = vec![0.0f32; sample_count];
+/// Capture only the audio produced by `target_pid` (and, if `include_tree`, its child
+/// processes) via the Windows 10 2004+ Process Loopback Capture API, instead of the
+/// full desktop audio mix. Forwards PCM f32 samples to `tx`, same as `run_audio_capture`.
+pub async fn run_process_loopback_capture(
+    target_pid: u32,
+    include_tree: bool,
+    track_id: TrackId,
+    clock: Arc<RecordingClock>,
+    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: mpsc::Sender<AudioSamples>,
+) -> Result<(), AppError> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-                    for i in 0..sample_count {
-                        let byte_offset = i * bytes_per_sample;
-                        let sample_ptr = data.add(byte_offset);
-                        samples[i] = if bytes_per_sample == 4 {
-                            *(sample_ptr as *const f32)
-                        } else if bytes_per_sample == 2 {
-                            *(sample_ptr as *const i16) as f32 / 32768.0
-                        } else {
-                            0.0
-                        };
-                    }
+        let audio_client = activate_process_loopback_audio_client(target_pid, include_tree)?;
 
-                    capture_client
-                        .ReleaseBuffer(frames_available)
-                        .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
+        // Process loopback is a synthesized stream with no natural device mix format,
+        // so we pick the format ourselves — matches our fixed encoder target directly,
+        // meaning no resampling is actually needed for this path (still routed through
+        // the same conversion code for a single, uniform capture loop).
+        let bits_per_sample = 32u16;
+        let block_align = TARGET_CHANNELS * (bits_per_sample / 8);
+        let wave_format = WAVEFORMATEX {
+            wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
+            nChannels: TARGET_CHANNELS,
+            nSamplesPerSec: TARGET_SAMPLE_RATE,
+            nAvgBytesPerSec: TARGET_SAMPLE_RATE * block_align as u32,
+            nBlockAlign: block_align,
+            wBitsPerSample: bits_per_sample,
+            cbSize: 0,
+        };
 
-                    // Always release buffer first (above), then discard if paused.
-                    if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        continue;
-                    }
+        audio_client
+            .Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                1_000_000i64,
+                0i64,
+                &wave_format,
+                None,
+            )
+            .map_err(|e| AppError::Windows(format!("IAudioClient::Initialize (process loopback): {e}")))?;
 
-                    let pts = clock.elapsed();
-                    let audio = AudioSamples {
-                        track_id,
-                        pts,
-                        samples,
-                        sample_rate,
-                        channels,
+        run_capture_loop(
+            audio_client,
+            TARGET_SAMPLE_RATE,
+            TARGET_CHANNELS,
+            block_align as usize,
+            track_id,
+            clock,
+            pause_flag,
+            tx,
+        )
+        .await
+    }
+}
+
+/// Shared buffer-read loop: starts the (already-initialized) client, unpacks each
+/// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
+/// encoder target, and forwards `AudioSamples` until the receiver drops or the client
+/// is stopped from outside (abort).
+async unsafe fn run_capture_loop(
+    audio_client: IAudioClient,
+    sample_rate: u32,
+    channels: u16,
+    bytes_per_frame: usize,
+    track_id: TrackId,
+    clock: Arc<RecordingClock>,
+    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: mpsc::Sender<AudioSamples>,
+) -> Result<(), AppError> {
+    let capture_client: IAudioCaptureClient = audio_client
+        .GetService()
+        .map_err(|e| AppError::Windows(format!("GetService IAudioCaptureClient: {e}")))?;
+
+    audio_client
+        .Start()
+        .map_err(|e| AppError::Windows(format!("IAudioClient::Start: {e}")))?;
+
+    let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+    let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
+
+    loop {
+        let mut data: *mut u8 = std::ptr::null_mut();
+        let mut frames_available: u32 = 0;
+        let mut flags: u32 = 0;
+
+        match capture_client.GetBuffer(&mut data, &mut frames_available, &mut flags, None, None) {
+            Ok(()) if frames_available > 0 => {
+                let sample_count = frames_available as usize * channels as usize;
+                let mut samples = vec![0.0f32; sample_count];
+
+                for i in 0..sample_count {
+                    let byte_offset = i * bytes_per_sample;
+                    let sample_ptr = data.add(byte_offset);
+                    samples[i] = if bytes_per_sample == 4 {
+                        *(sample_ptr as *const f32)
+                    } else if bytes_per_sample == 2 {
+                        *(sample_ptr as *const i16) as f32 / 32768.0
+                    } else {
+                        0.0
                     };
+                }
 
-                    if tx.send(audio).await.is_err() {
-                        // Receiver dropped — stop gracefully
-                        break;
-                    }
+                capture_client
+                    .ReleaseBuffer(frames_available)
+                    .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
+
+                // Always release buffer first (above), then discard if paused.
+                if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
                 }
-                Ok(()) => {
-                    // No data yet; yield to the async runtime
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                }
-                Err(e) => {
-                    tracing::warn!("GetBuffer error: {e}");
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+                let pts = clock.elapsed();
+                let stereo = to_stereo(&samples, channels);
+                let resampled = resampler.process(&stereo);
+                let audio = AudioSamples {
+                    track_id,
+                    pts,
+                    samples: resampled,
+                    sample_rate: TARGET_SAMPLE_RATE,
+                    channels: TARGET_CHANNELS,
+                };
+
+                if tx.send(audio).await.is_err() {
+                    // Receiver dropped — stop gracefully
+                    break;
                 }
             }
+            Ok(()) => {
+                // No data yet; yield to the async runtime
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            Err(e) => {
+                tracing::warn!("GetBuffer error: {e}");
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
         }
-
-        let _ = audio_client.Stop();
     }
+
+    let _ = audio_client.Stop();
     Ok(())
 }
 
-/// Query the WASAPI mix format for a device without starting a capture stream.
-/// Returns `(sample_rate, channels)`. Falls back to `(48000, 2)` on any error.
-pub fn probe_audio_format(device_id: &str, is_loopback: bool) -> (u32, u16) {
-    unsafe { probe_audio_format_inner(device_id, is_loopback).unwrap_or((48000, 2)) }
+#[implement(IActivateAudioInterfaceCompletionHandler)]
+struct ActivationCompletionHandler {
+    tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<windows::core::Result<windows::core::IUnknown>>>>,
 }
 
-unsafe fn probe_audio_format_inner(
-    device_id: &str,
-    is_loopback: bool,
-) -> Result<(u32, u16), ()> {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandler_Impl {
+    fn ActivateCompleted(&self, activateoperation: Option<&IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
+        let result = (|| -> windows::core::Result<windows::core::IUnknown> {
+            let op = activateoperation.ok_or_else(|| {
+                windows::core::Error::from(windows::Win32::Foundation::E_POINTER)
+            })?;
+            let mut hr = windows::core::HRESULT(0);
+            let mut activated: Option<windows::core::IUnknown> = None;
+            unsafe { op.GetActivateResult(&mut hr, &mut activated)? };
+            hr.ok()?;
+            activated.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+        })();
 
-    let enumerator: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|_| ())?;
+        if let Ok(mut guard) = self.tx.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(result);
+            }
+        }
+        Ok(())
+    }
+}
 
-    let device = if device_id.is_empty() {
-        let flow = if is_loopback { eRender } else { eCapture };
-        enumerator
-            .GetDefaultAudioEndpoint(flow, eMultimedia)
-            .map_err(|_| ())?
-    } else {
-        let id: windows::core::HSTRING = device_id.into();
-        enumerator.GetDevice(&id).map_err(|_| ())?
+/// Activate an `IAudioClient` scoped to `target_pid`'s audio only (Windows 10 2004+
+/// Process Loopback Capture API), instead of the whole default render device.
+unsafe fn activate_process_loopback_audio_client(
+    target_pid: u32,
+    include_tree: bool,
+) -> Result<IAudioClient, AppError> {
+    let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: target_pid,
+                ProcessLoopbackMode: if include_tree {
+                    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                } else {
+                    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
+                },
+            },
+        },
     };
 
-    let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
-    let mix_format = audio_client.GetMixFormat().map_err(|_| ())?;
+    // Manually build the raw PROPVARIANT (VT_BLOB) the activation params must be passed
+    // as. `pBlobData` points at our own stack-local `params` — the OS reads it
+    // synchronously during the ActivateAudioInterfaceAsync call below, so it only needs
+    // to outlive that call, not the whole async operation.
+    let raw_variant = windows::core::imp::PROPVARIANT {
+        Anonymous: windows::core::imp::PROPVARIANT_0 {
+            Anonymous: windows::core::imp::PROPVARIANT_0_0 {
+                vt: 65, // VT_BLOB
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: windows::core::imp::PROPVARIANT_0_0_0 {
+                    blob: windows::core::imp::BLOB {
+                        cbSize: core::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                        pBlobData: &mut params as *mut _ as *mut u8,
+                    },
+                },
+            },
+        },
+    };
+    let variant = PROPVARIANT::from_raw(raw_variant);
 
-    let sample_rate = (*mix_format).nSamplesPerSec;
-    let channels = (*mix_format).nChannels;
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let handler_obj = ActivationCompletionHandler {
+        tx: std::sync::Mutex::new(Some(result_tx)),
+    };
+    let handler: IActivateAudioInterfaceCompletionHandler = handler_obj.into();
 
-    if sample_rate == 0 || channels == 0 {
-        return Err(());
-    }
+    let activate_result = ActivateAudioInterfaceAsync(
+        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+        &<IAudioClient as windows::core::Interface>::IID,
+        Some(&variant as *const _),
+        &handler,
+    )
+    .map_err(|e| AppError::Windows(format!("ActivateAudioInterfaceAsync: {e}")));
 
-    Ok((sample_rate, channels as u16))
+    // `variant.blob.pBlobData` points at our stack `params`, not CoTaskMem-allocated
+    // memory — dropping `variant` normally would run PropVariantClear, which for
+    // VT_BLOB calls CoTaskMemFree on that pointer. Forget it instead; there's nothing
+    // heap-owned in it for us to leak.
+    core::mem::forget(variant);
+    activate_result?;
+
+    let activated = result_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| AppError::Windows("ActivateAudioInterfaceAsync timed out".into()))?
+        .map_err(|e| AppError::Windows(format!("process loopback activation failed: {e}")))?;
+
+    activated
+        .cast::<IAudioClient>()
+        .map_err(|e| AppError::Windows(format!("cast activated interface to IAudioClient: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercises the Process Loopback Capture API end to end (activation,
+    /// IAudioClient::Initialize, GetService/Start, buffer reads) against our own
+    /// process. Needs Windows 10 2004+ and an audio subsystem, so it's ignored by
+    /// default — run with `--ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn process_loopback_capture_produces_samples() {
+        let (tx, mut rx) = mpsc::channel::<AudioSamples>(64);
+        let clock = RecordingClock::new();
+        let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pid = std::process::id();
+
+        // COM objects (IAudioClient etc.) aren't Send, so this must run on its own
+        // thread via a LocalSet — same pattern session::start_capture uses in production.
+        let handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("capture runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let _ = run_process_loopback_capture(
+                    pid, true, TrackId::new(0), clock, pause_flag, tx,
+                )
+                .await;
+            });
+        });
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for first AudioSamples packet")
+            .expect("channel closed before any packet arrived");
+
+        assert_eq!(first.sample_rate, TARGET_SAMPLE_RATE);
+        assert_eq!(first.channels, TARGET_CHANNELS);
+        assert!(!first.samples.is_empty(), "packet had no samples");
+
+        handle.abort();
+    }
 
     #[test]
     fn enumerate_audio_devices_finds_at_least_one() {
@@ -280,13 +555,56 @@ mod tests {
     }
 
     #[test]
-    fn probe_audio_format_returns_valid_format() {
-        let devices = enumerate_audio_devices().expect("enumerate_audio_devices failed");
-        assert!(!devices.is_empty(), "need at least one device to probe");
-        for dev in &devices {
-            let (sample_rate, channels) = probe_audio_format(&dev.id, dev.is_loopback);
-            assert!(sample_rate > 0, "device '{}': sample_rate must be > 0", dev.name);
-            assert!(channels > 0, "device '{}': channels must be > 0", dev.name);
+    fn to_stereo_mono_duplicates() {
+        let out = to_stereo(&[1.0, 2.0, 3.0], 1);
+        assert_eq!(out, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn to_stereo_stereo_passthrough() {
+        let out = to_stereo(&[1.0, 2.0, 3.0, 4.0], 2);
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn to_stereo_multichannel_folds_down() {
+        // 4 channels, one frame: [1,2,3,4] -> avg 2.5 -> [2.5, 2.5]
+        let out = to_stereo(&[1.0, 2.0, 3.0, 4.0], 4);
+        assert_eq!(out, vec![2.5, 2.5]);
+    }
+
+    #[test]
+    fn resampler_identity_when_rates_match() {
+        let mut r = LinearResampler::new(48000, 48000, 2);
+        let input = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let out = r.process(&input);
+        assert_eq!(out.len(), input.len());
+        for (a, b) in out.iter().zip(input.iter()) {
+            assert!((a - b).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn resampler_downsamples_to_expected_length() {
+        // 96000 -> 48000 is a 2:1 ratio; across many frames, output should
+        // land near half the input frame count (allow +/-2 for fractional carry).
+        let mut r = LinearResampler::new(96000, 48000, 2);
+        let in_frames = 4800usize;
+        let input: Vec<f32> = (0..in_frames * 2).map(|i| (i % 7) as f32 * 0.1).collect();
+        let out = r.process(&input);
+        let out_frames = out.len() / 2;
+        let expected = in_frames / 2;
+        assert!(
+            (out_frames as i64 - expected as i64).abs() <= 2,
+            "expected ~{expected} frames, got {out_frames}"
+        );
+    }
+
+    #[test]
+    fn resampler_constant_signal_stays_constant() {
+        let mut r = LinearResampler::new(96000, 48000, 2);
+        let input = vec![0.5f32; 200 * 2];
+        let out = r.process(&input);
+        assert!(out.iter().all(|&s| (s - 0.5).abs() < 1e-5));
     }
 }

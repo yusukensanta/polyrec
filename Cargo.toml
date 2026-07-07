@@ -21,6 +21,7 @@ thiserror = "2"
 anyhow = "1"
 dirs = "5"
 rfd = "0.14"
+windows-core = "0.58"
 
 [dependencies.windows]
 version = "0.58"

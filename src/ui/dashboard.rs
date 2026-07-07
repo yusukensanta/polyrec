@@ -43,6 +43,7 @@ pub struct App {
     selected_source: Option<usize>,
     audio_devices: Vec<AudioDevice>,
     selected_audio: Vec<bool>,
+    app_audio_only: bool,
     overlay_enabled: bool,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -52,7 +53,9 @@ pub struct App {
     export_track_selection: Vec<bool>,
     export_state: ExportState,
     export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
-    hotkey_listener: HotkeyListener,
+    hotkey_listener: Option<HotkeyListener>,
+    finalizing_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
+    finalizing_path: Option<PathBuf>,
 }
 
 impl App {
@@ -76,6 +79,7 @@ impl App {
             selected_source: None,
             audio_devices,
             selected_audio,
+            app_audio_only: false,
             overlay_enabled,
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
@@ -85,7 +89,9 @@ impl App {
             export_track_selection,
             export_state: ExportState::Idle,
             export_result_rx: None,
-            hotkey_listener,
+            hotkey_listener: Some(hotkey_listener),
+            finalizing_handle: None,
+            finalizing_path: None,
         }
     }
 }
@@ -106,13 +112,33 @@ impl eframe::App for App {
         }
 
         // Poll hotkey events (non-blocking)
-        while let Some(event) = self.hotkey_listener.try_recv() {
+        while let Some(event) = self.hotkey_listener.as_ref().and_then(|h| h.try_recv()) {
             match event {
                 HotkeyEvent::StartStop => self.handle_rec_button(is_recording),
                 HotkeyEvent::Pause => self.handle_pause_button(),
                 HotkeyEvent::ToggleOverlay => {
                     self.overlay_enabled = !self.overlay_enabled;
                     self.config.overlay.enabled = self.overlay_enabled;
+                }
+            }
+        }
+
+        // Show export dialog once recorder has finished writing the file
+        if self.finalizing_handle.as_ref().map_or(false, |h| h.is_finished()) {
+            let handle = self.finalizing_handle.take().unwrap();
+            self.finalizing_path = None;
+            match tokio::runtime::Handle::current().block_on(handle) {
+                Ok(Ok(path)) => {
+                    self.last_output_path = Some(path);
+                    self.show_export_dialog = true;
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("recording finalize failed: {e}");
+                    self.show_export_dialog = false;
+                }
+                Err(e) => {
+                    tracing::error!("recorder task did not complete cleanly: {e}");
+                    self.show_export_dialog = false;
                 }
             }
         }
@@ -191,6 +217,19 @@ impl eframe::App for App {
                         format!("{icon} {}", dev.name),
                     );
                 }
+
+                let loopback_selected = self
+                    .audio_devices
+                    .iter()
+                    .zip(self.selected_audio.iter())
+                    .any(|(dev, &sel)| dev.is_loopback && sel);
+                let has_source = self.selected_source.is_some();
+                ui.add_enabled_ui(loopback_selected && has_source, |ui| {
+                    ui.checkbox(
+                        &mut self.app_audio_only,
+                        "🎯 App audio only (exclude other system sounds)",
+                    );
+                });
             });
 
         // ── Center panel ──────────────────────────────────────────────────────
@@ -279,6 +318,13 @@ impl eframe::App for App {
                         .color(TEXT_MUTED),
                     );
                 }
+            } else if self.finalizing_handle.is_some() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Saving recording…")
+                        .size(13.0)
+                        .color(TEXT_MUTED),
+                );
             } else if let Some(path) = &self.last_output_path {
                 ui.label(egui::RichText::new("Last recording:").size(11.0).color(TEXT_MUTED));
                 ui.add_space(2.0);
@@ -565,6 +611,15 @@ impl eframe::App for App {
         if self.session.is_paused() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+        if self.finalizing_handle.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(h) = self.hotkey_listener.take() {
+            h.stop();
+        }
     }
 }
 
@@ -633,14 +688,12 @@ impl App {
                 .active
                 .as_ref()
                 .map(|a| a.output_path.clone());
-            if self.session.apply(SessionAction::Stop) {
-                self.session.stop_capture();
-            }
-            self.last_output_path = path.clone();
+            self.session.apply(SessionAction::Stop);
+            self.finalizing_handle = self.session.stop_capture();
+            self.finalizing_path = path;
             self.recording_start = None;
             self.frame_count.store(0, Ordering::Relaxed);
             self.export_track_selection = self.selected_audio.clone();
-            self.show_export_dialog = path.is_some();
         } else if let Some(idx) = self.selected_source {
             let Some(source) = self.sources.get(idx).cloned() else {
                 self.selected_source = None;
@@ -657,6 +710,7 @@ impl App {
             self.session.start_capture(
                 source,
                 selected_devices,
+                self.app_audio_only,
                 Arc::clone(&self.frame_count),
                 &self.config.output_dir,
             );

@@ -1,7 +1,9 @@
 pub mod clock;
 pub mod state;
 
-use crate::capture::audio::{probe_audio_format, run_audio_capture};
+use crate::capture::audio::{
+    run_audio_capture, run_process_loopback_capture, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
+};
 use crate::capture::video::run_video_capture;
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::RecordingCommand;
@@ -62,6 +64,7 @@ impl SessionManager {
         &mut self,
         source: CaptureSource,
         audio_devices: Vec<AudioDevice>,
+        app_audio_only: bool,
         frame_count: Arc<AtomicU64>,
         output_dir: &std::path::Path,
     ) -> PathBuf {
@@ -70,10 +73,11 @@ impl SessionManager {
 
         let output_path = make_output_path(output_dir);
 
-        // Probe actual WASAPI mix format per device; fall back to (48000, 2) on error.
+        // All captured audio is downmixed/resampled to this fixed target in
+        // run_audio_capture, regardless of each device's native mix format.
         let audio_specs: Vec<(u32, u16)> = audio_devices
             .iter()
-            .map(|dev| probe_audio_format(&dev.id, dev.is_loopback))
+            .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
             .collect();
 
         // Resolve real window client dimensions via GetClientRect.
@@ -83,8 +87,10 @@ impl SessionManager {
         let (width, height) = unsafe {
             let mut rect = windows::Win32::Foundation::RECT::default();
             if windows::Win32::UI::WindowsAndMessaging::GetClientRect(real_hwnd, &mut rect).is_ok() {
-                let w = (rect.right - rect.left).max(1) as u32;
-                let h = (rect.bottom - rect.top).max(1) as u32;
+                // H264 requires even width/height for 4:2:0 chroma subsampling;
+                // round down so SetInputMediaType doesn't reject odd client rects.
+                let w = ((rect.right - rect.left).max(2) as u32) & !1;
+                let h = ((rect.bottom - rect.top).max(2) as u32) & !1;
                 (w, h)
             } else {
                 tracing::warn!("GetClientRect failed for hwnd {:x}; using 1920x1080", source.hwnd);
@@ -135,6 +141,8 @@ impl SessionManager {
             let audio_pause = Arc::clone(&pause_flag);
             let dev_id = dev.id.clone();
             let is_loopback = dev.is_loopback;
+            let use_process_loopback = is_loopback && app_audio_only;
+            let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -142,11 +150,18 @@ impl SessionManager {
                     .expect("audio capture runtime");
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    if let Err(e) = run_audio_capture(
-                        dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_tx,
-                    )
-                    .await
-                    {
+                    let result = if use_process_loopback {
+                        run_process_loopback_capture(
+                            target_pid, true, track_id, audio_clock, audio_pause, audio_tx,
+                        )
+                        .await
+                    } else {
+                        run_audio_capture(
+                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_tx,
+                        )
+                        .await
+                    };
+                    if let Err(e) = result {
                         tracing::error!("AudioCapture[{track_id:?}] error: {e}");
                     }
                 });
@@ -170,7 +185,9 @@ impl SessionManager {
     }
 
     /// Stops all capture and recording actors. Sends Stop to the recorder so it finalizes.
-    pub fn stop_capture(&mut self) {
+    /// Returns the recorder's `JoinHandle` so the caller can wait for finalization to complete
+    /// before treating the output file as ready (see recorder-finalize-race design spec).
+    pub fn stop_capture(&mut self) -> Option<JoinHandle<Result<PathBuf, AppError>>> {
         if let Some(active) = self.active.take() {
             // Abort capture sources first (stops new frame production)
             for h in active.capture_handles {
@@ -182,16 +199,14 @@ impl SessionManager {
             }
             // Deliver Stop to recorder; blocking_send is safe from non-async context
             let _ = active.recording_tx.blocking_send(RecordingCommand::Stop);
-            // recorder_handle dropped here — spawn_blocking task continues running to completion
+            Some(active.recorder_handle)
+        } else {
+            None
         }
     }
 
     pub fn is_recording(&self) -> bool {
         matches!(self.state, SessionState::Recording)
-    }
-
-    pub fn is_idle(&self) -> bool {
-        matches!(self.state, SessionState::Idle)
     }
 
     pub fn pause_capture(&mut self) {
@@ -237,10 +252,24 @@ fn make_output_path(base_dir: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// `enumerate_sources()` can return transient shell popups (e.g. volume/brightness
+    /// OSD "PopupHost" windows) with a degenerate client rect that breaks H264 setup —
+    /// a separate, pre-existing issue unrelated to whatever this test is actually
+    /// exercising. Skip past those so tests aren't flaky based on unrelated desktop state.
+    fn pick_source_with_real_client_rect(sources: Vec<CaptureSource>) -> Option<CaptureSource> {
+        sources.into_iter().find(|s| unsafe {
+            let hwnd = windows::Win32::Foundation::HWND(s.hwnd as *mut core::ffi::c_void);
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect).is_ok()
+                && (rect.right - rect.left) >= 100
+                && (rect.bottom - rect.top) >= 100
+        })
+    }
+
     #[test]
     fn new_session_is_idle() {
         let sm = SessionManager::new();
-        assert!(sm.is_idle());
+        assert!(matches!(sm.state(), SessionState::Idle));
     }
 
     #[test]
@@ -254,12 +283,82 @@ mod tests {
     fn illegal_action_returns_false() {
         let mut sm = SessionManager::new();
         assert!(!sm.apply(SessionAction::Stop));
-        assert!(sm.is_idle());
+        assert!(matches!(sm.state(), SessionState::Idle));
     }
 
     #[test]
     fn make_output_path_has_mp4_extension() {
         let p = make_output_path(std::path::Path::new("."));
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("mp4"));
+    }
+
+    /// End-to-end: real window capture + real audio devices, through the same
+    /// start_capture/stop_capture path the GUI uses. Needs a display and audio
+    /// endpoints, so it's ignored by default — run with `--ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn full_capture_produces_nonempty_file() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+
+        let sources = enumerate_sources();
+        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        let output_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path());
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+        let result = handle.await.expect("recorder task panicked/aborted");
+        let finalized_path = result.expect("finalize() returned an error");
+
+        assert_eq!(finalized_path, output_path);
+        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
+        assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
+        println!("frames captured: {}", frame_count.load(Ordering::Relaxed));
+        println!("output size: {} bytes", metadata.len());
+    }
+
+    /// Same as `full_capture_produces_nonempty_file` but with `app_audio_only = true`,
+    /// exercising the process-loopback path through the real start_capture/stop_capture
+    /// wiring (not just the raw capture function). Uses our own process id as the
+    /// loopback target so a device is guaranteed to exist regardless of which visible
+    /// window gets picked for video.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn full_capture_app_audio_only_produces_nonempty_file() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+
+        let sources = enumerate_sources();
+        let mut source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        source.process_id = std::process::id();
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+        assert!(
+            audio_devices.iter().any(|d| d.is_loopback),
+            "need a loopback device to exercise app_audio_only"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        let output_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path());
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+        let result = handle.await.expect("recorder task panicked/aborted");
+        let finalized_path = result.expect("finalize() returned an error");
+
+        assert_eq!(finalized_path, output_path);
+        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
+        assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
+        println!("output size: {} bytes", metadata.len());
     }
 }

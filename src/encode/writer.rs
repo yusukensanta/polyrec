@@ -326,8 +326,6 @@ mod tests {
         // One blank BGRA frame (64×64×4 bytes)
         let frame = VideoFrame {
             pts: Duration::ZERO,
-            width: 64,
-            height: 64,
             data: vec![0u8; 64 * 64 * 4],
         };
         writer.write_video(frame).expect("write_video failed");

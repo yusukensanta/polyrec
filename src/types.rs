@@ -14,8 +14,6 @@ pub enum SessionState {
     Idle,
     Recording,
     Paused,
-    Stopping,
-    Exporting,
 }
 
 #[derive(Debug, Clone)]
@@ -31,16 +29,8 @@ pub struct CaptureSource {
 #[derive(Debug)]
 pub struct VideoFrame {
     pub pts: Duration,
-    pub width: u32,
-    pub height: u32,
     /// Raw BGRA pixel data, row-major, width*height*4 bytes.
     pub data: Vec<u8>,
-}
-
-impl VideoFrame {
-    pub fn byte_len(&self) -> usize {
-        self.width as usize * self.height as usize * 4
-    }
 }
 
 #[derive(Debug)]
@@ -87,17 +77,6 @@ mod tests {
         };
         assert_eq!(samples.track_id, TrackId::new(42));
         assert_eq!(samples.sample_rate, 48000);
-    }
-
-    #[test]
-    fn video_frame_byte_len() {
-        let frame = VideoFrame {
-            pts: Duration::ZERO,
-            width: 1920,
-            height: 1080,
-            data: vec![0u8; 1920 * 1080 * 4],
-        };
-        assert_eq!(frame.byte_len(), 1920 * 1080 * 4);
     }
 
     #[test]

@@ -170,12 +170,7 @@ pub async fn run_video_capture(
             data = pixel_data;
         }
 
-        let video_frame = VideoFrame {
-            pts,
-            width,
-            height,
-            data,
-        };
+        let video_frame = VideoFrame { pts, data };
         if tx.send(video_frame).await.is_err() {
             break;
         }

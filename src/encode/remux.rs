@@ -185,8 +185,6 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                width: 64,
-                height: 64,
                 data: vec![0u8; 64 * 64 * 4],
             })
             .expect("write_video");

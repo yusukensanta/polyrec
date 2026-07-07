@@ -14,9 +14,6 @@ pub enum AppError {
     #[error("Encode error: {0}")]
     Encode(String),
 
-    #[error("Mux error: {0}")]
-    Mux(String),
-
     #[error("Windows API error: {0}")]
     Windows(String),
 }

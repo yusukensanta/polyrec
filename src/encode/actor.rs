@@ -104,8 +104,6 @@ mod tests {
         cap_tx
             .send(VideoFrame {
                 pts: Duration::ZERO,
-                width: 4,
-                height: 4,
                 data: vec![0u8; 64],
             })
             .await
