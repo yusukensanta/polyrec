@@ -771,13 +771,16 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
 /// egui's bundled default font only covers Latin + a small symbol set — window
 /// titles/exe names containing CJK or other multi-byte characters (and any
 /// future localized UI text) render as tofu boxes without a fallback font.
-/// Loads a system CJK font (Yu Gothic, standard on Windows 10/11) and appends
-/// it after the default font in both families, so it's only used for glyphs
-/// the default font can't cover — Latin text keeps its existing appearance.
-/// Best-effort: if the font file isn't present on this Windows install, logs
-/// a warning and leaves the default (Latin-only) fonts in place.
+/// Loads MS Gothic — a fixed-pitch (single-width per cell) CJK font bundled
+/// with every Windows release since the 9x/NT era, so it's a correct fit for
+/// the Monospace family (unlike a proportional font such as Yu Gothic) and
+/// more universally present than newer CJK fonts — and appends it after the
+/// default font in both families, so it's only used for glyphs the default
+/// font can't cover; Latin text keeps its existing appearance. Best-effort:
+/// if the font file isn't present on this Windows install, logs a warning
+/// and leaves the default (Latin-only) fonts in place.
 fn setup_fonts(ctx: &egui::Context) {
-    const CJK_FONT_PATH: &str = r"C:\Windows\Fonts\YuGothR.ttc";
+    const CJK_FONT_PATH: &str = r"C:\Windows\Fonts\msgothic.ttc";
     const CJK_FONT_KEY: &str = "cjk_fallback";
 
     let font_bytes = match std::fs::read(CJK_FONT_PATH) {
