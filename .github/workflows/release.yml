@@ -7,7 +7,7 @@ name: Release
 #    no new tag push happens, so trigger 1 alone would never fire for this.
 #    action-gh-release detects the already-existing release by tag name and
 #    just uploads the zip to it instead of erroring.
-on:
+"on":
   push:
     tags:
       - "v*.*.*"
