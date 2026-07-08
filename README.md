@@ -8,23 +8,30 @@ Multi-track screen recorder for Windows.
 
 ## Download / Installation
 
-Grab the latest release from the [Releases page](https://github.com/yusukensanta/polyrec/releases/latest), unzip, and run `polyrec.exe` — no installer needed. The app checks for newer releases on launch and shows a banner in the menu bar if one's available (click it to open the release page; nothing downloads or installs automatically).
+Grab the latest release from the [Releases page](https://github.com/yusukensanta/polyrec/releases/latest) — two options are published for every version:
+
+- **`polyrec-vX.Y.Z-windows-x64-setup.exe`** — a normal installer. Double-click, click through the wizard, get a Start Menu shortcut and an Add/Remove Programs entry. Recommended if you just want to install it like any other app.
+- **`polyrec-vX.Y.Z-windows-x64.zip`** — portable, no installer: unzip and run `polyrec.exe` directly. Nothing is written outside the folder you unzip it to.
+
+Either way, the app checks for newer releases on launch and shows a banner in the menu bar if one's available (click it to open the release page; nothing downloads or installs automatically).
+
+The installer is unsigned (no code-signing certificate), so Windows SmartScreen will show an "Unknown Publisher" warning on first run — click **More info → Run anyway**. See [SECURITY.md](SECURITY.md) for why, and the verification steps below if you want independent confirmation of what you're running instead of just trusting the warning-click.
 
 ### Verifying a download (optional)
 
-Each release includes a `SHA256SUMS.txt` and a build provenance attestation, so you don't have to just trust that the zip on the release page is what CI actually built.
+Each release includes a `SHA256SUMS.txt` and a build provenance attestation covering both the installer and the zip, so you don't have to just trust that the file on the release page is what CI actually built.
 
 Checksum (PowerShell):
 
 ```powershell
-Get-FileHash polyrec-vX.Y.Z-windows-x64.zip -Algorithm SHA256
+Get-FileHash polyrec-vX.Y.Z-windows-x64-setup.exe -Algorithm SHA256
 # compare the output against the matching line in SHA256SUMS.txt
 ```
 
 Build provenance (requires the [GitHub CLI](https://cli.github.com/)) — confirms the file was built by this repo's release workflow from the tagged commit, not just that the bytes match a checksum someone could have regenerated alongside a swapped file:
 
 ```powershell
-gh attestation verify polyrec-vX.Y.Z-windows-x64.zip -R yusukensanta/polyrec
+gh attestation verify polyrec-vX.Y.Z-windows-x64-setup.exe -R yusukensanta/polyrec
 ```
 
 Releases are also immutable once published — assets can't be silently replaced after the fact; any change requires deleting and recreating the release entirely.

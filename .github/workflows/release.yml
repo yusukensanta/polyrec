@@ -84,10 +84,22 @@ jobs:
           Copy-Item LICENSE $stagingDir/
           Compress-Archive -Path $stagingDir/* -DestinationPath "$stagingDir.zip"
 
+      # Alternative to the portable zip for users who don't want to unzip and
+      # locate an exe themselves -- a normal double-click installer with a
+      # Start Menu shortcut and Add/Remove Programs entry. Inno Setup ships
+      # preinstalled on the windows-latest runner image, no extra setup step
+      # needed. The zip keeps being published too -- it's what winget/Scoop
+      # style package managers expect.
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.tag.outputs.tag }}"
+          iscc "/DMyAppVersion=$ver" installer\polyrec.iss
+
       - name: Generate checksums
         shell: pwsh
         run: |
-          Get-ChildItem polyrec-*.zip | ForEach-Object {
+          Get-ChildItem polyrec-*.zip, polyrec-*-setup.exe | ForEach-Object {
             $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)" | Out-File -FilePath SHA256SUMS.txt -Append -Encoding ASCII
           }
@@ -101,7 +113,9 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: polyrec-*.zip
+          subject-path: |
+            polyrec-*.zip
+            polyrec-*-setup.exe
 
       - name: Create/update GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -109,5 +123,6 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             polyrec-*.zip
+            polyrec-*-setup.exe
             SHA256SUMS.txt
           generate_release_notes: true
