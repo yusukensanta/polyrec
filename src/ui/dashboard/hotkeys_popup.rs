@@ -125,10 +125,12 @@ impl App {
             if let Some(old) = self.hotkey_listener.take() {
                 old.stop();
             }
+            let wake_ctx = ctx.clone();
             self.hotkey_listener = Some(HotkeyListener::spawn(
                 &self.config.hotkeys.start_stop,
                 &self.config.hotkeys.pause,
                 &self.config.hotkeys.toggle_overlay,
+                move || wake_ctx.request_repaint(),
             ));
         }
     }

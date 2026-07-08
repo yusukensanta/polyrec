@@ -104,10 +104,12 @@ impl App {
         // deterministically audible track; mic capture remains an opt-in checkbox.
         let selected_audio: Vec<bool> = audio_devices.iter().map(|d| d.is_loopback).collect();
         let export_track_selection = vec![true; n];
+        let wake_ctx = cc.egui_ctx.clone();
         let hotkey_listener = HotkeyListener::spawn(
             &config.hotkeys.start_stop,
             &config.hotkeys.pause,
             &config.hotkeys.toggle_overlay,
+            move || wake_ctx.request_repaint(),
         );
 
         // Fire-and-forget: checked once at startup, polled in `update()`. Any failure
@@ -743,6 +745,16 @@ impl App {
                     });
             },
         );
+
+        // `with_always_on_top()` only sets WS_EX_TOPMOST once, at window
+        // creation. Fullscreen games commonly re-assert their own topmost
+        // z-order on every frame or focus change (so their own overlays/UI
+        // stay above everything), which silently demotes ours behind them --
+        // matching the "takes several tries" symptom (it only shows when a
+        // repaint happens to land right after the game's own re-assertion).
+        // Re-asserting HWND_TOPMOST every frame the overlay is visible fights
+        // that back instead of relying on a one-time flag.
+        reassert_overlay_topmost();
     }
 
     fn render_quality_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
@@ -1198,6 +1210,43 @@ impl App {
                 self.error_message = Some(format!("{prefix}{e}"));
             }
         }
+    }
+}
+
+/// Re-asserts the overlay window as topmost via a direct `SetWindowPos`, on
+/// top of egui/winit's one-time `with_always_on_top()` hint -- see the call
+/// site in `render_overlay_viewport` for why this is needed every frame
+/// rather than once. Looked up by its exact window title (set via
+/// `.with_title("PolyRec Overlay")`) since egui doesn't expose a viewport's
+/// native HWND through its public API. A miss (window not found yet, e.g.
+/// the very first frame before winit has created it) is silently ignored --
+/// the next frame's call will pick it up.
+///
+/// `SWP_ASYNCWINDOWPOS` is required here, not optional: this runs on the
+/// same thread that owns the overlay window and is mid-repaint of it via
+/// egui/winit when called. Without it, `SetWindowPos` sends
+/// WM_WINDOWPOSCHANGING/CHANGED synchronously to that window's own message
+/// pump on this same thread -- reentering winit's event handling from inside
+/// its own repaint reliably crashed the process in testing. The async flag
+/// posts the request instead of sending it, avoiding the reentrant call.
+fn reassert_overlay_topmost() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    unsafe {
+        let Ok(hwnd) = windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("PolyRec Overlay"))
+        else {
+            return;
+        };
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        );
     }
 }
 
