@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-08
+
 ### Added
 
 - Hotkeys are now bound by pressing the actual key combination you want (optionally holding Ctrl/Alt/Shift), instead of picking from a fixed grid of F1-F12 buttons — supports any letter, digit, F-key (F1-F24), or common navigation key, alone or combined with modifiers.
@@ -91,7 +93,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/yusukensanta/polyrec/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/yusukensanta/polyrec/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yusukensanta/polyrec/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yusukensanta/polyrec/compare/v0.2.2...v0.2.3
