@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-09
+
 ### Fixed
 
 - Global hotkeys (start/stop, pause, toggle overlay) now use a low-level keyboard hook (`WH_KEYBOARD_LL`) instead of `RegisterHotKey` — fixes hotkeys not firing while a game is running in exclusive fullscreen mode, a known limitation of `RegisterHotKey`-based global hotkeys that other recording tools work around the same way.
@@ -114,7 +116,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/yusukensanta/polyrec/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/yusukensanta/polyrec/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/yusukensanta/polyrec/compare/v0.2.5...v0.2.6
