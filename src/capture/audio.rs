@@ -596,7 +596,12 @@ mod tests {
         assert!(peak > 0.01, "peak sample magnitude {peak} looks like silence, not the played WAV");
     }
 
+    // Ignored: assumes a real audio subsystem with at least one device, which
+    // GitHub's hosted windows-latest CI runner doesn't have (headless, no
+    // sound card) -- confirmed by ci.yml's first real run. Real desktop-only,
+    // same reasoning as the other #[ignore]d hardware tests in this codebase.
     #[test]
+    #[ignore]
     fn enumerate_audio_devices_finds_at_least_one() {
         let devices = enumerate_audio_devices().expect("enumerate_audio_devices failed");
         assert!(
@@ -606,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn default_output_is_loopback() {
         let devices = enumerate_audio_devices().expect("enumerate_audio_devices failed");
         let loopback = devices.iter().find(|d| d.is_loopback);

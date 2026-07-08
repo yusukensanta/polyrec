@@ -1,5 +1,9 @@
 <img src="assets/icon-1024.png" width="120" alt="PolyRec icon" align="left" />
 
+<!-- portfolio-badge -->
+[![Portfolio Docs](https://img.shields.io/badge/docs-yusukensanta.github.io-blue?style=flat-square)](https://yusukensanta.github.io/projects/polyrec/)
+<!-- portfolio-badge -->
+
 # PolyRec
 
 Multi-track screen recorder for Windows.
