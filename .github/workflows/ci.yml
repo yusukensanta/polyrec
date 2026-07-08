@@ -37,3 +37,16 @@ jobs:
       # something to silently skip.
       - name: Test
         run: cargo test --locked
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # RUSTSEC-2026-0194/0195 (quick-xml) and RUSTSEC-2026-0192 (ttf-parser,
+      # unmaintained) are pulled in only via winit's Linux/Wayland backend
+      # (sctk-adwaita -> smithay-client-toolkit / ab_glyph) -- this app is
+      # Windows-only, so that code path never compiles into the shipped
+      # binary. Confirmed via `cargo tree --target all -i <crate>`. Ignored
+      # here rather than left unscanned, so any NEW advisory against
+      # something actually reachable on Windows still fails this step.
+      - name: Security audit
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0192
