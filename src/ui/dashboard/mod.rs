@@ -200,11 +200,11 @@ impl App {
 
         // Poll update-check result (one-shot; None result also clears the receiver
         // so we stop polling a channel whose sender has already sent its one message)
-        if let Some(rx) = &self.update_check_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.update_available = result;
-                self.update_check_rx = None;
-            }
+        if let Some(rx) = &self.update_check_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            self.update_available = result;
+            self.update_check_rx = None;
         }
 
         // Poll export result channel
@@ -356,16 +356,15 @@ impl App {
 
                             if let std::collections::hash_map::Entry::Vacant(entry) =
                                 self.source_icon_textures.entry(i)
+                                && let Some((rgba, w, h)) = &source.icon_rgba
                             {
-                                if let Some((rgba, w, h)) = &source.icon_rgba {
-                                    let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
-                                    let tex = ui.ctx().load_texture(
-                                        format!("source_icon_{i}"),
-                                        image,
-                                        egui::TextureOptions::LINEAR,
-                                    );
-                                    entry.insert(tex);
-                                }
+                                let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+                                let tex = ui.ctx().load_texture(
+                                    format!("source_icon_{i}"),
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                entry.insert(tex);
                             }
 
                             let inner = egui::Frame::NONE
@@ -601,16 +600,15 @@ impl App {
                         tracing::error!("failed to save config: {e}");
                     }
                 }
-                if ui.add(accent_button(s.browse_button, ACCENT_SECONDARY)).clicked() {
-                    if let Some(path) = FileDialog::new()
+                if ui.add(accent_button(s.browse_button, ACCENT_SECONDARY)).clicked()
+                    && let Some(path) = FileDialog::new()
                         .set_directory(&self.config.output_dir)
                         .pick_folder()
-                    {
-                        self.output_dir_input = path.to_string_lossy().into_owned();
-                        self.config.output_dir = path;
-                        if let Err(e) = self.config.save() {
-                            tracing::error!("failed to save config: {e}");
-                        }
+                {
+                    self.output_dir_input = path.to_string_lossy().into_owned();
+                    self.config.output_dir = path;
+                    if let Err(e) = self.config.save() {
+                        tracing::error!("failed to save config: {e}");
                     }
                 }
             });
@@ -883,29 +881,28 @@ impl App {
 
                 if is_idle {
                     ui.horizontal(|ui| {
-                        if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked() {
-                            if let Some(dest) = rfd::FileDialog::new()
+                        if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked()
+                            && let Some(dest) = rfd::FileDialog::new()
                                 .add_filter("MP4 video", &["mp4"])
                                 .set_file_name("export.mp4")
                                 .save_file()
-                            {
-                                let src = path.clone();
-                                let indices: Vec<usize> = self
-                                    .export_track_selection
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, &sel)| sel)
-                                    .map(|(i, _)| i)
-                                    .collect();
-                                let (tx, rx) = mpsc::channel();
-                                std::thread::spawn(move || {
-                                    let result = remux(&src, &dest, &indices)
-                                        .map_err(|e| e.to_string());
-                                    let _ = tx.send(result);
-                                });
-                                self.export_result_rx = Some(rx);
-                                self.export_state = ExportState::Running;
-                            }
+                        {
+                            let src = path.clone();
+                            let indices: Vec<usize> = self
+                                .export_track_selection
+                                .iter()
+                                .enumerate()
+                                .filter(|&(_, &sel)| sel)
+                                .map(|(i, _)| i)
+                                .collect();
+                            let (tx, rx) = mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = remux(&src, &dest, &indices)
+                                    .map_err(|e| e.to_string());
+                                let _ = tx.send(result);
+                            });
+                            self.export_result_rx = Some(rx);
+                            self.export_state = ExportState::Running;
                         }
                         if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
                             open_folder(path.as_ref());
@@ -1172,7 +1169,7 @@ impl App {
             .audio_devices
             .iter()
             .zip(self.selected_audio.iter())
-            .filter(|(_, &sel)| sel)
+            .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
         let encode = EncodeSettings {

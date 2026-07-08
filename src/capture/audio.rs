@@ -320,7 +320,7 @@ async unsafe fn run_capture_loop(
     clock: Arc<RecordingClock>,
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
-) -> Result<(), AppError> {
+) -> Result<(), AppError> { unsafe {
     let capture_client: IAudioCaptureClient = audio_client
         .GetService()
         .map_err(|e| AppError::Windows(format!("GetService IAudioCaptureClient: {e}")))?;
@@ -392,7 +392,7 @@ async unsafe fn run_capture_loop(
 
     let _ = audio_client.Stop();
     Ok(())
-}
+}}
 
 #[implement(IActivateAudioInterfaceCompletionHandler)]
 struct ActivationCompletionHandler {
@@ -412,10 +412,10 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandl
             activated.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
         })();
 
-        if let Ok(mut guard) = self.tx.lock() {
-            if let Some(tx) = guard.take() {
-                let _ = tx.send(result);
-            }
+        if let Ok(mut guard) = self.tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(result);
         }
         Ok(())
     }
@@ -426,7 +426,7 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandl
 unsafe fn activate_process_loopback_audio_client(
     target_pid: u32,
     include_tree: bool,
-) -> Result<IAudioClient, AppError> {
+) -> Result<IAudioClient, AppError> { unsafe {
     let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
@@ -495,7 +495,7 @@ unsafe fn activate_process_loopback_audio_client(
     activated
         .cast::<IAudioClient>()
         .map_err(|e| AppError::Windows(format!("cast activated interface to IAudioClient: {e}")))
-}
+}}
 
 #[cfg(test)]
 mod tests {

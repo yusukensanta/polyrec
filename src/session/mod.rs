@@ -491,11 +491,11 @@ mod tests {
             // Container stream order isn't guaranteed — find the video stream by type.
             let mut video_type = None;
             for i in 0..4u32 {
-                if let Ok(t) = reader.GetNativeMediaType(i, 0) {
-                    if t.GetGUID(&MF_MT_MAJOR_TYPE).unwrap_or_default() == MFMediaType_Video {
-                        video_type = Some(t);
-                        break;
-                    }
+                if let Ok(t) = reader.GetNativeMediaType(i, 0)
+                    && t.GetGUID(&MF_MT_MAJOR_TYPE).unwrap_or_default() == MFMediaType_Video
+                {
+                    video_type = Some(t);
+                    break;
                 }
             }
             let video_type = video_type.expect("no video stream found");
