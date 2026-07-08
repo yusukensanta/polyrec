@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-eframe = "0.34"
-egui = "0.34"
+eframe = "0.35"
+egui = "0.35"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 tracing = "0.1"
@@ -52,6 +52,8 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
 ]
 
 [dev-dependencies]

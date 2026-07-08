@@ -37,7 +37,7 @@ const BG_BTN_IDLE: egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
 /// Larger, pill-like rounding used only for the primary REC/STOP/RESUME
 /// action buttons, so they read as the one clearly primary action instead
 /// of blending into every other rounded rectangle in the UI.
-const ROUNDING_PRIMARY_BTN: f32 = 14.0;
+const ROUNDING_PRIMARY_BTN: u8 = 14;
 
 enum ExportState {
     Idle,
@@ -141,14 +141,25 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    // eframe 0.34 deprecated `update(&Context, &mut Frame)` in favor of this
+    // `ui(&mut egui::Ui, &mut Frame)` entry point. The three docked panels
+    // (menu bar, source list, center) now nest inside this root Ui via
+    // Panel::show/CentralPanel::show (egui 0.35 renamed the ctx-based
+    // top-level `show` these replaced to `show_inside`, then back to plain
+    // `show` once the old one was removed entirely -- this is the final
+    // name) -- everything else (popups via egui::Window, the overlay
+    // viewport, background polling) is unaffected and still operates on
+    // `&egui::Context` (Ui::ctx() hands one back, cheaply cloneable).
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
         let s: &'static Strings = self.config.lang().strings();
 
         self.poll_background_work(s);
 
-        self.render_menu_bar(ctx, s);
-        self.render_source_panel(ctx, s);
-        self.render_center_panel(ctx, s);
+        self.render_menu_bar(ui, s);
+        self.render_source_panel(ui, s);
+        self.render_center_panel(ui, s);
         self.render_overlay_viewport(ctx, s);
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);
@@ -158,7 +169,7 @@ impl eframe::App for App {
         self.request_repaints(ctx);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         if let Some(h) = self.hotkey_listener.take() {
             h.stop();
         }
@@ -253,8 +264,13 @@ impl App {
         }
     }
 
-    fn render_menu_bar(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+    // Takes `&mut egui::Ui` (the root Ui from App::ui), not `&egui::Context` --
+    // Panel's old ctx-based top-level `.show(ctx, ...)` (what
+    // TopBottomPanel/SidePanel used to be deprecated aliases for) was removed
+    // entirely in egui 0.35; the replacement needs an existing Ui to nest
+    // inside. CentralPanel takes the same shape for consistency.
+    fn render_menu_bar(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        egui::Panel::top("menu_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PolyRec");
                 // Single source of truth for the app's version: Cargo.toml's `version`
@@ -305,11 +321,11 @@ impl App {
         });
     }
 
-    fn render_source_panel(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        egui::SidePanel::left("source_panel")
-            .default_width(260.0)
-            .width_range(200.0..=380.0)
-            .show(ctx, |ui| {
+    fn render_source_panel(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        egui::Panel::left("source_panel")
+            .default_size(260.0)
+            .size_range(200.0..=380.0)
+            .show(ui, |ui| {
                 section_header(ui, s.capture_source_header);
                 if self.sources.is_empty() {
                     ui.label(
@@ -340,11 +356,11 @@ impl App {
                                 }
                             }
 
-                            let inner = egui::Frame::none()
+                            let inner = egui::Frame::NONE
                                 .fill(fill)
                                 .stroke(egui::Stroke::new(1.0, border))
-                                .rounding(egui::Rounding::same(6.0))
-                                .inner_margin(egui::Margin::same(8.0))
+                                .corner_radius(6u8)
+                                .inner_margin(8i8)
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
@@ -420,11 +436,11 @@ impl App {
             });
     }
 
-    fn render_center_panel(&mut self, ctx: &egui::Context, s: &'static Strings) {
+    fn render_center_panel(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         let is_recording = self.session.is_recording();
         let frames = self.frame_count.load(Ordering::Relaxed);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             // Cap content width instead of letting it stretch to fill however
             // wide the window happens to be resized -- actual content here
             // (status text, the two settings buttons, the output-dir row) has
@@ -445,7 +461,7 @@ impl App {
                 let secs = elapsed.as_secs();
 
                 // Pulsing dot — alpha oscillates 56%–100% (never fully off)
-                let t = ctx.input(|i| i.time) as f32;
+                let t = ui.ctx().input(|i| i.time) as f32;
                 let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
                 let dot_col = egui::Color32::from_rgba_unmultiplied(
                     ACCENT_REC.r(), ACCENT_REC.g(), ACCENT_REC.b(), (alpha * 255.0) as u8,
@@ -608,7 +624,7 @@ impl App {
                         egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(18.0),
                     )
                     .fill(BG_BTN_IDLE)
-                    .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
+                    .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     if ui.add(btn).clicked() {
                         self.handle_pause_button();
@@ -621,7 +637,7 @@ impl App {
                                 .size(18.0),
                         )
                         .fill(BG_BTN_STOP)
-                        .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
+                        .corner_radius(ROUNDING_PRIMARY_BTN)
                         .min_size(egui::Vec2::new(90.0, 52.0));
                         if ui.add(stop_btn).clicked() {
                             self.handle_rec_button(is_recording);
@@ -641,7 +657,7 @@ impl App {
                         egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(18.0),
                     )
                     .fill(BG_BTN_IDLE)
-                    .rounding(egui::Rounding::same(ROUNDING_PRIMARY_BTN))
+                    .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     if ui.add(btn).clicked() {
                         self.handle_rec_button(is_recording);
@@ -687,11 +703,16 @@ impl App {
                 .with_inner_size([310.0, 32.0])
                 .with_position(egui::pos2(screen_w - 320.0, 10.0)),
             move |ctx, _class| {
+                // CentralPanel::show(ctx, ...) is soft-deprecated in favor of
+                // show_inside(ui, ...), but this closure only ever receives a
+                // fresh viewport's &Context -- there's no pre-existing Ui to
+                // nest inside here, so the ctx-based form is unavoidable.
+                #[allow(deprecated)]
                 egui::CentralPanel::default()
                     .frame(
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(egui::Color32::from_rgba_premultiplied(20, 20, 20, 200))
-                            .inner_margin(egui::Margin::same(6.0)),
+                            .inner_margin(6i8),
                     )
                     .show(ctx, |ui| {
                         ui.label(
@@ -1067,7 +1088,7 @@ fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         CJK_FONT_KEY.to_owned(),
-        egui::FontData::from_owned(font_bytes),
+        egui::FontData::from_owned(font_bytes).into(),
     );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
@@ -1090,15 +1111,15 @@ fn setup_theme(ctx: &egui::Context) {
     v.override_text_color = Some(TEXT_PRIMARY);
 
     // Window chrome
-    v.window_rounding = egui::Rounding::same(10.0);
+    v.window_corner_radius = egui::CornerRadius::same(10);
 
     // Widget rounding — consistent across all interaction states
-    let r = egui::Rounding::same(5.0);
-    v.widgets.noninteractive.rounding = r;
-    v.widgets.inactive.rounding       = r;
-    v.widgets.hovered.rounding        = r;
-    v.widgets.active.rounding         = r;
-    v.widgets.open.rounding           = r;
+    let r = egui::CornerRadius::same(5);
+    v.widgets.noninteractive.corner_radius = r;
+    v.widgets.inactive.corner_radius       = r;
+    v.widgets.hovered.corner_radius        = r;
+    v.widgets.active.corner_radius         = r;
+    v.widgets.open.corner_radius           = r;
 
     // Subtle hover/active bg fills for checkboxes, buttons, etc.
     v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(28, 28, 44);
@@ -1107,7 +1128,7 @@ fn setup_theme(ctx: &egui::Context) {
 
     ctx.set_visuals(v);
 
-    let mut s = (*ctx.style()).clone();
+    let mut s = (*ctx.global_style()).clone();
     // egui's default interact_size.y (18.0) is well under Fluent's 32px / Material's
     // 36-40dp desktop minimum control height — every button in the app (Refresh,
     // Browse, Quality, Close, etc.) was inheriting that undersized floor. 32.0 is
@@ -1115,9 +1136,9 @@ fn setup_theme(ctx: &egui::Context) {
     s.spacing.interact_size  = egui::Vec2::new(40.0, 32.0);
     s.spacing.item_spacing   = egui::Vec2::new(8.0, 8.0);
     s.spacing.button_padding = egui::Vec2::new(14.0, 8.0);
-    s.spacing.window_margin  = egui::Margin::same(16.0);
+    s.spacing.window_margin  = egui::Margin::same(16);
     s.spacing.indent         = 16.0;
-    ctx.set_style(s);
+    ctx.set_global_style(s);
 }
 
 /// Full path rather than a bare "explorer" name — avoids relying on Windows'

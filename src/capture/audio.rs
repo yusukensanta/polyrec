@@ -14,9 +14,10 @@ use windows::Win32::Media::Audio::{
     PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ};
-use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
-use windows::core::PROPVARIANT;
+use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ, BLOB};
+use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
+use windows::Win32::System::Variant::VT_BLOB;
 
 /// Fixed target format all captured audio is normalized to before it reaches the
 /// encoder. Devices report all kinds of native mix formats (e.g. 96kHz/8ch);
@@ -162,14 +163,15 @@ fn get_device_friendly_name(
 
         let prop = store.GetValue(&key).ok()?;
 
-        // PROPVARIANT for VT_LPWSTR: the wide-string pointer lives at .Anonymous.Anonymous.Anonymous.pwszVal
-        let raw = prop.as_raw();
-        let pwsz_raw = raw.Anonymous.Anonymous.Anonymous.pwszVal;
-        if pwsz_raw.is_null() {
+        // PROPVARIANT for VT_LPWSTR: the wide-string pointer lives at .Anonymous.Anonymous.Anonymous.pwszVal.
+        // windows-rs 0.62 generates PROPVARIANT as a plain public struct directly (no
+        // separate "safe wrapper" needing an as_raw() conversion the way 0.58 did), and
+        // pwszVal is now already a PWSTR (was a raw *mut u16 in 0.58, needing an extra
+        // manual wrap to get PWSTR's safe to_string() helper).
+        let pwsz = prop.Anonymous.Anonymous.Anonymous.pwszVal;
+        if pwsz.is_null() {
             return None;
         }
-        // Wrap the raw *mut u16 pointer in PWSTR so we can call its safe to_string helper
-        let pwsz = windows::core::PWSTR(pwsz_raw);
         pwsz.to_string().ok()
     }
 }
@@ -398,9 +400,9 @@ struct ActivationCompletionHandler {
 }
 
 impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandler_Impl {
-    fn ActivateCompleted(&self, activateoperation: Option<&IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
+    fn ActivateCompleted(&self, activateoperation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
         let result = (|| -> windows::core::Result<windows::core::IUnknown> {
-            let op = activateoperation.ok_or_else(|| {
+            let op = activateoperation.as_ref().ok_or_else(|| {
                 windows::core::Error::from(windows::Win32::Foundation::E_POINTER)
             })?;
             let mut hr = windows::core::HRESULT(0);
@@ -439,27 +441,30 @@ unsafe fn activate_process_loopback_audio_client(
         },
     };
 
-    // Manually build the raw PROPVARIANT (VT_BLOB) the activation params must be passed
+    // Manually build the PROPVARIANT (VT_BLOB) the activation params must be passed
     // as. `pBlobData` points at our own stack-local `params` — the OS reads it
     // synchronously during the ActivateAudioInterfaceAsync call below, so it only needs
     // to outlive that call, not the whole async operation.
-    let raw_variant = windows::core::imp::PROPVARIANT {
-        Anonymous: windows::core::imp::PROPVARIANT_0 {
-            Anonymous: windows::core::imp::PROPVARIANT_0_0 {
-                vt: 65, // VT_BLOB
+    //
+    // windows-rs 0.62 makes PROPVARIANT a plain public struct (this module path)
+    // instead of the private windows::core::imp:: raw type that needed a
+    // from_raw() conversion in 0.58 -- constructed directly here instead.
+    let variant = PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: core::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_BLOB,
                 wReserved1: 0,
                 wReserved2: 0,
                 wReserved3: 0,
-                Anonymous: windows::core::imp::PROPVARIANT_0_0_0 {
-                    blob: windows::core::imp::BLOB {
+                Anonymous: PROPVARIANT_0_0_0 {
+                    blob: BLOB {
                         cbSize: core::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
                         pBlobData: &mut params as *mut _ as *mut u8,
                     },
                 },
-            },
+            }),
         },
     };
-    let variant = PROPVARIANT::from_raw(raw_variant);
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let handler_obj = ActivationCompletionHandler {
