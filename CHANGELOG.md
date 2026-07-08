@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The export track-selection UI is now shown inline in the status panel instead of a popup window -- the popup used to sit visually on top of the REC button, blocking a new recording from being started while it was up. Starting a new recording now simply replaces the export UI with the live recording status, same as always.
+- Export track checkboxes now reflect the audio tracks actually present in the finished recording file (probed directly from it), not just whatever was selected before recording started -- catches the case where a selected device didn't end up producing a track.
+- The export button (and track checkboxes) are hidden entirely when a recording has fewer than 2 audio tracks, since there's nothing a track-selection export could meaningfully remove in that case. "Open Folder" remains available either way.
+
 ## [0.3.1] - 2026-07-09
 
 ### Fixed
