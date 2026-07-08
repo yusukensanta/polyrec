@@ -6,7 +6,7 @@ Multi-track screen recorder for Windows.
 
 <br clear="left" />
 
-## Download
+## Download / Installation
 
 Grab the latest release from the [Releases page](https://github.com/yusukensanta/polyrec/releases/latest), unzip, and run `polyrec.exe` — no installer needed. The app checks for newer releases on launch and shows a banner in the menu bar if one's available (click it to open the release page; nothing downloads or installs automatically).
 

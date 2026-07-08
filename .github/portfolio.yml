@@ -1,0 +1,8 @@
+# Portfolio opt-in configuration for yusukensanta.github.io
+enabled: true
+
+tech_stack:
+  - Rust
+  - egui
+  - Windows Media Foundation
+  - Windows.Graphics.Capture
