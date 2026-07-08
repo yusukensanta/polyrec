@@ -142,9 +142,38 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let is_recording = self.session.is_recording();
-        let frames = self.frame_count.load(Ordering::Relaxed);
         let s: &'static Strings = self.config.lang().strings();
+
+        self.poll_background_work(s);
+
+        self.render_menu_bar(ctx, s);
+        self.render_source_panel(ctx, s);
+        self.render_center_panel(ctx, s);
+        self.render_overlay_viewport(ctx, s);
+        self.render_quality_popup(ctx, s);
+        self.render_hotkeys_popup(ctx, s);
+        self.render_error_banner(ctx, s);
+        self.render_export_dialog(ctx, s);
+
+        self.request_repaints(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(h) = self.hotkey_listener.take() {
+            h.stop();
+        }
+    }
+}
+
+impl App {
+    /// Polls every non-UI background channel/state transition for this frame:
+    /// the one-shot update-check result, the export-remux result, hotkey
+    /// events, the recorder stopping itself early (disk full), and a
+    /// just-finished recorder's finalize result. None of this renders
+    /// anything -- it only updates `self` before the render_* methods below
+    /// read it.
+    fn poll_background_work(&mut self, s: &'static Strings) {
+        let is_recording = self.session.is_recording();
 
         // Poll update-check result (one-shot; None result also clears the receiver
         // so we stop polling a channel whose sender has already sent its one message)
@@ -222,8 +251,9 @@ impl eframe::App for App {
                 }
             }
         }
+    }
 
-        // ── Menu bar ──────────────────────────────────────────────────────────
+    fn render_menu_bar(&mut self, ctx: &egui::Context, s: &'static Strings) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PolyRec");
@@ -273,8 +303,9 @@ impl eframe::App for App {
                 });
             });
         });
+    }
 
-        // ── Left panel ────────────────────────────────────────────────────────
+    fn render_source_panel(&mut self, ctx: &egui::Context, s: &'static Strings) {
         egui::SidePanel::left("source_panel")
             .default_width(260.0)
             .width_range(200.0..=380.0)
@@ -359,10 +390,9 @@ impl eframe::App for App {
                     );
                 }
                 for (i, dev) in self.audio_devices.iter().enumerate() {
-                    let icon = if dev.is_loopback { "🔊" } else { "🎙" };
                     ui.checkbox(
                         &mut self.selected_audio[i],
-                        format!("{icon} {}", dev.name),
+                        format!("{} {}", audio_device_icon(dev), dev.name),
                     );
                 }
 
@@ -388,8 +418,12 @@ impl eframe::App for App {
                     });
                 });
             });
+    }
 
-        // ── Center panel ──────────────────────────────────────────────────────
+    fn render_center_panel(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        let is_recording = self.session.is_recording();
+        let frames = self.frame_count.load(Ordering::Relaxed);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // Cap content width instead of letting it stretch to fill however
             // wide the window happens to be resized -- actual content here
@@ -615,337 +649,354 @@ impl eframe::App for App {
                 }
             });
         });
+    }
 
-        // ── Overlay viewport (second OS window, click-through) ────────────────
-        if is_recording && self.overlay_enabled {
-            let track_count = self.selected_audio.iter().filter(|&&b| b).count();
-            let elapsed_secs = self
-                .session
-                .active
-                .as_ref()
-                .map(|a| a.clock.elapsed().as_secs())
-                .unwrap_or(0);
-
-            let screen_w = unsafe {
-                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                    windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
-                ) as f32
-            };
-            let tracks_word = s.tracks_word;
-            let stop_word = s.overlay_hud_stop_word;
-
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("polyrec_overlay"),
-                egui::ViewportBuilder::default()
-                    .with_title("PolyRec Overlay")
-                    .with_always_on_top()
-                    .with_decorations(false)
-                    .with_transparent(true)
-                    .with_mouse_passthrough(true)
-                    .with_inner_size([310.0, 32.0])
-                    .with_position(egui::pos2(screen_w - 320.0, 10.0)),
-                move |ctx, _class| {
-                    egui::CentralPanel::default()
-                        .frame(
-                            egui::Frame::none()
-                                .fill(egui::Color32::from_rgba_premultiplied(20, 20, 20, 200))
-                                .inner_margin(egui::Margin::same(6.0)),
-                        )
-                        .show(ctx, |ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "● {:02}:{:02}:{:02}  |  {track_count} {tracks_word}  |  F9 {stop_word}",
-                                    elapsed_secs / 3600,
-                                    (elapsed_secs % 3600) / 60,
-                                    elapsed_secs % 60,
-                                ))
-                                .color(egui::Color32::WHITE)
-                                .size(13.0),
-                            );
-                        });
-                },
-            );
+    /// Second OS window (click-through, always-on-top) showing a compact
+    /// timer/track-count HUD while recording -- opt-in via the Overlay toggle
+    /// in the menu bar.
+    fn render_overlay_viewport(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        let is_recording = self.session.is_recording();
+        if !(is_recording && self.overlay_enabled) {
+            return;
         }
 
-        // ── Quality settings popup ────────────────────────────────────────────
-        if self.show_quality_popup {
-            let mut close = false;
-            egui::Window::new(s.quality_title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    section_header(ui, s.fps_header);
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.encode.fps, 30, "30");
-                        ui.selectable_value(&mut self.config.encode.fps, 60, "60");
-                    });
+        let track_count = self.selected_audio.iter().filter(|&&b| b).count();
+        let elapsed_secs = self
+            .session
+            .active
+            .as_ref()
+            .map(|a| a.clock.elapsed().as_secs())
+            .unwrap_or(0);
 
-                    section_header(ui, s.codec_header);
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.encode.codec, "h264".into(), "H264");
-                        ui.selectable_value(&mut self.config.encode.codec, "h265".into(), "H265");
-                    });
+        let screen_w = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+            ) as f32
+        };
+        let tracks_word = s.tracks_word;
+        let stop_word = s.overlay_hud_stop_word;
 
-                    section_header(ui, s.resolution_header);
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), s.resolution_native);
-                        ui.selectable_value(&mut self.config.encode.resolution_mode, "display".into(), s.resolution_display);
-                        ui.selectable_value(&mut self.config.encode.resolution_mode, "custom".into(), s.resolution_custom);
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("polyrec_overlay"),
+            egui::ViewportBuilder::default()
+                .with_title("PolyRec Overlay")
+                .with_always_on_top()
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_mouse_passthrough(true)
+                .with_inner_size([310.0, 32.0])
+                .with_position(egui::pos2(screen_w - 320.0, 10.0)),
+            move |ctx, _class| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_premultiplied(20, 20, 20, 200))
+                            .inner_margin(egui::Margin::same(6.0)),
+                    )
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "● {:02}:{:02}:{:02}  |  {track_count} {tracks_word}  |  F9 {stop_word}",
+                                elapsed_secs / 3600,
+                                (elapsed_secs % 3600) / 60,
+                                elapsed_secs % 60,
+                            ))
+                            .color(egui::Color32::WHITE)
+                            .size(13.0),
+                        );
                     });
-                    if self.config.encode.resolution_mode == "custom" {
-                        ui.horizontal(|ui| {
-                            ui.label(s.width_label);
-                            ui.add(egui::DragValue::new(&mut self.config.encode.custom_width).range(2..=7680));
-                            ui.label(s.height_label);
-                            ui.add(egui::DragValue::new(&mut self.config.encode.custom_height).range(2..=4320));
-                        });
-                    }
+            },
+        );
+    }
 
-                    section_header(ui, s.bitrate_header);
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "auto".into(), s.bitrate_auto);
-                        ui.selectable_value(&mut self.config.encode.bitrate_mode, "manual".into(), s.bitrate_manual);
-                    });
-                    if self.config.encode.bitrate_mode == "manual" {
-                        ui.horizontal(|ui| {
-                            ui.label(s.mbps_label);
-                            ui.add(egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps).range(1..=100));
-                        });
-                    }
-
-                    ui.add_space(8.0);
-                    if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                        close = true;
-                    }
+    fn render_quality_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        if !self.show_quality_popup {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new(s.quality_title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                section_header(ui, s.fps_header);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.config.encode.fps, 30, "30");
+                    ui.selectable_value(&mut self.config.encode.fps, 60, "60");
                 });
-            if close {
-                self.show_quality_popup = false;
-                if let Err(e) = self.config.save() {
-                    tracing::error!("failed to save config: {e}");
+
+                section_header(ui, s.codec_header);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.config.encode.codec, "h264".into(), "H264");
+                    ui.selectable_value(&mut self.config.encode.codec, "h265".into(), "H265");
+                });
+
+                section_header(ui, s.resolution_header);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), s.resolution_native);
+                    ui.selectable_value(&mut self.config.encode.resolution_mode, "display".into(), s.resolution_display);
+                    ui.selectable_value(&mut self.config.encode.resolution_mode, "custom".into(), s.resolution_custom);
+                });
+                if self.config.encode.resolution_mode == "custom" {
+                    ui.horizontal(|ui| {
+                        ui.label(s.width_label);
+                        ui.add(egui::DragValue::new(&mut self.config.encode.custom_width).range(2..=7680));
+                        ui.label(s.height_label);
+                        ui.add(egui::DragValue::new(&mut self.config.encode.custom_height).range(2..=4320));
+                    });
                 }
+
+                section_header(ui, s.bitrate_header);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.config.encode.bitrate_mode, "auto".into(), s.bitrate_auto);
+                    ui.selectable_value(&mut self.config.encode.bitrate_mode, "manual".into(), s.bitrate_manual);
+                });
+                if self.config.encode.bitrate_mode == "manual" {
+                    ui.horizontal(|ui| {
+                        ui.label(s.mbps_label);
+                        ui.add(egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps).range(1..=100));
+                    });
+                }
+
+                ui.add_space(8.0);
+                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.show_quality_popup = false;
+            if let Err(e) = self.config.save() {
+                tracing::error!("failed to save config: {e}");
             }
         }
+    }
 
-        // ── Hotkeys settings popup ────────────────────────────────────────────
-        if self.show_hotkeys_popup {
-            const FUNCTION_KEYS: [&str; 12] = [
-                "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-            ];
-            let mut close = false;
-            egui::Window::new(s.hotkeys_title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    section_header(ui, s.hotkey_start_stop_header);
-                    ui.horizontal_wrapped(|ui| {
-                        for key in FUNCTION_KEYS {
-                            ui.selectable_value(&mut self.config.hotkeys.start_stop, key.to_string(), key);
-                        }
-                    });
-
-                    section_header(ui, s.hotkey_pause_header);
-                    ui.horizontal_wrapped(|ui| {
-                        for key in FUNCTION_KEYS {
-                            ui.selectable_value(&mut self.config.hotkeys.pause, key.to_string(), key);
-                        }
-                    });
-
-                    section_header(ui, s.hotkey_overlay_header);
-                    ui.horizontal_wrapped(|ui| {
-                        for key in FUNCTION_KEYS {
-                            ui.selectable_value(&mut self.config.hotkeys.toggle_overlay, key.to_string(), key);
-                        }
-                    });
-
-                    let bindings = [
-                        &self.config.hotkeys.start_stop,
-                        &self.config.hotkeys.pause,
-                        &self.config.hotkeys.toggle_overlay,
-                    ];
-                    let has_collision = bindings[0] == bindings[1]
-                        || bindings[0] == bindings[2]
-                        || bindings[1] == bindings[2];
-                    if has_collision {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(s.hotkey_collision_warning)
-                                .size(11.0)
-                                .color(ACCENT_PAUSE),
-                        );
-                    }
-
-                    ui.add_space(8.0);
-                    if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                        close = true;
+    fn render_hotkeys_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        if !self.show_hotkeys_popup {
+            return;
+        }
+        const FUNCTION_KEYS: [&str; 12] = [
+            "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+        ];
+        let mut close = false;
+        egui::Window::new(s.hotkeys_title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                section_header(ui, s.hotkey_start_stop_header);
+                ui.horizontal_wrapped(|ui| {
+                    for key in FUNCTION_KEYS {
+                        ui.selectable_value(&mut self.config.hotkeys.start_stop, key.to_string(), key);
                     }
                 });
-            if close {
-                self.show_hotkeys_popup = false;
-                if let Err(e) = self.config.save() {
-                    tracing::error!("failed to save config: {e}");
-                }
-                // The listener registers its hotkeys once at spawn time, so a rebind
-                // needs a fresh thread — stop() unregisters the old bindings before
-                // the new listener registers the (possibly changed) ones, avoiding a
-                // stuck registration on a key the user just reassigned elsewhere.
-                if let Some(old) = self.hotkey_listener.take() {
-                    old.stop();
-                }
-                self.hotkey_listener = Some(HotkeyListener::spawn(
+
+                section_header(ui, s.hotkey_pause_header);
+                ui.horizontal_wrapped(|ui| {
+                    for key in FUNCTION_KEYS {
+                        ui.selectable_value(&mut self.config.hotkeys.pause, key.to_string(), key);
+                    }
+                });
+
+                section_header(ui, s.hotkey_overlay_header);
+                ui.horizontal_wrapped(|ui| {
+                    for key in FUNCTION_KEYS {
+                        ui.selectable_value(&mut self.config.hotkeys.toggle_overlay, key.to_string(), key);
+                    }
+                });
+
+                let bindings = [
                     &self.config.hotkeys.start_stop,
                     &self.config.hotkeys.pause,
                     &self.config.hotkeys.toggle_overlay,
-                ));
-            }
-        }
-
-        // ── Error banner ──────────────────────────────────────────────────────
-        if let Some(msg) = self.error_message.clone() {
-            let mut close = false;
-            egui::Window::new(s.error_title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.label(egui::RichText::new(&msg).size(13.0).color(ACCENT_REC));
+                ];
+                let has_collision = bindings[0] == bindings[1]
+                    || bindings[0] == bindings[2]
+                    || bindings[1] == bindings[2];
+                if has_collision {
                     ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(s.hotkey_collision_warning)
+                            .size(11.0)
+                            .color(ACCENT_PAUSE),
+                    );
+                }
+
+                ui.add_space(8.0);
+                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.show_hotkeys_popup = false;
+            if let Err(e) = self.config.save() {
+                tracing::error!("failed to save config: {e}");
+            }
+            // The listener registers its hotkeys once at spawn time, so a rebind
+            // needs a fresh thread — stop() unregisters the old bindings before
+            // the new listener registers the (possibly changed) ones, avoiding a
+            // stuck registration on a key the user just reassigned elsewhere.
+            if let Some(old) = self.hotkey_listener.take() {
+                old.stop();
+            }
+            self.hotkey_listener = Some(HotkeyListener::spawn(
+                &self.config.hotkeys.start_stop,
+                &self.config.hotkeys.pause,
+                &self.config.hotkeys.toggle_overlay,
+            ));
+        }
+    }
+
+    fn render_error_banner(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        let Some(msg) = self.error_message.clone() else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new(s.error_title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&msg).size(13.0).color(ACCENT_REC));
+                ui.add_space(8.0);
+                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.error_message = None;
+        }
+    }
+
+    fn render_export_dialog(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        if !self.show_export_dialog {
+            return;
+        }
+        let Some(path) = self.last_output_path.clone() else {
+            self.show_export_dialog = false;
+            self.export_state = ExportState::Idle;
+            self.export_result_rx = None;
+            return;
+        };
+
+        let mut close = false;
+        egui::Window::new(s.export_dialog_title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(s.recording_saved_label).size(11.0).color(TEXT_MUTED));
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(path.to_string_lossy().as_ref())
+                        .size(12.0)
+                        .color(TEXT_PRIMARY),
+                );
+
+                ui.add_space(8.0);
+                section_header(ui, s.audio_tracks_header);
+                for (i, dev) in self.audio_devices.iter().enumerate() {
+                    if i < self.export_track_selection.len() {
+                        ui.checkbox(
+                            &mut self.export_track_selection[i],
+                            format!("{} {}", audio_device_icon(dev), dev.name),
+                        );
+                    }
+                }
+
+                ui.add_space(8.0);
+
+                let done_path = if let ExportState::Done(p) = &self.export_state {
+                    Some(p.clone())
+                } else {
+                    None
+                };
+                let failed_msg = if let ExportState::Failed(m) = &self.export_state {
+                    Some(m.clone())
+                } else {
+                    None
+                };
+                let is_idle = matches!(self.export_state, ExportState::Idle);
+                let is_running = matches!(self.export_state, ExportState::Running);
+
+                if is_idle {
+                    ui.horizontal(|ui| {
+                        if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked() {
+                            if let Some(dest) = rfd::FileDialog::new()
+                                .add_filter("MP4 video", &["mp4"])
+                                .set_file_name("export.mp4")
+                                .save_file()
+                            {
+                                let src = path.clone();
+                                let indices: Vec<usize> = self
+                                    .export_track_selection
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, &sel)| sel)
+                                    .map(|(i, _)| i)
+                                    .collect();
+                                let (tx, rx) = mpsc::channel();
+                                std::thread::spawn(move || {
+                                    let result = remux(&src, &dest, &indices)
+                                        .map_err(|e| e.to_string());
+                                    let _ = tx.send(result);
+                                });
+                                self.export_result_rx = Some(rx);
+                                self.export_state = ExportState::Running;
+                            }
+                        }
+                        if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+                            open_folder(path.as_ref());
+                        }
+                        if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                            close = true;
+                        }
+                    });
+                } else if is_running {
+                    section_header(ui, s.exporting_header);
+                    ui.label(
+                        egui::RichText::new(s.please_wait)
+                            .size(11.0)
+                            .color(TEXT_MUTED),
+                    );
+                } else if let Some(export_path) = done_path {
+                    section_header(ui, s.export_complete_header);
+                    ui.label(
+                        egui::RichText::new(export_path.to_string_lossy().as_ref())
+                            .size(11.0)
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+                            open_folder(&export_path);
+                        }
+                        if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                            close = true;
+                        }
+                    });
+                } else if let Some(msg) = failed_msg {
+                    section_header(ui, s.export_failed_header);
+                    ui.label(
+                        egui::RichText::new(&msg)
+                            .size(11.0)
+                            .color(ACCENT_REC),
+                    );
+                    ui.add_space(4.0);
                     if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                         close = true;
                     }
-                });
-            if close {
-                self.error_message = None;
-            }
-        }
-
-        // ── Export dialog ─────────────────────────────────────────────────────
-        if self.show_export_dialog {
-            if let Some(path) = self.last_output_path.clone() {
-                let mut close = false;
-                egui::Window::new(s.export_dialog_title)
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(s.recording_saved_label).size(11.0).color(TEXT_MUTED));
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(path.to_string_lossy().as_ref())
-                                .size(12.0)
-                                .color(TEXT_PRIMARY),
-                        );
-
-                        ui.add_space(8.0);
-                        section_header(ui, s.audio_tracks_header);
-                        for (i, dev) in self.audio_devices.iter().enumerate() {
-                            if i < self.export_track_selection.len() {
-                                let icon = if dev.is_loopback { "🔊" } else { "🎙" };
-                                ui.checkbox(
-                                    &mut self.export_track_selection[i],
-                                    format!("{icon} {}", dev.name),
-                                );
-                            }
-                        }
-
-                        ui.add_space(8.0);
-
-                        let done_path = if let ExportState::Done(p) = &self.export_state {
-                            Some(p.clone())
-                        } else {
-                            None
-                        };
-                        let failed_msg = if let ExportState::Failed(m) = &self.export_state {
-                            Some(m.clone())
-                        } else {
-                            None
-                        };
-                        let is_idle = matches!(self.export_state, ExportState::Idle);
-                        let is_running = matches!(self.export_state, ExportState::Running);
-
-                        if is_idle {
-                            ui.horizontal(|ui| {
-                                if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked() {
-                                    if let Some(dest) = rfd::FileDialog::new()
-                                        .add_filter("MP4 video", &["mp4"])
-                                        .set_file_name("export.mp4")
-                                        .save_file()
-                                    {
-                                        let src = path.clone();
-                                        let indices: Vec<usize> = self
-                                            .export_track_selection
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_, &sel)| sel)
-                                            .map(|(i, _)| i)
-                                            .collect();
-                                        let (tx, rx) = mpsc::channel();
-                                        std::thread::spawn(move || {
-                                            let result = remux(&src, &dest, &indices)
-                                                .map_err(|e| e.to_string());
-                                            let _ = tx.send(result);
-                                        });
-                                        self.export_result_rx = Some(rx);
-                                        self.export_state = ExportState::Running;
-                                    }
-                                }
-                                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
-                                    open_folder(path.as_ref());
-                                }
-                                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                                    close = true;
-                                }
-                            });
-                        } else if is_running {
-                            section_header(ui, s.exporting_header);
-                            ui.label(
-                                egui::RichText::new(s.please_wait)
-                                    .size(11.0)
-                                    .color(TEXT_MUTED),
-                            );
-                        } else if let Some(export_path) = done_path {
-                            section_header(ui, s.export_complete_header);
-                            ui.label(
-                                egui::RichText::new(export_path.to_string_lossy().as_ref())
-                                    .size(11.0)
-                                    .color(TEXT_PRIMARY),
-                            );
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
-                                    open_folder(&export_path);
-                                }
-                                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                                    close = true;
-                                }
-                            });
-                        } else if let Some(msg) = failed_msg {
-                            section_header(ui, s.export_failed_header);
-                            ui.label(
-                                egui::RichText::new(&msg)
-                                    .size(11.0)
-                                    .color(ACCENT_REC),
-                            );
-                            ui.add_space(4.0);
-                            if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                                close = true;
-                            }
-                        }
-                    });
-                if close {
-                    self.show_export_dialog = false;
-                    self.export_state = ExportState::Idle;
-                    self.export_result_rx = None;
                 }
-            } else {
-                self.show_export_dialog = false;
-                self.export_state = ExportState::Idle;
-                self.export_result_rx = None;
-            }
+            });
+        if close {
+            self.show_export_dialog = false;
+            self.export_state = ExportState::Idle;
+            self.export_result_rx = None;
         }
+    }
 
-        if is_recording {
+    fn request_repaints(&self, ctx: &egui::Context) {
+        if self.session.is_recording() {
             // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
@@ -957,12 +1008,6 @@ impl eframe::App for App {
         }
         if self.finalizing_handle.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(h) = self.hotkey_listener.take() {
-            h.stop();
         }
     }
 }
@@ -988,6 +1033,12 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(4.0);
+}
+
+/// Icon for an audio-device checkbox label — used both in the source panel's
+/// device list and the export dialog's per-track selection.
+fn audio_device_icon(dev: &AudioDevice) -> &'static str {
+    if dev.is_loopback { "🔊" } else { "🎙" }
 }
 
 /// egui's bundled default font only covers Latin + a small symbol set — window
