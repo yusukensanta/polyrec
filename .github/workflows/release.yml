@@ -16,6 +16,12 @@ name: Release
 
 permissions:
   contents: write
+  # For actions/attest-build-provenance: id-token to mint the OIDC token that
+  # proves "this exact repo/workflow/commit produced this file", attestations
+  # to publish the resulting attestation. Neither grants any write access to
+  # repo content beyond that.
+  id-token: write
+  attestations: write
 
 # Creating a Release via the GitHub UI against a brand-new tag fires BOTH
 # triggers above (the tag push, then the release publish) -- queue the second
@@ -78,9 +84,30 @@ jobs:
           Copy-Item LICENSE $stagingDir/
           Compress-Archive -Path $stagingDir/* -DestinationPath "$stagingDir.zip"
 
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem polyrec-*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUMS.txt -Append -Encoding ASCII
+          }
+          Get-Content SHA256SUMS.txt
+
+      # Cryptographically ties this exact file to this exact repo/workflow/commit,
+      # recorded in Sigstore's public transparency log -- independent of the
+      # release itself, so it can't be silently re-issued alongside a swapped
+      # asset the way a checksum committed only to the release body could be.
+      # Verify a downloaded file with: gh attestation verify <file> -R yusukensanta/polyrec
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: polyrec-*.zip
+
       - name: Create/update GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          files: polyrec-*.zip
+          files: |
+            polyrec-*.zip
+            SHA256SUMS.txt
           generate_release_notes: true
