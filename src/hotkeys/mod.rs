@@ -38,7 +38,17 @@ pub struct HotkeyListener {
 }
 
 impl HotkeyListener {
-    pub fn spawn(start_stop: &str, pause: &str, toggle_overlay: &str) -> Self {
+    /// `wake` is called (on the hook's own background thread) every time a
+    /// binding fires, right after the event is queued -- unlike the old
+    /// `RegisterHotKey` + `WM_HOTKEY` mechanism, where the hotkey arrived as a
+    /// real posted message on the UI thread's own queue and so woke up a
+    /// blocked/idle event loop for free, this hook fires on a *separate*
+    /// thread and only pushes into an mpsc channel. Nothing else would wake
+    /// egui's event loop to actually drain that channel while idle (egui
+    /// doesn't poll for work on its own -- it blocks in `GetMessageW` between
+    /// real window events and explicit repaint requests). Callers must pass
+    /// something equivalent to `egui::Context::request_repaint`.
+    pub fn spawn(start_stop: &str, pause: &str, toggle_overlay: &str, wake: impl Fn() + Send + 'static) -> Self {
         let start_stop_hk = parse_hotkey(start_stop);
         let pause_hk = parse_hotkey(pause);
         let toggle_overlay_hk = parse_hotkey(toggle_overlay);
@@ -55,7 +65,7 @@ impl HotkeyListener {
                 let _ = PeekMessageW(&mut dummy, None, 0, 0, PM_NOREMOVE);
             }
             id_tx.send(tid).ok();
-            run_hook_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk);
+            run_hook_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk, Box::new(wake));
         });
 
         let thread_id = id_rx.recv().expect("hotkey thread panicked before sending thread ID");
@@ -239,6 +249,9 @@ struct HookContext {
     /// point (matching a key release always ends "repeat" for it).
     held: HashSet<u32>,
     tx: mpsc::Sender<HotkeyEvent>,
+    /// Called right after a matched event is queued -- see `HotkeyListener::spawn`
+    /// for why this is necessary (the channel alone won't wake an idle egui loop).
+    wake: Box<dyn Fn() + Send>,
 }
 
 thread_local! {
@@ -301,6 +314,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     {
                         hc.held.insert(vk_code);
                         hc.tx.send(binding.event).ok();
+                        (hc.wake)();
                         consumed = true;
                     }
                 }
@@ -318,6 +332,7 @@ fn run_hook_loop(
     start_stop_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     pause_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     toggle_overlay_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
+    wake: Box<dyn Fn() + Send>,
 ) {
     let mut bindings = Vec::new();
     if let Some((vk, mods)) = start_stop_hk {
@@ -331,7 +346,7 @@ fn run_hook_loop(
     }
 
     HOOK_CTX.with(|ctx| {
-        *ctx.borrow_mut() = Some(HookContext { bindings, held: HashSet::new(), tx });
+        *ctx.borrow_mut() = Some(HookContext { bindings, held: HashSet::new(), tx, wake });
     });
 
     let hook: HHOOK = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) } {
