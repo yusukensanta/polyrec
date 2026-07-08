@@ -709,6 +709,9 @@ impl App {
         };
         let tracks_word = s.tracks_word;
         let stop_word = s.overlay_hud_stop_word;
+        // Reflects whatever start/stop is actually bound to right now, not a
+        // hardcoded default -- it's freely rebindable (see render_hotkeys_popup).
+        let stop_key = self.config.hotkeys.start_stop.clone();
 
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("polyrec_overlay"),
@@ -718,8 +721,10 @@ impl App {
                 .with_decorations(false)
                 .with_transparent(true)
                 .with_mouse_passthrough(true)
-                .with_inner_size([310.0, 32.0])
-                .with_position(egui::pos2(screen_w - 320.0, 10.0)),
+                // Widened from 310 to fit longer modifier combos (e.g.
+                // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
+                .with_inner_size([400.0, 32.0])
+                .with_position(egui::pos2(screen_w - 410.0, 10.0)),
             move |ctx, _class| {
                 // CentralPanel::show(ctx, ...) is soft-deprecated in favor of
                 // show_inside(ui, ...), but this closure only ever receives a
@@ -735,7 +740,7 @@ impl App {
                     .show(ctx, |ui| {
                         ui.label(
                             egui::RichText::new(format!(
-                                "● {:02}:{:02}:{:02}  |  {track_count} {tracks_word}  |  F9 {stop_word}",
+                                "● {:02}:{:02}:{:02}  |  {track_count} {tracks_word}  |  {stop_key} {stop_word}",
                                 elapsed_secs / 3600,
                                 (elapsed_secs % 3600) / 60,
                                 elapsed_secs % 60,
