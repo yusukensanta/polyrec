@@ -20,7 +20,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 dirs = "6"
 rfd = "0.17"
-windows-core = "0.58"
+windows-core = "0.62"
 chrono = "0.4"
 semver = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
