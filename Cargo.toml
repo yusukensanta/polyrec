@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 eframe = "0.29"
-egui = "0.29"
+egui = "0.35"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 tracing = "0.1"
