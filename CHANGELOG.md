@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Hotkeys are now bound by pressing the actual key combination you want (optionally holding Ctrl/Alt/Shift), instead of picking from a fixed grid of F1-F12 buttons — supports any letter, digit, F-key (F1-F24), or common navigation key, alone or combined with modifiers.
+- If a captured key combination is already in use by another running application or reserved by Windows, `RegisterHotKey` is tested immediately and a warning is shown inline instead of silently failing later.
+
+## [0.2.5] - 2026-07-08
+
+### Fixed
+
+- Migrated windows-rs 0.58 → 0.62.2 and egui/eframe 0.29 → 0.35.0 (PR #12) — both had accumulated real breaking API changes; see the PR for the full list (PROPVARIANT restructuring, HGDIOBJ conversions, eframe's `App::ui` replacing `update`, egui's `CornerRadius`/`Panel` changes).
+
 ## [0.2.4] - 2026-07-08
 
 ### Added
@@ -80,7 +91,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/yusukensanta/polyrec/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yusukensanta/polyrec/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yusukensanta/polyrec/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/yusukensanta/polyrec/compare/v0.2.1...v0.2.2
