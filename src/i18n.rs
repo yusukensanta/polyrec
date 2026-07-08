@@ -78,7 +78,6 @@ pub struct Strings {
     pub tracks_word: &'static str,  // used as "{n} {tracks_word}"
     pub frames_word: &'static str,  // used as "{n} {frames_word}"
     pub saving_recording: &'static str,
-    pub last_recording_label: &'static str,
     pub select_source_prompt: &'static str,
     pub state_prefix: &'static str, // "State: " — followed by one of the three below
     pub session_state_idle: &'static str,
@@ -138,8 +137,7 @@ pub struct Strings {
     pub recording_ended_unexpectedly_prefix: &'static str,
     pub couldnt_start_recording_prefix: &'static str,
 
-    // Export dialog
-    pub export_dialog_title: &'static str,
+    // Export controls (inline in the status panel)
     pub recording_saved_label: &'static str,
     pub audio_tracks_header: &'static str,
     pub export_button: &'static str,
@@ -172,7 +170,6 @@ pub static EN: Strings = Strings {
     tracks_word: "tracks",
     frames_word: "frames",
     saving_recording: "Saving recording…",
-    last_recording_label: "Last recording:",
     select_source_prompt: "Select a source and press REC to start.",
     state_prefix: "State: ",
     session_state_idle: "Idle",
@@ -224,7 +221,6 @@ pub static EN: Strings = Strings {
     recording_ended_unexpectedly_prefix: "Recording ended unexpectedly: ",
     couldnt_start_recording_prefix: "Couldn't start recording: ",
 
-    export_dialog_title: "Recording Complete",
     recording_saved_label: "Recording saved:",
     audio_tracks_header: "AUDIO TRACKS",
     export_button: "Export",
@@ -257,7 +253,6 @@ pub static JA: Strings = Strings {
     tracks_word: "トラック",
     frames_word: "フレーム",
     saving_recording: "録画を保存中…",
-    last_recording_label: "前回の録画:",
     select_source_prompt: "ソースを選択して REC を押すと開始します。",
     state_prefix: "状態: ",
     session_state_idle: "待機中",
@@ -309,7 +304,6 @@ pub static JA: Strings = Strings {
     recording_ended_unexpectedly_prefix: "録画が予期せず終了しました: ",
     couldnt_start_recording_prefix: "録画を開始できませんでした: ",
 
-    export_dialog_title: "録画完了",
     recording_saved_label: "録画を保存しました:",
     audio_tracks_header: "オーディオ トラック",
     export_button: "エクスポート",

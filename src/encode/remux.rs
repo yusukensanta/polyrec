@@ -58,6 +58,32 @@ pub fn remux(
     }
 }
 
+/// How many audio streams a finished recording actually contains -- read
+/// directly from the file itself rather than trusted from whatever devices
+/// were selected before recording started, since a device selected at record
+/// time isn't a guarantee it actually produced a stream in the output (e.g. a
+/// device disconnecting mid-recording). The export UI uses this to build its
+/// track-selection checkboxes and to decide whether exporting is even
+/// meaningful (nothing to select between with fewer than two tracks).
+pub fn count_audio_tracks(path: &Path) -> Result<usize, AppError> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_FULL)
+            .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
+        let result = (|| {
+            let url = HSTRING::from(
+                path.to_str()
+                    .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
+            );
+            let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None)
+                .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL: {e}")))?;
+            Ok(discover_stream_layout(&reader)?.audio.len())
+        })();
+        let _ = MFShutdown();
+        result
+    }
+}
+
 unsafe fn do_remux(
     input: &Path,
     output: &Path,
@@ -257,5 +283,27 @@ mod tests {
         assert!(result.is_ok(), "remux failed: {:?}", result.err());
         assert!(dest.exists(), "output file not created");
         assert!(dest.metadata().unwrap().len() > 0, "output file is empty");
+    }
+
+    #[test]
+    fn count_audio_tracks_finds_the_single_audio_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = make_test_mp4(dir.path());
+        assert_eq!(count_audio_tracks(&source).expect("count_audio_tracks failed"), 1);
+    }
+
+    #[test]
+    fn count_audio_tracks_is_zero_for_a_video_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video_only_source.mp4");
+        let writer = RecordingWriter::new(&path, 64, 64, 30, "h264", 500_000, &[], false)
+            .expect("RecordingWriter::new");
+        writer.begin_writing().expect("begin_writing");
+        writer
+            .write_video(VideoFrame { pts: Duration::ZERO, data: vec![0u8; 64 * 64 * 4] })
+            .expect("write_video");
+        let path = writer.finalize().expect("finalize");
+
+        assert_eq!(count_audio_tracks(&path).expect("count_audio_tracks failed"), 0);
     }
 }

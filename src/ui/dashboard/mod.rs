@@ -65,7 +65,12 @@ pub struct App {
     recording_start: Option<Instant>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
-    show_export_dialog: bool,
+    /// How many audio streams the last finished recording actually contains,
+    /// probed from the file itself (see `remux::count_audio_tracks`) rather
+    /// than trusted from the pre-recording device selection. Export controls
+    /// only make sense with 2+ tracks to choose between -- with 0 or 1,
+    /// there's nothing a track-selection export could meaningfully remove.
+    export_available_tracks: usize,
     export_track_selection: Vec<bool>,
     export_state: ExportState,
     export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
@@ -137,7 +142,7 @@ impl App {
             recording_start: None,
             last_output_path: None,
             output_dir_input,
-            show_export_dialog: false,
+            export_available_tracks: 0,
             export_track_selection,
             export_state: ExportState::Idle,
             export_result_rx: None,
@@ -178,7 +183,6 @@ impl eframe::App for App {
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);
         self.render_error_banner(ctx, s);
-        self.render_export_dialog(ctx, s);
 
         self.request_repaints(ctx);
     }
@@ -248,7 +252,8 @@ impl App {
             self.stop_recording();
         }
 
-        // Show export dialog once recorder has finished writing the file
+        // Show export controls (inline in the status panel) once recorder has
+        // finished writing the file
         if self.finalizing_handle.as_ref().is_some_and(|h| h.is_finished()) {
             let handle = self.finalizing_handle.take().unwrap();
             self.finalizing_path = None;
@@ -258,20 +263,26 @@ impl App {
                 .is_some_and(|f| f.load(Ordering::Relaxed));
             match tokio::runtime::Handle::current().block_on(handle) {
                 Ok(Ok(path)) => {
+                    // Probed from the file itself, not trusted from the
+                    // pre-recording device selection -- see field doc on
+                    // export_available_tracks.
+                    self.export_available_tracks = crate::encode::remux::count_audio_tracks(&path)
+                        .inspect_err(|e| tracing::warn!("count_audio_tracks failed, export controls will stay hidden: {e}"))
+                        .unwrap_or(0);
+                    self.export_track_selection = vec![true; self.export_available_tracks];
+                    self.export_state = ExportState::Idle;
+                    self.export_result_rx = None;
                     self.last_output_path = Some(path);
-                    self.show_export_dialog = true;
                     if disk_full {
                         self.error_message = Some(s.disk_full_mid_recording.to_string());
                     }
                 }
                 Ok(Err(e)) => {
                     tracing::error!("recording finalize failed: {e}");
-                    self.show_export_dialog = false;
                     self.error_message = Some(format!("{}{e}", s.recording_failed_prefix));
                 }
                 Err(e) => {
                     tracing::error!("recorder task did not complete cleanly: {e}");
-                    self.show_export_dialog = false;
                     self.error_message = Some(format!("{}{e}", s.recording_ended_unexpectedly_prefix));
                 }
             }
@@ -551,14 +562,8 @@ impl App {
                         .size(13.0)
                         .color(TEXT_MUTED),
                 );
-            } else if let Some(path) = &self.last_output_path {
-                ui.label(egui::RichText::new(s.last_recording_label).size(11.0).color(TEXT_MUTED));
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(path.to_string_lossy().as_ref())
-                        .size(12.0)
-                        .color(TEXT_PRIMARY),
-                );
+            } else if let Some(path) = self.last_output_path.clone() {
+                self.render_export_controls(ui, s, &path);
             } else {
                 ui.add_space(8.0);
                 ui.label(
@@ -840,129 +845,114 @@ impl App {
         }
     }
 
-    fn render_export_dialog(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        if !self.show_export_dialog {
+    /// Rendered inline in the status panel's "last recording" area, not a
+    /// popup -- a floating `egui::Window` here used to visually sit on top of
+    /// the REC button (both anchored center-ish), physically blocking a user
+    /// from starting a new recording while it was up, even though nothing
+    /// technically prevented it. Inline means the REC button is always
+    /// reachable; starting a new recording just replaces this whole section
+    /// with the live recording status, same as it already did before any
+    /// export UI existed.
+    fn render_export_controls(&mut self, ui: &mut egui::Ui, s: &'static Strings, path: &std::path::Path) {
+        ui.label(egui::RichText::new(s.recording_saved_label).size(11.0).color(TEXT_MUTED));
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(path.to_string_lossy().as_ref())
+                .size(12.0)
+                .color(TEXT_PRIMARY),
+        );
+        ui.add_space(8.0);
+
+        // Fewer than 2 tracks means there's nothing a track-selection export
+        // could meaningfully remove -- the raw recording already IS the most
+        // that could be exported, so the export button/track list would just
+        // be a confusing no-op. Still offer Open Folder either way.
+        if self.export_available_tracks < 2 {
+            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+                open_folder(path);
+            }
             return;
         }
-        let Some(path) = self.last_output_path.clone() else {
-            self.show_export_dialog = false;
-            self.export_state = ExportState::Idle;
-            self.export_result_rx = None;
-            return;
-        };
 
-        let mut close = false;
-        egui::Window::new(s.export_dialog_title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.label(egui::RichText::new(s.recording_saved_label).size(11.0).color(TEXT_MUTED));
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(path.to_string_lossy().as_ref())
-                        .size(12.0)
-                        .color(TEXT_PRIMARY),
+        section_header(ui, s.audio_tracks_header);
+        for (i, dev) in self.audio_devices.iter().enumerate() {
+            if i < self.export_track_selection.len() {
+                ui.checkbox(
+                    &mut self.export_track_selection[i],
+                    format!("{} {}", audio_device_icon(dev), dev.name),
                 );
+            }
+        }
 
-                ui.add_space(8.0);
-                section_header(ui, s.audio_tracks_header);
-                for (i, dev) in self.audio_devices.iter().enumerate() {
-                    if i < self.export_track_selection.len() {
-                        ui.checkbox(
-                            &mut self.export_track_selection[i],
-                            format!("{} {}", audio_device_icon(dev), dev.name),
-                        );
-                    }
+        ui.add_space(8.0);
+
+        let done_path = if let ExportState::Done(p) = &self.export_state {
+            Some(p.clone())
+        } else {
+            None
+        };
+        let failed_msg = if let ExportState::Failed(m) = &self.export_state {
+            Some(m.clone())
+        } else {
+            None
+        };
+        let is_idle = matches!(self.export_state, ExportState::Idle);
+        let is_running = matches!(self.export_state, ExportState::Running);
+
+        if is_idle {
+            ui.horizontal(|ui| {
+                if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked()
+                    && let Some(dest) = rfd::FileDialog::new()
+                        .add_filter("MP4 video", &["mp4"])
+                        .set_file_name("export.mp4")
+                        .save_file()
+                {
+                    let src = path.to_path_buf();
+                    let indices: Vec<usize> = self
+                        .export_track_selection
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &sel)| sel)
+                        .map(|(i, _)| i)
+                        .collect();
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let result = remux(&src, &dest, &indices)
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(result);
+                    });
+                    self.export_result_rx = Some(rx);
+                    self.export_state = ExportState::Running;
                 }
-
-                ui.add_space(8.0);
-
-                let done_path = if let ExportState::Done(p) = &self.export_state {
-                    Some(p.clone())
-                } else {
-                    None
-                };
-                let failed_msg = if let ExportState::Failed(m) = &self.export_state {
-                    Some(m.clone())
-                } else {
-                    None
-                };
-                let is_idle = matches!(self.export_state, ExportState::Idle);
-                let is_running = matches!(self.export_state, ExportState::Running);
-
-                if is_idle {
-                    ui.horizontal(|ui| {
-                        if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked()
-                            && let Some(dest) = rfd::FileDialog::new()
-                                .add_filter("MP4 video", &["mp4"])
-                                .set_file_name("export.mp4")
-                                .save_file()
-                        {
-                            let src = path.clone();
-                            let indices: Vec<usize> = self
-                                .export_track_selection
-                                .iter()
-                                .enumerate()
-                                .filter(|&(_, &sel)| sel)
-                                .map(|(i, _)| i)
-                                .collect();
-                            let (tx, rx) = mpsc::channel();
-                            std::thread::spawn(move || {
-                                let result = remux(&src, &dest, &indices)
-                                    .map_err(|e| e.to_string());
-                                let _ = tx.send(result);
-                            });
-                            self.export_result_rx = Some(rx);
-                            self.export_state = ExportState::Running;
-                        }
-                        if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
-                            open_folder(path.as_ref());
-                        }
-                        if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                            close = true;
-                        }
-                    });
-                } else if is_running {
-                    section_header(ui, s.exporting_header);
-                    ui.label(
-                        egui::RichText::new(s.please_wait)
-                            .size(11.0)
-                            .color(TEXT_MUTED),
-                    );
-                } else if let Some(export_path) = done_path {
-                    section_header(ui, s.export_complete_header);
-                    ui.label(
-                        egui::RichText::new(export_path.to_string_lossy().as_ref())
-                            .size(11.0)
-                            .color(TEXT_PRIMARY),
-                    );
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
-                            open_folder(&export_path);
-                        }
-                        if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                            close = true;
-                        }
-                    });
-                } else if let Some(msg) = failed_msg {
-                    section_header(ui, s.export_failed_header);
-                    ui.label(
-                        egui::RichText::new(&msg)
-                            .size(11.0)
-                            .color(ACCENT_REC),
-                    );
-                    ui.add_space(4.0);
-                    if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
-                        close = true;
-                    }
+                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+                    open_folder(path);
                 }
             });
-        if close {
-            self.show_export_dialog = false;
-            self.export_state = ExportState::Idle;
-            self.export_result_rx = None;
+        } else if is_running {
+            section_header(ui, s.exporting_header);
+            ui.label(
+                egui::RichText::new(s.please_wait)
+                    .size(11.0)
+                    .color(TEXT_MUTED),
+            );
+        } else if let Some(export_path) = done_path {
+            section_header(ui, s.export_complete_header);
+            ui.label(
+                egui::RichText::new(export_path.to_string_lossy().as_ref())
+                    .size(11.0)
+                    .color(TEXT_PRIMARY),
+            );
+            ui.add_space(4.0);
+            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+                open_folder(&export_path);
+            }
+        } else if let Some(msg) = failed_msg {
+            section_header(ui, s.export_failed_header);
+            ui.label(
+                egui::RichText::new(&msg)
+                    .size(11.0)
+                    .color(ACCENT_REC),
+            );
         }
     }
 
@@ -1173,7 +1163,10 @@ impl App {
         self.finalizing_disk_full = disk_full;
         self.recording_start = None;
         self.frame_count.store(0, Ordering::Relaxed);
-        self.export_track_selection = self.selected_audio.clone();
+        // export_track_selection/export_available_tracks are set once finalize
+        // actually succeeds and the file can be probed (poll_background_work) --
+        // not here, since what's selected pre-recording isn't a guarantee of
+        // what ends up in the file.
     }
 
     fn start_recording_with_source(&mut self, source: CaptureSource) {
