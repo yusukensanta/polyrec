@@ -122,6 +122,14 @@ pub struct Strings {
     pub hotkey_pause_header: &'static str,
     pub hotkey_overlay_header: &'static str,
     pub hotkey_collision_warning: &'static str,
+    pub hotkey_change_button: &'static str,
+    pub hotkey_press_any_key_prompt: &'static str,
+    pub hotkey_press_esc_to_cancel: &'static str,
+    /// Prefix for "'<key>' is already in use or reserved by Windows — try a
+    /// different key." — the key name itself is appended at the call site,
+    /// same pattern as the other `_prefix` fields in this struct.
+    pub hotkey_unavailable_prefix: &'static str,
+    pub hotkey_unavailable_suffix: &'static str,
 
     // Error popup
     pub error_title: &'static str,
@@ -204,6 +212,11 @@ pub static EN: Strings = Strings {
     hotkey_pause_header: "PAUSE / RESUME",
     hotkey_overlay_header: "TOGGLE OVERLAY",
     hotkey_collision_warning: "⚠ Two actions share the same key — only one will respond.",
+    hotkey_change_button: "Change",
+    hotkey_press_any_key_prompt: "Press any key (Ctrl/Alt/Shift optional)…",
+    hotkey_press_esc_to_cancel: "(Esc to cancel)",
+    hotkey_unavailable_prefix: "⚠ '",
+    hotkey_unavailable_suffix: "' is already in use or reserved by Windows — try a different key.",
 
     error_title: "Error",
     disk_full_mid_recording: "Recording stopped automatically — your disk ran low on free space (below 500 MB). The recording up to that point was saved.",
@@ -284,6 +297,11 @@ pub static JA: Strings = Strings {
     hotkey_pause_header: "一時停止/再開",
     hotkey_overlay_header: "オーバーレイ切替",
     hotkey_collision_warning: "⚠ 2つの操作が同じキーに割り当てられています。片方のみ動作します。",
+    hotkey_change_button: "変更",
+    hotkey_press_any_key_prompt: "何かキーを押してください（Ctrl/Alt/Shiftとの組み合わせも可）…",
+    hotkey_press_esc_to_cancel: "(Escでキャンセル)",
+    hotkey_unavailable_prefix: "⚠「",
+    hotkey_unavailable_suffix: "」はすでに使用されているか、Windowsに予約されています。別のキーをお試しください。",
 
     error_title: "エラー",
     disk_full_mid_recording: "空き容量が不足したため録画を自動停止しました（500MB未満）。その時点までの録画は保存されています。",
