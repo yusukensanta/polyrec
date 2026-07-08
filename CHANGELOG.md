@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-09
+
 ### Changed
 
 - The export track-selection UI is now shown inline in the status panel instead of a popup window -- the popup used to sit visually on top of the REC button, blocking a new recording from being started while it was up. Starting a new recording now simply replaces the export UI with the live recording status, same as always.
@@ -128,7 +130,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/yusukensanta/polyrec/compare/v0.2.7...v0.2.8
