@@ -1,7 +1,6 @@
 use crate::error::AppError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{FALSE, TRUE};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateSinkWriterFromURL,
     MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video, MFShutdown, MFStartup,
@@ -83,10 +82,10 @@ unsafe fn do_remux(
 
     // Disable all streams, then re-enable desired ones
     reader
-        .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE)
+        .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
         .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
     reader
-        .SetStreamSelection(layout.video, TRUE)
+        .SetStreamSelection(layout.video, true)
         .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
     // audio_track_indices are 0-based logical indices into the discovered audio
     // stream list (in the order they appear in the source), NOT raw stream indices —
@@ -97,7 +96,7 @@ unsafe fn do_remux(
             .get(idx)
             .ok_or_else(|| AppError::Encode(format!("no audio track at logical index {idx}")))?;
         reader
-            .SetStreamSelection(src_idx, TRUE)
+            .SetStreamSelection(src_idx, true)
             .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {idx}): {e}")))?;
     }
 

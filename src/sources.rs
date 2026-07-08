@@ -1,5 +1,6 @@
 use crate::types::CaptureSource;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS,
@@ -83,7 +84,7 @@ fn get_exe_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
         let mut buf = vec![0u16; 260];
-        let len = GetModuleFileNameExW(handle, None, &mut buf);
+        let len = GetModuleFileNameExW(Some(handle), None, &mut buf);
         let _ = windows::Win32::Foundation::CloseHandle(handle);
         if len == 0 {
             return None;
@@ -116,12 +117,12 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
             let _ = DestroyIcon(hicon);
             return None;
         }
-        let _ = DeleteObject(icon_info.hbmMask);
+        let _ = DeleteObject(icon_info.hbmMask.into());
 
         let mut bmp = BITMAP::default();
         let bmp_size = std::mem::size_of::<BITMAP>() as i32;
-        if GetObjectW(icon_info.hbmColor, bmp_size, Some(&mut bmp as *mut _ as *mut _)) == 0 {
-            let _ = DeleteObject(icon_info.hbmColor);
+        if GetObjectW(icon_info.hbmColor.into(), bmp_size, Some(&mut bmp as *mut _ as *mut _)) == 0 {
+            let _ = DeleteObject(icon_info.hbmColor.into());
             let _ = DestroyIcon(hicon);
             return None;
         }
@@ -136,7 +137,7 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
         let height = bmp.bmHeight.unsigned_abs();
         const MAX_ICON_DIMENSION: u32 = 512;
         if width == 0 || height == 0 || width > MAX_ICON_DIMENSION || height > MAX_ICON_DIMENSION {
-            let _ = DeleteObject(icon_info.hbmColor);
+            let _ = DeleteObject(icon_info.hbmColor.into());
             let _ = DestroyIcon(hicon);
             return None;
         }
@@ -144,7 +145,7 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
             .checked_mul(height as usize)
             .and_then(|px| px.checked_mul(4))
         else {
-            let _ = DeleteObject(icon_info.hbmColor);
+            let _ = DeleteObject(icon_info.hbmColor.into());
             let _ = DestroyIcon(hicon);
             return None;
         };
@@ -173,7 +174,7 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
             DIB_RGB_COLORS,
         );
         ReleaseDC(None, hdc);
-        let _ = DeleteObject(icon_info.hbmColor);
+        let _ = DeleteObject(icon_info.hbmColor.into());
         let _ = DestroyIcon(hicon);
 
         if lines == 0 {
