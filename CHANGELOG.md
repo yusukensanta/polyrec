@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-08
+
 ### Added
 
 - Windows installer (`polyrec-vX.Y.Z-windows-x64-setup.exe`), built via Inno Setup in CI and published alongside the existing portable zip — Start Menu shortcut, Add/Remove Programs entry, English/Japanese installer UI. Covered by the same `SHA256SUMS.txt` and build provenance attestation as the zip.
@@ -78,7 +80,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/yusukensanta/polyrec/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yusukensanta/polyrec/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/yusukensanta/polyrec/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/yusukensanta/polyrec/compare/v0.1.1...v0.2.1
