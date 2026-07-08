@@ -1,0 +1,61 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        PolyRec is a focused Windows screen/audio recorder. Features far outside that scope (e.g. video editing, live streaming, cloud upload) are more likely to be closed as out of scope — check the [README](../../README.md#features) first.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature Area
+      options:
+        - Window/source capture
+        - Audio capture
+        - Recording / encoding (codec, bitrate, resolution)
+        - Global hotkeys
+        - Export
+        - UI / UX
+        - Display language
+        - Update mechanism
+        - Packaging / installation (winget, Scoop, etc.)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Motivation
+      description: What workflow is currently awkward or impossible?
+      placeholder: "I need to ... but currently have to ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: What would the feature actually look like/do?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Nice to have
+        - Saves significant time
+        - Blocking my use case
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+    validations:
+      required: false

@@ -1,0 +1,78 @@
+name: Task
+description: Internal improvement — refactoring, testing, CI/CD, security, or documentation
+labels: ["task"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Refactoring
+        - Bug (code quality)
+        - Testing
+        - Documentation
+        - CI/CD
+        - Dependencies
+        - Performance
+        - Security
+        - Infrastructure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "P1: Must fix before next release"
+        - "P2: Should fix soon"
+        - "P3: Nice to have"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing, and why it matters
+      placeholder: |
+        Describe the current behaviour and why it is problematic.
+        Include impact on users, maintainability, or correctness.
+    validations:
+      required: true
+
+  - type: textarea
+    id: fix
+    attributes:
+      label: Proposed Fix
+      description: Concrete change needed — code snippets welcome
+      placeholder: |
+        ```rust
+        // before
+        // after
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How do we know this is done?
+      placeholder: |
+        - [ ] Existing tests still pass
+        - [ ] New test covers the fixed case
+        - [ ] `cargo clippy --all-targets` is clean
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Affected Files
+      description: File paths and line numbers relevant to this task
+      placeholder: |
+        - `src/capture/video.rs:120`
+        - `src/encode/writer.rs`
+    validations:
+      required: false

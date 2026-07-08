@@ -69,6 +69,14 @@ Push a tag matching `v*.*.*` (e.g. `v0.2.0`) after bumping `Cargo.toml`'s `versi
 
 The workflow also generates `SHA256SUMS.txt` and a build provenance attestation ([`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)) for the zip, so a compromised upload credential replacing a release asset after the fact is both harder (releases are immutable — see repo settings) and detectable (the checksum/attestation are recorded independently of the release itself, in the workflow log and Sigstore's transparency log respectively).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test setup, project structure, and the PR process. Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the supported-versions policy and how to report a vulnerability.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).

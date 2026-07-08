@@ -1,0 +1,102 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in PolyRec
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check [existing issues](https://github.com/yusukensanta/polyrec/issues) and try running from a terminal with `$env:RUST_LOG="debug"; .\polyrec.exe` to capture more detail.
+
+  - type: input
+    id: version
+    attributes:
+      label: PolyRec Version
+      description: "Shown next to the app name in the menu bar (e.g. v0.2.3)"
+      placeholder: "e.g. 0.2.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: windows-version
+    attributes:
+      label: Windows Version
+      options:
+        - Windows 11
+        - Windows 10
+        - Other / Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: "e.g. from Task Manager > Performance > GPU, or `nvidia-smi` / equivalent"
+      placeholder: "e.g. NVIDIA GeForce RTX 4070"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the app is affected?
+      options:
+        - Window/source capture
+        - Audio capture (loopback/mic)
+        - Recording / encoding
+        - Pause / resume
+        - Global hotkeys
+        - Export
+        - Quality settings
+        - Disk-space handling
+        - Update check
+        - Display language
+        - UI / layout
+        - Other / General
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what happened vs what you expected
+      placeholder: |
+        **What happened:**
+        ...
+
+        **What I expected:**
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the behavior
+      placeholder: |
+        1. Select source "..."
+        2. Press REC
+        3. ...
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Output / Logs
+      description: Paste relevant terminal output (run with `$env:RUST_LOG="debug"` for extra detail)
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context (which app/window was being captured, recording settings, config.toml contents if relevant, etc.)
+    validations:
+      required: false
