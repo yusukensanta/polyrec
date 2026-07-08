@@ -10,6 +10,25 @@ Multi-track screen recorder for Windows.
 
 Grab the latest release from the [Releases page](https://github.com/yusukensanta/polyrec/releases/latest), unzip, and run `polyrec.exe` — no installer needed. The app checks for newer releases on launch and shows a banner in the menu bar if one's available (click it to open the release page; nothing downloads or installs automatically).
 
+### Verifying a download (optional)
+
+Each release includes a `SHA256SUMS.txt` and a build provenance attestation, so you don't have to just trust that the zip on the release page is what CI actually built.
+
+Checksum (PowerShell):
+
+```powershell
+Get-FileHash polyrec-vX.Y.Z-windows-x64.zip -Algorithm SHA256
+# compare the output against the matching line in SHA256SUMS.txt
+```
+
+Build provenance (requires the [GitHub CLI](https://cli.github.com/)) — confirms the file was built by this repo's release workflow from the tagged commit, not just that the bytes match a checksum someone could have regenerated alongside a swapped file:
+
+```powershell
+gh attestation verify polyrec-vX.Y.Z-windows-x64.zip -R yusukensanta/polyrec
+```
+
+Releases are also immutable once published — assets can't be silently replaced after the fact; any change requires deleting and recreating the release entirely.
+
 ## Features
 
 - **Window capture** via Windows.Graphics.Capture — pick any visible window. Recording defaults to that window's own native resolution; "Match display" and "Custom" are opt-in alternatives in **⚙ Quality**.
@@ -47,6 +66,8 @@ Recordings are saved to `<output folder>/polyrec/<app name>_<finish time>.mp4` �
 ## Releasing (maintainers)
 
 Push a tag matching `v*.*.*` (e.g. `v0.2.0`) after bumping `Cargo.toml`'s `version` to match — CI builds, verifies the tag matches Cargo.toml, and publishes a release zip automatically. See `.github/workflows/release.yml`.
+
+The workflow also generates `SHA256SUMS.txt` and a build provenance attestation ([`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)) for the zip, so a compromised upload credential replacing a release asset after the fact is both harder (releases are immutable — see repo settings) and detectable (the checksum/attestation are recorded independently of the release itself, in the workflow log and Sigstore's transparency log respectively).
 
 ## License
 
