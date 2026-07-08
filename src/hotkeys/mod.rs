@@ -1,21 +1,27 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::mpsc;
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
-    VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_B, VK_BACK,
-    VK_C, VK_D, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_F, VK_F1, VK_F10, VK_F11, VK_F12, VK_F13,
-    VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F2, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24,
-    VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_G, VK_H, VK_HOME, VK_I, VK_INSERT, VK_J,
-    VK_K, VK_L, VK_LEFT, VK_M, VK_N, VK_NEXT, VK_O, VK_P, VK_PRIOR, VK_Q, VK_R, VK_RETURN,
-    VK_RIGHT, VK_S, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X, VK_Y, VK_Z,
+    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey,
+    UnregisterHotKey, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9,
+    VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_D, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_F, VK_F1,
+    VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F2, VK_F20,
+    VK_F21, VK_F22, VK_F23, VK_F24, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_G, VK_H,
+    VK_HOME, VK_I, VK_INSERT, VK_J, VK_K, VK_L, VK_LEFT, VK_M, VK_MENU, VK_N, VK_NEXT, VK_O, VK_P,
+    VK_PRIOR, VK_Q, VK_R, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP,
+    VK_V, VK_W, VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PeekMessageW, PM_NOREMOVE, PostThreadMessageW, TranslateMessage,
-    MSG, WM_HOTKEY,
+    CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PM_NOREMOVE, PostThreadMessageW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+    MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-/// `MOD_NOREPEAT` (0x4000) — suppress auto-repeat key presses.
+/// `MOD_NOREPEAT` (0x4000) — only relevant to [`try_register`]'s `RegisterHotKey`
+/// probe now (the real listener uses a keyboard hook, which has its own
+/// repeat-suppression via `HookContext::held`, see `run_hook_loop`).
 const MOD_NOREPEAT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(0x4000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +55,7 @@ impl HotkeyListener {
                 let _ = PeekMessageW(&mut dummy, None, 0, 0, PM_NOREMOVE);
             }
             id_tx.send(tid).ok();
-            run_hotkey_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk);
+            run_hook_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk);
         });
 
         let thread_id = id_rx.recv().expect("hotkey thread panicked before sending thread ID");
@@ -187,21 +193,22 @@ pub fn parse_hotkey(s: &str) -> Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)> {
     Some((vk, mods))
 }
 
-/// A throwaway ID for [`try_register`]'s test registration — distinct from
-/// `ID_START_STOP`/`ID_PAUSE`/`ID_TOGGLE_OVERLAY` below so a probe from the UI
-/// thread can never collide with a real binding's ID on the listener thread.
+/// A throwaway ID for [`try_register`]'s test registration.
 const ID_PROBE: i32 = 999;
 
 /// Synchronously tests whether `vk`+`mods` can actually be registered as a
-/// global hotkey right now, by registering and immediately unregistering it.
-/// `RegisterHotKey` fails if the combination is already bound by another
-/// running application, or if Windows itself reserves it -- both cases are
-/// indistinguishable from here and both are equally "can't use this
-/// combination", so this is the correct way to detect either, rather than
-/// hand-maintaining a guessed list of reserved keys that may not match this
-/// specific machine's actual state. Registration is per-thread, not global,
-/// so this doesn't disturb the separate listener thread's own real
-/// registrations in `run_hotkey_loop`.
+/// global hotkey right now, via `RegisterHotKey` (registering and immediately
+/// unregistering). The real listener (`run_hook_loop`) uses a low-level
+/// keyboard hook instead, which can observe any key combination -- hooks
+/// don't have RegisterHotKey's "already claimed by another process" failure
+/// mode, since multiple processes can each hook the same key independently.
+/// So this probe is no longer testing "is this available for the listener"
+/// (the listener can always bind); it's testing "does Windows treat this
+/// combination as reserved" -- a small but genuine set of combinations (e.g.
+/// Ctrl+Alt+Del) are intercepted by the OS before any hook or app ever sees
+/// them, and `RegisterHotKey` failing for a combination is the best available
+/// signal for that, short of hand-maintaining a guessed list that may not
+/// match this specific machine's actual state.
 pub fn try_register(vk: VIRTUAL_KEY, mods: HOT_KEY_MODIFIERS) -> bool {
     unsafe {
         let ok = RegisterHotKey(None, ID_PROBE, mods | MOD_NOREPEAT, vk.0 as u32).is_ok();
@@ -212,59 +219,151 @@ pub fn try_register(vk: VIRTUAL_KEY, mods: HOT_KEY_MODIFIERS) -> bool {
     }
 }
 
-const ID_START_STOP: i32 = 1;
-const ID_PAUSE: i32 = 2;
-const ID_TOGGLE_OVERLAY: i32 = 3;
+struct Binding {
+    vk: VIRTUAL_KEY,
+    mods: HOT_KEY_MODIFIERS,
+    event: HotkeyEvent,
+}
 
-fn run_hotkey_loop(
+/// Per-thread state for the low-level keyboard hook -- `WH_KEYBOARD_LL`'s
+/// callback is a bare function pointer with no user-data parameter, and is
+/// always invoked on the thread that installed the hook, so `thread_local!`
+/// is the natural (and safe) way to get the configured bindings and event
+/// sender into it.
+struct HookContext {
+    bindings: Vec<Binding>,
+    /// vk codes currently down and already matched/fired -- suppresses
+    /// re-firing on Windows' OS-level key-repeat while the key stays held,
+    /// the hook equivalent of `RegisterHotKey`'s `MOD_NOREPEAT` flag. Cleared
+    /// on that key's key-up, regardless of what modifiers are held at that
+    /// point (matching a key release always ends "repeat" for it).
+    held: HashSet<u32>,
+    tx: mpsc::Sender<HotkeyEvent>,
+}
+
+thread_local! {
+    static HOOK_CTX: RefCell<Option<HookContext>> = const { RefCell::new(None) };
+}
+
+/// Reads which of Ctrl/Alt/Shift are *currently* held via `GetAsyncKeyState`,
+/// rather than tracking modifier key-down/up events through the hook
+/// ourselves -- `GetAsyncKeyState(VK_CONTROL/VK_MENU/VK_SHIFT)` already
+/// reports either the left or right key of the pair being down, matching
+/// `RegisterHotKey`'s own non-directional modifier semantics.
+fn live_modifiers() -> HOT_KEY_MODIFIERS {
+    const DOWN_BIT: i16 = u16::MAX.wrapping_shl(15) as i16; // 0x8000 as i16
+    let mut m = HOT_KEY_MODIFIERS(0);
+    unsafe {
+        if GetAsyncKeyState(VK_CONTROL.0 as i32) & DOWN_BIT != 0 {
+            m |= MOD_CONTROL;
+        }
+        if GetAsyncKeyState(VK_MENU.0 as i32) & DOWN_BIT != 0 {
+            m |= MOD_ALT;
+        }
+        if GetAsyncKeyState(VK_SHIFT.0 as i32) & DOWN_BIT != 0 {
+            m |= MOD_SHIFT;
+        }
+    }
+    m
+}
+
+/// `WH_KEYBOARD_LL` callback -- sees every keystroke system-wide before it
+/// reaches whatever window/app has focus (including exclusive-fullscreen
+/// games), unlike `RegisterHotKey`'s `WM_HOTKEY`, which some games'
+/// exclusive-fullscreen input handling can prevent from being delivered.
+/// Matching bindings are consumed (return non-zero, skip `CallNextHookEx`) so
+/// the keystroke doesn't also reach the foreground app -- same effect as
+/// `RegisterHotKey` suppressing it. Everything else is passed through
+/// unchanged; this must never swallow a keystroke that isn't one of our own
+/// bindings.
+unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code as u32 == HC_ACTION {
+        let msg = wparam.0 as u32;
+        let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+        let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+        if is_down || is_up {
+            let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            let vk_code = kb.vkCode;
+            let mut consumed = false;
+            HOOK_CTX.with(|ctx| {
+                let Ok(mut ctx) = ctx.try_borrow_mut() else {
+                    return;
+                };
+                let Some(hc) = ctx.as_mut() else {
+                    return;
+                };
+                if is_up {
+                    hc.held.remove(&vk_code);
+                } else if !hc.held.contains(&vk_code) {
+                    let current_mods = live_modifiers();
+                    if let Some(binding) =
+                        hc.bindings.iter().find(|b| b.vk.0 as u32 == vk_code && b.mods.0 == current_mods.0)
+                    {
+                        hc.held.insert(vk_code);
+                        hc.tx.send(binding.event).ok();
+                        consumed = true;
+                    }
+                }
+            });
+            if consumed {
+                return LRESULT(1);
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn run_hook_loop(
     tx: mpsc::Sender<HotkeyEvent>,
     start_stop_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     pause_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     toggle_overlay_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
 ) {
-    unsafe {
-        if let Some((vk, mods)) = start_stop_hk {
-            RegisterHotKey(None, ID_START_STOP, mods | MOD_NOREPEAT, vk.0 as u32).ok();
-        }
-        if let Some((vk, mods)) = pause_hk {
-            RegisterHotKey(None, ID_PAUSE, mods | MOD_NOREPEAT, vk.0 as u32).ok();
-        }
-        if let Some((vk, mods)) = toggle_overlay_hk {
-            RegisterHotKey(None, ID_TOGGLE_OVERLAY, mods | MOD_NOREPEAT, vk.0 as u32).ok();
-        }
+    let mut bindings = Vec::new();
+    if let Some((vk, mods)) = start_stop_hk {
+        bindings.push(Binding { vk, mods, event: HotkeyEvent::StartStop });
+    }
+    if let Some((vk, mods)) = pause_hk {
+        bindings.push(Binding { vk, mods, event: HotkeyEvent::Pause });
+    }
+    if let Some((vk, mods)) = toggle_overlay_hk {
+        bindings.push(Binding { vk, mods, event: HotkeyEvent::ToggleOverlay });
+    }
 
-        let mut msg = MSG::default();
-        loop {
-            let ret = GetMessageW(&mut msg, None, 0, 0);
-            if ret.0 <= 0 {
-                break; // 0 = WM_QUIT, negative = error
-            }
-            if msg.message == WM_HOTKEY {
-                let id = msg.wParam.0 as i32;
-                let event = match id {
-                    ID_START_STOP => Some(HotkeyEvent::StartStop),
-                    ID_PAUSE => Some(HotkeyEvent::Pause),
-                    ID_TOGGLE_OVERLAY => Some(HotkeyEvent::ToggleOverlay),
-                    _ => None,
-                };
-                if let Some(e) = event {
-                    tx.send(e).ok();
-                }
-            }
+    HOOK_CTX.with(|ctx| {
+        *ctx.borrow_mut() = Some(HookContext { bindings, held: HashSet::new(), tx });
+    });
+
+    let hook: HHOOK = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) } {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
+            HOOK_CTX.with(|ctx| *ctx.borrow_mut() = None);
+            return;
+        }
+    };
+
+    // GetMessageW blocks this thread (which owns no window) until either the
+    // stop() signal (WM_QUIT via PostThreadMessageW) arrives, or Windows
+    // delivers the installed hook's callback as part of its normal wait --
+    // the hook doesn't need any message of its own to be dispatched, just a
+    // thread that's actively pumping.
+    let mut msg = MSG::default();
+    loop {
+        let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if ret.0 <= 0 {
+            break; // 0 = WM_QUIT, negative = error
+        }
+        unsafe {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-
-        if start_stop_hk.is_some() {
-            UnregisterHotKey(None, ID_START_STOP).ok();
-        }
-        if pause_hk.is_some() {
-            UnregisterHotKey(None, ID_PAUSE).ok();
-        }
-        if toggle_overlay_hk.is_some() {
-            UnregisterHotKey(None, ID_TOGGLE_OVERLAY).ok();
-        }
     }
+
+    unsafe {
+        let _ = UnhookWindowsHookEx(hook);
+    }
+    HOOK_CTX.with(|ctx| *ctx.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -361,5 +460,13 @@ mod tests {
     fn try_register_with_modifier_succeeds_for_an_unused_combo() {
         let (vk, mods) = parse_hotkey("CTRL+ALT+F22").expect("should parse");
         assert!(try_register(vk, mods), "expected an unused modifier combo to register successfully");
+    }
+
+    #[test]
+    fn live_modifiers_reflects_no_keys_held_in_test_context() {
+        // A real test process isn't holding Ctrl/Alt/Shift, so this should
+        // read as no modifiers -- a basic sanity check that the GetAsyncKeyState
+        // bit-test logic isn't inverted or off-by-one.
+        assert_eq!(live_modifiers().0, 0);
     }
 }
