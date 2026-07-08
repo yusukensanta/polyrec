@@ -34,7 +34,7 @@ cargo clippy --all-targets
 
 1. **Create a branch**
    ```powershell
-   git checkout -b feat/my-feature
+   git switch -c feat/my-feature
    ```
 
 2. **Make your changes**
