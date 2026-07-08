@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-09
+
 ### Fixed
 
 - The recording overlay HUD sometimes didn't appear over fullscreen games, or took several tries. Two compounding bugs: (1) hotkey events queued from the low-level keyboard hook's background thread never woke egui's own idle event loop, so the recording state (and the overlay it gates) sometimes didn't update until something else happened to trigger a repaint; (2) the overlay window only asserted itself as topmost once, at creation, and fullscreen games commonly re-assert their own topmost z-order afterward, silently demoting the overlay behind them.
@@ -120,7 +122,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/yusukensanta/polyrec/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/yusukensanta/polyrec/compare/v0.2.6...v0.2.7
