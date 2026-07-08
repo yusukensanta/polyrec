@@ -190,7 +190,7 @@ unsafe fn make_video_output_type(
     fps: u32,
     subtype: GUID,
     bitrate_bps: u32,
-) -> Result<IMFMediaType, AppError> {
+) -> Result<IMFMediaType, AppError> { unsafe {
     let t =
         MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
     t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
@@ -210,13 +210,13 @@ unsafe fn make_video_output_type(
     )
     .map_err(|e| AppError::Encode(format!("SetUINT32 interlace: {e}")))?;
     Ok(t)
-}
+}}
 
 unsafe fn make_video_input_type(
     width: u32,
     height: u32,
     fps: u32,
-) -> Result<IMFMediaType, AppError> {
+) -> Result<IMFMediaType, AppError> { unsafe {
     let t =
         MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
     t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
@@ -240,12 +240,12 @@ unsafe fn make_video_input_type(
     t.SetUINT32(&MF_MT_DEFAULT_STRIDE, width * 4)
         .map_err(|e| AppError::Encode(format!("SetUINT32 default_stride: {e}")))?;
     Ok(t)
-}
+}}
 
 unsafe fn make_audio_output_type(
     sample_rate: u32,
     channels: u16,
-) -> Result<IMFMediaType, AppError> {
+) -> Result<IMFMediaType, AppError> { unsafe {
     let t =
         MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
     t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
@@ -259,12 +259,12 @@ unsafe fn make_audio_output_type(
     t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AUDIO_BITRATE_BPS / 8)
         .map_err(|e| AppError::Encode(format!("audio bitrate out: {e}")))?;
     Ok(t)
-}
+}}
 
 unsafe fn make_audio_input_type(
     sample_rate: u32,
     channels: u16,
-) -> Result<IMFMediaType, AppError> {
+) -> Result<IMFMediaType, AppError> { unsafe {
     let block_align = channels as u32 * 2;
     let bytes_per_sec = sample_rate * block_align;
     let t =
@@ -284,13 +284,13 @@ unsafe fn make_audio_input_type(
     t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytes_per_sec)
         .map_err(|e| AppError::Encode(format!("bytes_per_sec: {e}")))?;
     Ok(t)
-}
+}}
 
 unsafe fn make_sample(
     data: &[u8],
     pts_hns: i64,
     duration_hns: i64,
-) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, AppError> {
+) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, AppError> { unsafe {
     let buffer = MFCreateMemoryBuffer(data.len() as u32)
         .map_err(|e| AppError::Encode(format!("MFCreateMemoryBuffer: {e}")))?;
 
@@ -318,7 +318,7 @@ unsafe fn make_sample(
         .SetSampleDuration(duration_hns)
         .map_err(|e| AppError::Encode(format!("SetSampleDuration: {e}")))?;
     Ok(sample)
-}
+}}
 
 fn pack_u64(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | low as u64

@@ -17,7 +17,7 @@ struct StreamLayout {
     audio: Vec<u32>,
 }
 
-unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<StreamLayout, AppError> {
+unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<StreamLayout, AppError> { unsafe {
     let mut video = None;
     let mut audio = Vec::new();
     for i in 0.. {
@@ -36,7 +36,7 @@ unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<StreamLayou
     }
     let video = video.ok_or_else(|| AppError::Encode("no video stream found in input".into()))?;
     Ok(StreamLayout { video, audio })
-}
+}}
 
 // 0xFFFFFFFE = MF_SOURCE_READER_ANY_STREAM
 const MF_SOURCE_READER_ANY_STREAM: u32 = 0xFFFF_FFFE;
@@ -62,7 +62,7 @@ unsafe fn do_remux(
     input: &Path,
     output: &Path,
     audio_track_indices: &[usize],
-) -> Result<PathBuf, AppError> {
+) -> Result<PathBuf, AppError> { unsafe {
     let input_url = HSTRING::from(
         input
             .to_str()
@@ -201,7 +201,7 @@ unsafe fn do_remux(
         .map_err(|e| AppError::Encode(format!("Finalize: {e}")))?;
 
     Ok(output.to_path_buf())
-}
+}}
 
 #[cfg(test)]
 mod tests {

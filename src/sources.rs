@@ -26,7 +26,7 @@ pub fn enumerate_sources() -> Vec<CaptureSource> {
     sources
 }
 
-unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL { unsafe {
     let sources = &mut *(lparam.0 as *mut Vec<CaptureSource>);
 
     if !IsWindowVisible(hwnd).as_bool() {
@@ -40,7 +40,7 @@ unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
     sources.push(capture_source_for_hwnd(hwnd));
 
     BOOL(1)
-}
+}}
 
 /// Builds a `CaptureSource` for an arbitrary window handle — used both by the
 /// enumeration above (for windows that already passed its visible/titled filter)
