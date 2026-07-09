@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.7] - 2026-07-09
+
 ### Added
 
 - Free disk space on the selected output drive is now shown below the output-directory field, refreshed every few seconds (or immediately when the drive changes). Turns a warning color when below the 500 MB threshold the recording pipeline itself refuses to start/continue under.
@@ -166,7 +168,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.7...HEAD
+[v0.3.7]: https://github.com/yusukensanta/polyrec/compare/v0.3.6...v0.3.7
 [v0.3.6]: https://github.com/yusukensanta/polyrec/compare/v0.3.5...v0.3.6
 [v0.3.5]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...v0.3.5
 [v0.3.4]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...v0.3.4
