@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.4] - 2026-07-09
+## [v0.3.4] - 2026-07-09
 
 ### Fixed
 
 - A `config.toml` that exists but fails to parse now logs a warning before falling back to defaults, instead of silently resetting settings with no trace of why.
 
-## [0.3.3] - 2026-07-09
+## [v0.3.3] - 2026-07-09
 
 ### Fixed
 
@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Hover feedback on capture source cards in the source list (previously only the selected card had any visual distinction).
 
-## [0.3.2] - 2026-07-09
+## [v0.3.2] - 2026-07-09
 
 ### Changed
 
@@ -31,19 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Export track checkboxes now reflect the audio tracks actually present in the finished recording file (probed directly from it), not just whatever was selected before recording started -- catches the case where a selected device didn't end up producing a track.
 - The export button (and track checkboxes) are hidden entirely when a recording has fewer than 2 audio tracks, since there's nothing a track-selection export could meaningfully remove in that case. "Open Folder" remains available either way.
 
-## [0.3.1] - 2026-07-09
+## [v0.3.1] - 2026-07-09
 
 ### Fixed
 
 - The recording overlay HUD sometimes didn't appear over fullscreen games, or took several tries. Two compounding bugs: (1) hotkey events queued from the low-level keyboard hook's background thread never woke egui's own idle event loop, so the recording state (and the overlay it gates) sometimes didn't update until something else happened to trigger a repaint; (2) the overlay window only asserted itself as topmost once, at creation, and fullscreen games commonly re-assert their own topmost z-order afterward, silently demoting the overlay behind them.
 
-## [0.3.0] - 2026-07-09
+## [v0.3.0] - 2026-07-09
 
 ### Fixed
 
 - Global hotkeys (start/stop, pause, toggle overlay) now use a low-level keyboard hook (`WH_KEYBOARD_LL`) instead of `RegisterHotKey` — fixes hotkeys not firing while a game is running in exclusive fullscreen mode, a known limitation of `RegisterHotKey`-based global hotkeys that other recording tools work around the same way.
 
-## [0.2.8] - 2026-07-08
+## [v0.2.8] - 2026-07-08
 
 ### Added
 
@@ -54,33 +54,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated to Rust edition 2024.
 - Split `dashboard.rs` (1471 lines) into `dashboard/mod.rs` + `dashboard/hotkeys_popup.rs` for maintainability; no behavior change.
 
-## [0.2.7] - 2026-07-08
+## [v0.2.7] - 2026-07-08
 
 ### Fixed
 
 - The recording overlay's stop-hotkey hint showed a hardcoded "F9" regardless of the actually configured start/stop binding; now reflects the real key (or key combination).
 
-## [0.2.6] - 2026-07-08
+## [v0.2.6] - 2026-07-08
 
 ### Added
 
 - Hotkeys are now bound by pressing the actual key combination you want (optionally holding Ctrl/Alt/Shift), instead of picking from a fixed grid of F1-F12 buttons — supports any letter, digit, F-key (F1-F24), or common navigation key, alone or combined with modifiers.
 - If a captured key combination is already in use by another running application or reserved by Windows, `RegisterHotKey` is tested immediately and a warning is shown inline instead of silently failing later.
 
-## [0.2.5] - 2026-07-08
+## [v0.2.5] - 2026-07-08
 
 ### Fixed
 
 - Migrated windows-rs 0.58 → 0.62.2 and egui/eframe 0.29 → 0.35.0 (PR #12) — both had accumulated real breaking API changes; see the PR for the full list (PROPVARIANT restructuring, HGDIOBJ conversions, eframe's `App::ui` replacing `update`, egui's `CornerRadius`/`Panel` changes).
 
-## [0.2.4] - 2026-07-08
+## [v0.2.4] - 2026-07-08
 
 ### Added
 
 - Windows installer (`polyrec-vX.Y.Z-windows-x64-setup.exe`), built via Inno Setup in CI and published alongside the existing portable zip — Start Menu shortcut, Add/Remove Programs entry, English/Japanese installer UI. Covered by the same `SHA256SUMS.txt` and build provenance attestation as the zip.
 - `CONTRIBUTING.md`, `SECURITY.md`, issue templates, and `dependabot.yml`.
 
-## [0.2.3] - 2026-07-08
+## [v0.2.3] - 2026-07-08
 
 ### Added
 
@@ -91,14 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Enabled GitHub's immutable-releases setting for this repo — published release assets can no longer be replaced in place; any change requires deleting and recreating the release entirely.
 
-## [0.2.2] - 2026-07-08
+## [v0.2.2] - 2026-07-08
 
 ### Changed
 
 - Refactored `App::update()` (previously ~800 lines) into one `render_*` method per panel/popup (menu bar, source panel, center panel, overlay HUD, Quality/Hotkeys popups, error banner, export dialog), plus a `poll_background_work()` method for non-rendering state polling. Pure reorganization, no behavior change.
 - Deduplicated the audio-device checkbox icon (🔊/🎙) selection into a shared `audio_device_icon()` helper.
 
-## [0.2.1] - 2026-07-08
+## [v0.2.1] - 2026-07-08
 
 ### Added
 
@@ -113,7 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Pinned all GitHub Actions in CI workflows to commit SHAs instead of mutable version tags, and bumped each to its latest stable release.
 
-## [0.1.1] - 2026-07-08
+## [v0.1.1] - 2026-07-08
 
 First tagged release. Covers the initial feature set plus disk-space handling:
 
@@ -147,17 +147,17 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Removed an unused dependency carrying a known RustSec advisory.
 
 [Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...HEAD
-[0.3.4]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...v0.3.4
-[0.3.3]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...v0.3.0
-[0.2.8]: https://github.com/yusukensanta/polyrec/compare/v0.2.7...v0.2.8
-[0.2.7]: https://github.com/yusukensanta/polyrec/compare/v0.2.6...v0.2.7
-[0.2.6]: https://github.com/yusukensanta/polyrec/compare/v0.2.5...v0.2.6
-[0.2.5]: https://github.com/yusukensanta/polyrec/compare/v0.2.4...v0.2.5
-[0.2.4]: https://github.com/yusukensanta/polyrec/compare/v0.2.3...v0.2.4
-[0.2.3]: https://github.com/yusukensanta/polyrec/compare/v0.2.2...v0.2.3
-[0.2.2]: https://github.com/yusukensanta/polyrec/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/yusukensanta/polyrec/compare/v0.1.1...v0.2.1
-[0.1.1]: https://github.com/yusukensanta/polyrec/releases/tag/v0.1.1
+[v0.3.4]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...v0.3.4
+[v0.3.3]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...v0.3.3
+[v0.3.2]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...v0.3.2
+[v0.3.1]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...v0.3.1
+[v0.3.0]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...v0.3.0
+[v0.2.8]: https://github.com/yusukensanta/polyrec/compare/v0.2.7...v0.2.8
+[v0.2.7]: https://github.com/yusukensanta/polyrec/compare/v0.2.6...v0.2.7
+[v0.2.6]: https://github.com/yusukensanta/polyrec/compare/v0.2.5...v0.2.6
+[v0.2.5]: https://github.com/yusukensanta/polyrec/compare/v0.2.4...v0.2.5
+[v0.2.4]: https://github.com/yusukensanta/polyrec/compare/v0.2.3...v0.2.4
+[v0.2.3]: https://github.com/yusukensanta/polyrec/compare/v0.2.2...v0.2.3
+[v0.2.2]: https://github.com/yusukensanta/polyrec/compare/v0.2.1...v0.2.2
+[v0.2.1]: https://github.com/yusukensanta/polyrec/compare/v0.1.1...v0.2.1
+[v0.1.1]: https://github.com/yusukensanta/polyrec/releases/tag/v0.1.1
