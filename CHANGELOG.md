@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.5] - 2026-07-09
+
+### Changed
+
+- CHANGELOG.md version headings and their link-reference definitions now use `vX.Y.Z` (matching the actual git tags) instead of bare `X.Y.Z`.
+
+### Note
+
+- v0.3.4 has no published release binary -- its release was accidentally created with the wrong target commit, and GitHub's immutable-releases setting permanently blocks reusing a tag name for a release once one has existed for it, even after deletion. The `v0.3.4` git tag itself is correct; skip straight to v0.3.5 for a working release.
+
 ## [v0.3.4] - 2026-07-09
 
 ### Fixed
@@ -146,7 +156,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.5...HEAD
+[v0.3.5]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...v0.3.5
 [v0.3.4]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...v0.3.2
