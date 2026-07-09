@@ -23,8 +23,13 @@ const BG_WINDOW: egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
 const BG_FAINT: egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
 const BG_BASE: egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
 const BG_CARD: egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
+// Midpoint between BG_CARD and BG_SELECTED -- a hovered, not-yet-selected
+// source card should read as "about to be clickable", distinct from both
+// resting and selected states.
+const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(32, 32, 53);
 const BG_SELECTED: egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
+const BORDER_HOVER: egui::Color32 = egui::Color32::from_rgb(65, 65, 125);
 const BORDER_SEL: egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
 const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x86, 0x86, 0xCF);
 const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
@@ -314,9 +319,13 @@ impl App {
                     self.source_icon_textures.clear();
                     self.selected_source = None;
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
-                    let n = self.audio_devices.len();
                     self.selected_audio = self.audio_devices.iter().map(|d| d.is_loopback).collect();
-                    self.export_track_selection = vec![true; n];
+                    // export_track_selection is NOT reset here -- it's tied to the last
+                    // finished recording's actually-probed track count
+                    // (export_available_tracks), set once in poll_background_work after
+                    // finalize succeeds, not to the live device list. Resetting it here
+                    // to match the current device count would desync it from what the
+                    // export checkboxes are actually supposed to represent.
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled { s.overlay_on } else { s.overlay_off };
@@ -364,8 +373,30 @@ impl App {
                     .show(ui, |ui| {
                         for (i, source) in self.sources.iter().enumerate() {
                             let selected = self.selected_source == Some(i);
-                            let fill   = if selected { BG_SELECTED } else { BG_CARD };
-                            let border = if selected { BORDER_SEL } else { BORDER };
+                            // The card's size depends on its content (title/exe_name
+                            // wrapping), so its Response -- and hover state -- isn't
+                            // known until after it's drawn. Reading last frame's hover
+                            // result from egui's per-widget temp storage (written back
+                            // at the bottom of this loop body) is the standard egui
+                            // pattern for hover-reactive fills on this kind of
+                            // dynamically-sized composite widget; the one-frame lag is
+                            // imperceptible at normal repaint rates.
+                            let hover_id = ui.id().with(("source_card_hovered", i));
+                            let was_hovered = ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
+                            let fill = if selected {
+                                BG_SELECTED
+                            } else if was_hovered {
+                                BG_HOVER
+                            } else {
+                                BG_CARD
+                            };
+                            let border = if selected {
+                                BORDER_SEL
+                            } else if was_hovered {
+                                BORDER_HOVER
+                            } else {
+                                BORDER
+                            };
 
                             if let std::collections::hash_map::Entry::Vacant(entry) =
                                 self.source_icon_textures.entry(i)
@@ -413,6 +444,7 @@ impl App {
                                 .response
                                 .interact(egui::Sense::click())
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            ui.data_mut(|d| d.insert_temp(hover_id, response.hovered()));
                             if response.clicked() {
                                 self.selected_source = Some(i);
                             }
