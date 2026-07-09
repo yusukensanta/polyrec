@@ -120,6 +120,7 @@ impl App {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         let overlay_enabled = config.overlay.enabled;
+        let app_audio_only = config.default_app_audio_only;
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
@@ -156,7 +157,7 @@ impl App {
             selected_source: None,
             audio_devices,
             selected_audio,
-            app_audio_only: false,
+            app_audio_only,
             overlay_enabled,
             show_quality_popup: false,
             show_hotkeys_popup: false,
@@ -505,18 +506,27 @@ impl App {
                 let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
                 let has_source = self.selected_source.is_some();
                 ui.add_enabled_ui(loopback_selected && has_source, |ui| {
-                    ui.checkbox(
-                        &mut self.app_audio_only,
-                        egui::RichText::new(s.app_audio_only_label)
-                            .color(ACCENT_SECONDARY),
-                    )
-                    .on_hover_text(if !has_loopback_device {
-                        s.tooltip_no_loopback_device
-                    } else if !loopback_selected {
-                        s.tooltip_check_loopback_first
-                    } else {
-                        s.tooltip_app_audio_only
-                    });
+                    let response = ui
+                        .checkbox(
+                            &mut self.app_audio_only,
+                            egui::RichText::new(s.app_audio_only_label)
+                                .color(ACCENT_SECONDARY),
+                        )
+                        .on_hover_text(if !has_loopback_device {
+                            s.tooltip_no_loopback_device
+                        } else if !loopback_selected {
+                            s.tooltip_check_loopback_first
+                        } else {
+                            s.tooltip_app_audio_only
+                        });
+                    // Persisted as the default for next launch (and thus what a
+                    // hotkey-started recording uses) -- same pattern as overlay_enabled.
+                    if response.changed() {
+                        self.config.default_app_audio_only = self.app_audio_only;
+                        if let Err(e) = self.config.save() {
+                            tracing::error!("failed to save config: {e}");
+                        }
+                    }
                 });
             });
     }
