@@ -70,6 +70,14 @@ pub struct App {
     recording_start: Option<Instant>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
+    /// Free space on `config.output_dir`'s volume, refreshed periodically
+    /// (see `refresh_free_space`) rather than on every frame -- `GetDiskFreeSpaceExW`
+    /// is fast, but there's no reason to make a syscall 30-60+ times a second
+    /// for a number that only meaningfully changes over seconds, same
+    /// reasoning as the recording loop's own `DISK_CHECK_INTERVAL`.
+    free_space_bytes: Option<u64>,
+    free_space_checked_at: Option<Instant>,
+    free_space_checked_dir: Option<PathBuf>,
     /// How many audio streams the last finished recording actually contains,
     /// probed from the file itself (see `remux::count_audio_tracks`) rather
     /// than trusted from the pre-recording device selection. Export controls
@@ -147,6 +155,9 @@ impl App {
             recording_start: None,
             last_output_path: None,
             output_dir_input,
+            free_space_bytes: None,
+            free_space_checked_at: None,
+            free_space_checked_dir: None,
             export_available_tracks: 0,
             export_track_selection,
             export_state: ExportState::Idle,
@@ -208,6 +219,8 @@ impl App {
     /// read it.
     fn poll_background_work(&mut self, s: &'static Strings) {
         let is_recording = self.session.is_recording();
+
+        self.refresh_free_space();
 
         // Poll update-check result (one-shot; None result also clears the receiver
         // so we stop polling a channel whose sender has already sent its one message)
@@ -652,6 +665,21 @@ impl App {
                 }
             });
 
+            if let Some(free) = self.free_space_bytes {
+                // Same threshold the recording loop itself refuses to start/
+                // continue below (disk_space::MIN_FREE_BYTES) -- flagging it
+                // here too means the user sees it coming before pressing REC,
+                // not just as a refusal/mid-recording stop after the fact.
+                let low = free < crate::disk_space::MIN_FREE_BYTES;
+                let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(format!("{}{}", s.free_space_prefix, format_bytes_free(free)))
+                        .size(11.0)
+                        .color(color),
+                );
+            }
+
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
 
@@ -1034,6 +1062,21 @@ fn audio_device_icon(dev: &AudioDevice) -> &'static str {
     if dev.is_loopback { "🔊" } else { "🎙" }
 }
 
+/// Formats a byte count as a human-readable GB/MB string for the free-space
+/// display -- GB with one decimal once it's large enough for that decimal to
+/// be meaningful, otherwise a whole-number MB (matches how Windows' own disk
+/// space displays don't bother with GB fractions for small values).
+fn format_bytes_free(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else {
+        format!("{:.0} MB", bytes / MB)
+    }
+}
+
 /// egui's bundled default font only covers Latin + a small symbol set — window
 /// titles/exe names containing CJK or other multi-byte characters (and any
 /// future localized UI text) render as tofu boxes without a fallback font.
@@ -1178,6 +1221,24 @@ impl App {
         }
     }
 
+    /// Refreshes `free_space_bytes` for `config.output_dir`'s volume, at most
+    /// every `FREE_SPACE_CHECK_INTERVAL` -- or immediately if the output dir
+    /// itself changed since the last check (typing a new path, or Browse...),
+    /// so switching drives doesn't show a stale number from the old one.
+    fn refresh_free_space(&mut self) {
+        const FREE_SPACE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+        let dir_changed = self.free_space_checked_dir.as_deref() != Some(self.config.output_dir.as_path());
+        let due = self.free_space_checked_at.is_none_or(|t| t.elapsed() >= FREE_SPACE_CHECK_INTERVAL);
+        if !dir_changed && !due {
+            return;
+        }
+
+        self.free_space_bytes = crate::disk_space::free_bytes(&self.config.output_dir).ok();
+        self.free_space_checked_at = Some(Instant::now());
+        self.free_space_checked_dir = Some(self.config.output_dir.clone());
+    }
+
     fn stop_recording(&mut self) {
         let path = self
             .session
@@ -1291,5 +1352,22 @@ fn foreground_capture_source() -> Option<CaptureSource> {
             return None;
         }
         Some(crate::sources::capture_source_for_hwnd(hwnd))
+    }
+}
+
+#[cfg(test)]
+mod free_space_display_tests {
+    use super::*;
+
+    #[test]
+    fn format_bytes_free_uses_mb_below_one_gb() {
+        assert_eq!(format_bytes_free(500 * 1024 * 1024), "500 MB");
+    }
+
+    #[test]
+    fn format_bytes_free_uses_gb_with_one_decimal_at_or_above_one_gb() {
+        assert_eq!(format_bytes_free(1024 * 1024 * 1024), "1.0 GB");
+        // 2.5 GB exactly: 2.5 * 1024^3 = 2684354560, an exact integer.
+        assert_eq!(format_bytes_free(2_684_354_560), "2.5 GB");
     }
 }

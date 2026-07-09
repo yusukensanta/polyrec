@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Free disk space on the selected output drive is now shown below the output-directory field, refreshed every few seconds (or immediately when the drive changes). Turns a warning color when below the 500 MB threshold the recording pipeline itself refuses to start/continue under.
+
 ## [v0.3.6] - 2026-07-09
 
 ### Note
