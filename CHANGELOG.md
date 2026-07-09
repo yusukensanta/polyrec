@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.1] - 2026-07-10
+
+### Added
+
+- Hotkey-started recordings now default to "App audio only" checked, persisted as a setting (changeable via the checkbox itself) instead of always starting unchecked on every launch.
+
+### Fixed
+
+- Pausing the Highlight buffer for a manual recording, then resuming afterward, left the paused session's segment files orphaned on disk forever -- untracked by the resumed session, never cleaned up. Starting (or resuming) Highlight buffering now clears any leftover files from a prior session first.
+
 ## [v0.4.0] - 2026-07-10
 
 ### Added
@@ -180,7 +190,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.4.1...HEAD
+[v0.4.1]: https://github.com/yusukensanta/polyrec/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/yusukensanta/polyrec/compare/v0.3.8...v0.4.0
 [v0.3.8]: https://github.com/yusukensanta/polyrec/compare/v0.3.7...v0.3.8
 [v0.3.7]: https://github.com/yusukensanta/polyrec/compare/v0.3.6...v0.3.7
