@@ -31,7 +31,13 @@ fn main() -> eframe::Result<()> {
             .expect("MFStartup failed — requires Windows 7+");
     }
 
-    let config = config::Config::load().unwrap_or_default();
+    let config = config::Config::load().unwrap_or_else(|e| {
+        // load() only errors when config.toml exists but fails to parse (a
+        // missing file is Ok(default) already) -- falling back silently would
+        // leave a user wondering why their settings reset with no clue why.
+        tracing::warn!("failed to load config.toml, using defaults: {e}");
+        config::Config::default()
+    });
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-1024.png"))
         .expect("failed to decode app icon");
     let native_options = eframe::NativeOptions {
