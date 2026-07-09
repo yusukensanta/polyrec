@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.6] - 2026-07-09
+
+### Note
+
+- v0.3.4 and v0.3.5 both have no published release binary. v0.3.4's release was created with the wrong target commit; v0.3.5's release upload failed after being manually pre-created instead of left for the workflow to create. GitHub's immutable-releases setting permanently blocks reusing a tag name for a release once one has existed for it, even after deleting the broken release -- confirmed by testing on v0.3.5. Both git tags are otherwise correct; this release is created by a plain tag push only (no `gh release create` beforehand), letting `action-gh-release` create the release and upload assets atomically, same as every other working release in this project's history.
+
 ## [v0.3.5] - 2026-07-09
 
 ### Changed
@@ -156,7 +162,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.6...HEAD
+[v0.3.6]: https://github.com/yusukensanta/polyrec/compare/v0.3.5...v0.3.6
 [v0.3.5]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...v0.3.5
 [v0.3.4]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...v0.3.3
