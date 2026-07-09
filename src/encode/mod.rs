@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod highlight_export;
 pub mod remux;
 pub mod writer;
 pub use writer::RecordingWriter;

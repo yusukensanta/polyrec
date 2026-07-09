@@ -54,6 +54,13 @@ enum ExportState {
     Failed(String),
 }
 
+enum HighlightSaveState {
+    Idle,
+    Saving,
+    Done(PathBuf),
+    Failed(String),
+}
+
 pub struct App {
     config: Config,
     session: SessionManager,
@@ -104,6 +111,8 @@ pub struct App {
     /// out to be unregisterable (already used by another app, or reserved by
     /// Windows) — see `hotkeys::try_register`.
     hotkey_capture_warning: Option<String>,
+    highlight_save_state: HighlightSaveState,
+    highlight_save_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
 }
 
 impl App {
@@ -127,6 +136,7 @@ impl App {
             &config.hotkeys.start_stop,
             &config.hotkeys.pause,
             &config.hotkeys.toggle_overlay,
+            &config.hotkeys.save_highlight,
             move || wake_ctx.request_repaint(),
         );
 
@@ -171,6 +181,8 @@ impl App {
             error_message: None,
             recording_hotkey: None,
             hotkey_capture_warning: None,
+            highlight_save_state: HighlightSaveState::Idle,
+            highlight_save_handle: None,
         }
     }
 }
@@ -250,8 +262,12 @@ impl App {
                     self.overlay_enabled = !self.overlay_enabled;
                     self.config.overlay.enabled = self.overlay_enabled;
                 }
+                HotkeyEvent::SaveHighlight => self.handle_save_highlight_hotkey(s),
             }
         }
+
+        self.refresh_highlight_buffering();
+        self.poll_highlight_save_result();
 
         // The recorder can stop itself early (disk full — see disk_space.rs)
         // without the user pressing stop. Detect that and run the normal stop
@@ -680,6 +696,42 @@ impl App {
                 );
             }
 
+            if self.session.is_highlighting() {
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(s.highlight_status_active)
+                        .size(11.0)
+                        .color(ACCENT_SECONDARY),
+                );
+            }
+            match &self.highlight_save_state {
+                HighlightSaveState::Idle => {}
+                HighlightSaveState::Saving => {
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(s.highlight_saving_label).size(11.0).color(TEXT_MUTED));
+                }
+                HighlightSaveState::Done(path) => {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}{}",
+                            s.highlight_saved_prefix,
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or("highlight.mp4")
+                        ))
+                        .size(11.0)
+                        .color(ACCENT_IDLE),
+                    );
+                }
+                HighlightSaveState::Failed(msg) => {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!("{}{msg}", s.highlight_save_failed_prefix))
+                            .size(11.0)
+                            .color(ACCENT_PAUSE),
+                    );
+                }
+            }
+
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
 
@@ -868,6 +920,22 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(s.mbps_label);
                         ui.add(egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps).range(1..=100));
+                    });
+                }
+
+                ui.add_space(4.0);
+                section_header(ui, s.highlight_header);
+                ui.checkbox(&mut self.config.highlight.enabled, s.highlight_enabled_label)
+                    .on_hover_text(s.tooltip_highlight_enabled);
+                if self.config.highlight.enabled {
+                    ui.horizontal(|ui| {
+                        ui.label(s.highlight_buffer_seconds_label);
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.highlight.buffer_seconds).range(
+                                crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN
+                                    ..=crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
+                            ),
+                        );
                     });
                 }
 
@@ -1296,6 +1364,140 @@ impl App {
                 self.error_message = Some(format!("{prefix}{e}"));
             }
         }
+    }
+
+    /// Keeps the Highlight background buffer's running/not-running state and
+    /// target window in sync with `config.highlight.enabled`, whether a
+    /// manual recording is active, and the live foreground window. Runs every
+    /// frame; every check here is a cheap comparison against already-known
+    /// state, not an unconditional capture-thread spawn.
+    fn refresh_highlight_buffering(&mut self) {
+        // The highlight actor stopped itself early (e.g. disk ran low) --
+        // mirrors how poll_background_work detects manual recording's
+        // recorder stopping itself early via `recorder_handle.is_finished()`.
+        if self.session.highlight_actor_finished() {
+            let disk_full = self
+                .session
+                .highlight
+                .as_ref()
+                .is_some_and(|h| h.disk_full_flag.load(Ordering::Relaxed));
+            self.session.stop_highlight_buffering(true);
+            if disk_full {
+                let strings = self.config.lang().strings();
+                self.error_message = Some(strings.highlight_disk_full_message.to_string());
+            }
+        }
+
+        if !self.config.highlight.enabled {
+            if self.session.is_highlighting() {
+                self.session.stop_highlight_buffering(true);
+            }
+            return;
+        }
+
+        // Highlight buffering and manual recording never run at once --
+        // doubling GPU/encode load for no benefit while the thing the user
+        // actually pressed record for is what matters. Segments already on
+        // disk survive the pause; Save Highlight still works right after
+        // stopping the manual recording.
+        if self.session.is_recording() || self.session.is_paused() {
+            if self.session.is_highlighting() {
+                self.session.stop_highlight_buffering(false);
+            }
+            return;
+        }
+
+        let Some(source) = foreground_capture_source() else {
+            // Not a real switch away -- e.g. focus is briefly on PolyRec's
+            // own window while the user changes a setting. Leave whatever's
+            // already running (if anything) alone; WGC keeps capturing a
+            // window that isn't foreground just fine.
+            return;
+        };
+
+        let following_different_window =
+            self.session.highlight_hwnd().is_some_and(|hwnd| hwnd != source.hwnd);
+        if following_different_window {
+            // Different app/resolution -- can't concatenate across the
+            // switch (see encode::highlight_export), so start over.
+            self.session.stop_highlight_buffering(true);
+        }
+
+        // Re-using the already-throttled free-space reading (refreshed a few
+        // lines earlier in poll_background_work) instead of a fresh syscall
+        // every frame -- also naturally rate-limits retrying after a
+        // disk-full stop to that same ~3s cadence instead of every frame.
+        let has_room = self.free_space_bytes.is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
+        if !self.session.is_highlighting() && has_room {
+            self.start_highlight_buffering_for(source);
+        }
+    }
+
+    fn start_highlight_buffering_for(&mut self, source: CaptureSource) {
+        let selected_devices: Vec<_> = self
+            .audio_devices
+            .iter()
+            .zip(self.selected_audio.iter())
+            .filter(|&(_, &sel)| sel)
+            .map(|(dev, _)| dev.clone())
+            .collect();
+        let encode = EncodeSettings {
+            codec: self.config.encode.codec.clone(),
+            fps: self.config.encode.fps,
+            resolution_mode: self.config.encode.resolution_mode(),
+            bitrate_mode: self.config.encode.bitrate_mode(),
+        };
+        let buffer_seconds = self.config.highlight.buffer_seconds.clamp(
+            crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN,
+            crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
+        );
+        if let Err(e) = self.session.start_highlight_buffering(
+            &source,
+            selected_devices,
+            self.app_audio_only,
+            &self.config.output_dir,
+            encode,
+            buffer_seconds,
+        ) {
+            tracing::warn!("failed to start Highlight buffering: {e}");
+        }
+    }
+
+    /// Forces the current segment to finalize and saves the buffer to a file
+    /// -- a no-op (with a status message, not a popup, per the established
+    /// export-UI convention) if Highlight buffering isn't currently active.
+    fn handle_save_highlight_hotkey(&mut self, s: &'static Strings) {
+        let Some(hwnd) = self.session.highlight_hwnd() else {
+            self.error_message = Some(s.highlight_save_not_active.to_string());
+            return;
+        };
+        if matches!(self.highlight_save_state, HighlightSaveState::Saving) {
+            return;
+        }
+        let real_hwnd = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+        let source = crate::sources::capture_source_for_hwnd(real_hwnd);
+        let app_name = crate::session::app_name_from_exe(&source.exe_name);
+        match self.session.save_highlight(&self.config.output_dir, &app_name) {
+            Ok(handle) => {
+                self.highlight_save_state = HighlightSaveState::Saving;
+                self.highlight_save_handle = Some(handle);
+            }
+            Err(e) => {
+                self.highlight_save_state = HighlightSaveState::Failed(e.to_string());
+            }
+        }
+    }
+
+    fn poll_highlight_save_result(&mut self) {
+        if !self.highlight_save_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        let handle = self.highlight_save_handle.take().unwrap();
+        self.highlight_save_state = match tokio::runtime::Handle::current().block_on(handle) {
+            Ok(Ok(path)) => HighlightSaveState::Done(path),
+            Ok(Err(e)) => HighlightSaveState::Failed(e.to_string()),
+            Err(e) => HighlightSaveState::Failed(e.to_string()),
+        };
     }
 }
 

@@ -12,12 +12,12 @@ use windows::core::HSTRING;
 /// Media Foundation's sink writer does not guarantee output track order matches
 /// `AddStream` call order — it can depend on which encoder actually flushes first.
 /// Never assume "stream 0 = video, 1.. = audio"; always find streams by major type.
-struct StreamLayout {
-    video: u32,
-    audio: Vec<u32>,
+pub(crate) struct StreamLayout {
+    pub(crate) video: u32,
+    pub(crate) audio: Vec<u32>,
 }
 
-unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<StreamLayout, AppError> { unsafe {
+pub(crate) unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<StreamLayout, AppError> { unsafe {
     let mut video = None;
     let mut audio = Vec::new();
     for i in 0.. {

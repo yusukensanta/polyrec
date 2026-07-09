@@ -7,15 +7,18 @@ use crate::capture::audio::{
 use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
 use crate::config::{BitrateMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
+use crate::encode::highlight_export;
 use crate::encode::writer::video_bitrate_bps;
 use crate::encode::RecordingCommand;
 use crate::error::AppError;
+use crate::highlight::{spawn_highlight_actor, SaveNowRequest, SegmentInfo, HIGHLIGHT_SEGMENT_SECONDS};
 use crate::session::clock::RecordingClock;
 use crate::types::{AudioDevice, CaptureSource, SessionState, TrackId};
 use state::{transition, SessionAction};
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -66,9 +69,38 @@ pub struct ActiveCapture {
     pub disk_full_flag: Arc<AtomicBool>,
 }
 
+/// The rolling "Highlight" background buffer -- entirely separate from
+/// `ActiveCapture`, on its own capture threads, and NOT part of the
+/// Idle/Recording/Paused state machine (`session::state`): it's a background
+/// subsystem that runs whenever enabled and no manual recording is active,
+/// not a session state of its own. See the Highlight buffer design plan for
+/// the full lifecycle rules this implements.
+pub struct ActiveHighlight {
+    capture_handles: Vec<JoinHandle<()>>,
+    pump_handles: Vec<JoinHandle<()>>,
+    highlight_handle: JoinHandle<Result<(), AppError>>,
+    highlight_tx: mpsc::Sender<RecordingCommand>,
+    save_now_tx: mpsc::UnboundedSender<SaveNowRequest>,
+    stop_flag: Arc<AtomicBool>,
+    segments: Arc<Mutex<VecDeque<SegmentInfo>>>,
+    /// How much of the buffer `save_highlight` should try to save -- captured
+    /// at start time since it's this buffering session's own setting, not
+    /// necessarily whatever `config.highlight.buffer_seconds` reads right now.
+    buffer_seconds: u32,
+    /// Set if the highlight actor stopped itself early because free disk
+    /// space on the segment directory's volume dropped too low -- checked by
+    /// the same poll loop that detects `active`'s `disk_full_flag`.
+    pub disk_full_flag: Arc<AtomicBool>,
+    /// The window this buffer is currently following -- the dashboard's
+    /// foreground-window poll compares against this to detect a switch and
+    /// restart buffering for the new window (see lifecycle rule 2).
+    pub hwnd: usize,
+}
+
 pub struct SessionManager {
     state: SessionState,
     pub active: Option<ActiveCapture>,
+    pub highlight: Option<ActiveHighlight>,
 }
 
 impl SessionManager {
@@ -76,6 +108,7 @@ impl SessionManager {
         Self {
             state: SessionState::Idle,
             active: None,
+            highlight: None,
         }
     }
 
@@ -284,6 +317,257 @@ impl SessionManager {
         matches!(self.state, SessionState::Recording)
     }
 
+    pub fn is_highlighting(&self) -> bool {
+        self.highlight.is_some()
+    }
+
+    /// The window Highlight buffering is currently following, if active.
+    pub fn highlight_hwnd(&self) -> Option<usize> {
+        self.highlight.as_ref().map(|h| h.hwnd)
+    }
+
+    /// True once the highlight actor's background thread has exited on its
+    /// own (e.g. the disk-full check inside it tripped) rather than via
+    /// `stop_highlight_buffering` -- mirrors how `poll_background_work`
+    /// detects manual recording stopping itself early via
+    /// `active.recorder_handle.is_finished()`.
+    pub fn highlight_actor_finished(&self) -> bool {
+        self.highlight.as_ref().is_some_and(|h| h.highlight_handle.is_finished())
+    }
+
+    /// Starts (or restarts, for a different window) the Highlight background
+    /// buffer against `source`. Deliberately mirrors `start_capture`'s
+    /// capture-thread setup rather than sharing a helper with it -- keeping
+    /// the two paths fully independent means a bug in one can't reach the
+    /// other, per the design's "no degradation of existing recording"
+    /// requirement. Own capture threads, own clock, own (never-toggled)
+    /// pause flag -- Highlight buffering doesn't support pausing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_highlight_buffering(
+        &mut self,
+        source: &CaptureSource,
+        audio_devices: Vec<AudioDevice>,
+        app_audio_only: bool,
+        output_dir: &Path,
+        encode: EncodeSettings,
+        buffer_seconds: u32,
+    ) -> Result<(), AppError> {
+        let segment_dir = highlight_segment_dir(output_dir);
+        std::fs::create_dir_all(&segment_dir)?;
+
+        let free = crate::disk_space::free_bytes(&segment_dir)?;
+        if free < crate::disk_space::MIN_FREE_BYTES {
+            return Err(AppError::DiskFull(segment_dir));
+        }
+
+        let clock = RecordingClock::new();
+        let pause_flag = Arc::new(AtomicBool::new(false)); // never toggled -- no pause support
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let audio_specs: Vec<(u32, u16)> = audio_devices
+            .iter()
+            .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
+            .collect();
+
+        let real_hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
+        let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
+            Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
+            Err(e) => {
+                tracing::warn!("query_capture_size failed for hwnd {:x}: {e}; using 1920x1080", source.hwnd);
+                (1920u32, 1080u32)
+            }
+        };
+        let display_size = if matches!(encode.resolution_mode, ResolutionMode::Display) {
+            match query_display_size(real_hwnd) {
+                Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
+                Err(e) => {
+                    tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", source.hwnd);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (output_width, output_height) =
+            resolve_output_size(&encode.resolution_mode, (capture_width, capture_height), display_size);
+        let bitrate_bps = match encode.bitrate_mode {
+            BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
+            BitrateMode::Manual(bps) => bps,
+        };
+
+        let max_segments = buffer_seconds.max(1).div_ceil(HIGHLIGHT_SEGMENT_SECONDS).max(1) as usize;
+        let segments: Arc<Mutex<VecDeque<SegmentInfo>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let disk_full_flag = Arc::new(AtomicBool::new(false));
+        let (highlight_tx, save_now_tx, highlight_handle) = spawn_highlight_actor(
+            segment_dir,
+            output_width,
+            output_height,
+            encode.fps,
+            encode.codec.clone(),
+            bitrate_bps,
+            audio_specs,
+            HIGHLIGHT_SEGMENT_SECONDS,
+            max_segments,
+            Arc::clone(&segments),
+            Arc::clone(&disk_full_flag),
+        );
+
+        let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
+        let hwnd_val = source.hwnd;
+        let video_clock = Arc::clone(&clock);
+        let video_pause = Arc::clone(&pause_flag);
+        let video_stop = Arc::clone(&stop_flag);
+        let video_capture_handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("highlight video capture runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
+                if let Err(e) = run_video_capture(hwnd, capture_width, capture_height, output_width, output_height, video_clock, video_pause, video_stop, video_tx).await {
+                    tracing::error!("Highlight VideoCapture error: {e}");
+                }
+            });
+        });
+        let video_pump_handle = spawn_video_pump(video_rx, highlight_tx.clone(), Arc::new(AtomicU64::new(0)));
+
+        let mut capture_handles = vec![video_capture_handle];
+        let mut pump_handles = vec![video_pump_handle];
+
+        for (i, dev) in audio_devices.into_iter().enumerate() {
+            let track_id = TrackId::new(i as u32);
+            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+            let audio_clock = Arc::clone(&clock);
+            let audio_pause = Arc::clone(&pause_flag);
+            let audio_stop = Arc::clone(&stop_flag);
+            let dev_id = dev.id.clone();
+            let is_loopback = dev.is_loopback;
+            let use_process_loopback = is_loopback && app_audio_only;
+            let target_pid = source.process_id;
+            let capture_handle = tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("highlight audio capture runtime");
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    let result = if use_process_loopback {
+                        run_process_loopback_capture(
+                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx,
+                        )
+                        .await
+                    } else {
+                        run_audio_capture(
+                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx,
+                        )
+                        .await
+                    };
+                    if let Err(e) = result {
+                        tracing::error!("Highlight AudioCapture[{track_id:?}] error: {e}");
+                    }
+                });
+            });
+            let pump_handle = spawn_audio_pump(audio_rx, highlight_tx.clone());
+            capture_handles.push(capture_handle);
+            pump_handles.push(pump_handle);
+        }
+
+        self.highlight = Some(ActiveHighlight {
+            capture_handles,
+            pump_handles,
+            highlight_handle,
+            highlight_tx,
+            save_now_tx,
+            stop_flag,
+            segments,
+            buffer_seconds,
+            disk_full_flag,
+            hwnd: source.hwnd,
+        });
+
+        Ok(())
+    }
+
+    /// Stops Highlight buffering. `discard` deletes every segment file on
+    /// disk (used when the setting is disabled, or the foreground window
+    /// changed to one with a different resolution -- see lifecycle rule 2);
+    /// pass `false` to keep segments around (e.g. briefly pausing buffering
+    /// so a manual recording can start, per lifecycle rule 3).
+    ///
+    /// `discard: false` doesn't wait for the background actor thread to
+    /// exit -- its segments are already durable files on disk, unlike manual
+    /// recording's finalize (whose output IS the point of waiting).
+    /// `discard: true` DOES wait (bounded by one segment's finalize time,
+    /// well under a second in practice) -- otherwise the actor can still be
+    /// mid-finalize (or about to push one more segment onto the shared
+    /// deque) when `discard_segments` reads it, deleting an incomplete
+    /// snapshot while the actor goes on to write one more file to a
+    /// directory the caller believes is now empty (caught via a real
+    /// end-to-end run, not just the isolated unit tests).
+    pub fn stop_highlight_buffering(&mut self, discard: bool) {
+        if let Some(active) = self.highlight.take() {
+            active.stop_flag.store(true, Ordering::SeqCst);
+            for h in active.capture_handles {
+                h.abort();
+            }
+            for h in active.pump_handles {
+                h.abort();
+            }
+            let _ = active.highlight_tx.blocking_send(RecordingCommand::Stop);
+            if discard {
+                let _ = tokio::runtime::Handle::current().block_on(active.highlight_handle);
+                crate::highlight::discard_segments(&active.segments);
+            }
+        }
+    }
+
+    /// Forces the currently-open segment to finalize immediately (so the
+    /// save includes everything up to this exact moment, see
+    /// `highlight::SaveNowRequest`), then concatenates+trims the buffer down
+    /// to `buffer_seconds` into a new file under `output_dir`. Errors if
+    /// Highlight buffering isn't currently active.
+    pub fn save_highlight(
+        &self,
+        output_dir: &Path,
+        app_name: &str,
+    ) -> Result<JoinHandle<Result<PathBuf, AppError>>, AppError> {
+        let active = self
+            .highlight
+            .as_ref()
+            .ok_or_else(|| AppError::Encode("Highlight buffering is not active".into()))?;
+        let save_now_tx = active.save_now_tx.clone();
+        let segments_arc = Arc::clone(&active.segments);
+        let buffer_seconds = active.buffer_seconds;
+        let output_dir = output_dir.to_path_buf();
+        let app_name = app_name.to_string();
+
+        let handle = tokio::spawn(async move {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            save_now_tx
+                .send(reply_tx)
+                .map_err(|_| AppError::Encode("highlight actor is not running".into()))?;
+            reply_rx
+                .await
+                .map_err(|_| AppError::Encode("highlight actor stopped before confirming save".into()))?;
+
+            let snapshot: Vec<SegmentInfo> = {
+                let guard = segments_arc.lock().expect("highlight segments mutex poisoned");
+                guard.iter().cloned().collect()
+            };
+
+            tokio::task::spawn_blocking(move || {
+                let finish_stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
+                let output_path = output_dir.join(format!("{app_name}_highlight_{finish_stamp}.mp4"));
+                highlight_export::concat_and_trim(&snapshot, buffer_seconds, &output_path)
+            })
+            .await
+            .map_err(|e| AppError::Encode(format!("save_highlight join error: {e}")))?
+        });
+
+        Ok(handle)
+    }
+
     pub fn pause_capture(&mut self) {
         if let Some(active) = &self.active {
             active.pause_flag.store(true, Ordering::SeqCst);
@@ -313,8 +597,9 @@ impl Default for SessionManager {
 
 /// Derives a filesystem-safe app name from a window's exe name (e.g. "vivaldi.exe"
 /// -> "vivaldi"), used as the recording filename's prefix. Falls back to "recording"
-/// if the exe name is empty or sanitizes away to nothing.
-fn app_name_from_exe(exe_name: &str) -> String {
+/// if the exe name is empty or sanitizes away to nothing. `pub(crate)` so the
+/// dashboard can reuse the exact same sanitization for Highlight save filenames.
+pub(crate) fn app_name_from_exe(exe_name: &str) -> String {
     let trimmed = if exe_name.len() >= 4 && exe_name[exe_name.len() - 4..].eq_ignore_ascii_case(".exe") {
         &exe_name[..exe_name.len() - 4]
     } else {
@@ -329,6 +614,14 @@ fn app_name_from_exe(exe_name: &str) -> String {
     } else {
         sanitized
     }
+}
+
+/// Directory the Highlight buffer's rotating segment files live in -- kept
+/// separate from the main `polyrec/` recording directory so it's trivially
+/// distinguishable (and safe to bulk-delete via `discard_segments`) from the
+/// user's actual finished recordings.
+fn highlight_segment_dir(output_dir: &Path) -> PathBuf {
+    output_dir.join("polyrec").join("_highlight_buffer")
 }
 
 /// Creates `<base_dir>/polyrec/` and returns (temp_recording_path, polyrec_dir).
@@ -713,5 +1006,61 @@ mod tests {
         let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
         assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
         println!("output size: {} bytes", metadata.len());
+    }
+
+    /// End-to-end: real window + real audio devices through the actual
+    /// `start_highlight_buffering`/`save_highlight` wiring the GUI uses (not
+    /// just the isolated `highlight`/`encode::highlight_export` unit tests).
+    /// Runs long enough (past the minimum 30s buffer, well past several
+    /// internal 10s segment rotations) to exercise real segment rotation,
+    /// then verifies Save Highlight produces a real, playable, non-empty
+    /// file and that stopping buffering cleans up the segment directory.
+    /// Needs a display and audio endpoints, so it's ignored by default --
+    /// run with `--ignored --nocapture` (takes ~35s real time).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn highlight_buffering_saves_a_playable_file() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+
+        let sources = enumerate_sources();
+        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        sm.start_highlight_buffering(&source, audio_devices, false, dir.path(), EncodeSettings::default(), 30)
+            .expect("start_highlight_buffering failed");
+        assert!(sm.is_highlighting());
+        assert_eq!(sm.highlight_hwnd(), Some(source.hwnd));
+
+        // Past the 30s minimum buffer and 3+ internal 10s segment rotations.
+        tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+
+        let segment_dir = dir.path().join("polyrec").join("_highlight_buffer");
+        let segments_before_save = std::fs::read_dir(&segment_dir)
+            .expect("segment directory should exist by now")
+            .count();
+        assert!(segments_before_save > 0, "expected at least one rotated segment file on disk");
+
+        let handle = sm.save_highlight(dir.path(), "e2e_highlight_test").expect("save_highlight failed");
+        let saved_path = handle.await.expect("save_highlight task panicked").expect("concat_and_trim failed");
+
+        let metadata = std::fs::metadata(&saved_path).expect("saved highlight file missing");
+        assert!(metadata.len() > 0, "saved highlight file is empty: {}", saved_path.display());
+        println!("highlight saved: {} ({} bytes)", saved_path.display(), metadata.len());
+
+        // Confirms the file is a real, readable container (not just non-empty
+        // bytes) -- same verification remux.rs's own tests rely on.
+        let audio_tracks = crate::encode::remux::count_audio_tracks(&saved_path)
+            .expect("saved highlight file isn't a readable MP4");
+        println!("highlight audio tracks: {audio_tracks}");
+
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true));
+        assert!(!sm.is_highlighting());
+        assert!(
+            !segment_dir.exists() || std::fs::read_dir(&segment_dir).unwrap().count() == 0,
+            "segment files should be gone after stop_highlight_buffering(discard: true)"
+        );
     }
 }
