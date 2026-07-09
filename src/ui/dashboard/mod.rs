@@ -314,9 +314,13 @@ impl App {
                     self.source_icon_textures.clear();
                     self.selected_source = None;
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
-                    let n = self.audio_devices.len();
                     self.selected_audio = self.audio_devices.iter().map(|d| d.is_loopback).collect();
-                    self.export_track_selection = vec![true; n];
+                    // export_track_selection is NOT reset here -- it's tied to the last
+                    // finished recording's actually-probed track count
+                    // (export_available_tracks), set once in poll_background_work after
+                    // finalize succeeds, not to the live device list. Resetting it here
+                    // to match the current device count would desync it from what the
+                    // export checkboxes are actually supposed to represent.
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled { s.overlay_on } else { s.overlay_off };
