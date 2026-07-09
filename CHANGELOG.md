@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-09
+
+### Fixed
+
+- The menu bar's Refresh button no longer resets the export track-selection checkboxes to match the live audio device count -- that state is tied to the last finished recording's actually-probed track count, not the current device list.
+
+### Added
+
+- Hover feedback on capture source cards in the source list (previously only the selected card had any visual distinction).
+
 ## [0.3.2] - 2026-07-09
 
 ### Changed
@@ -130,7 +140,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yusukensanta/polyrec/compare/v0.2.8...v0.3.0
