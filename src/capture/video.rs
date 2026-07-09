@@ -105,6 +105,7 @@ pub async fn run_video_capture(
     output_height: u32,
     clock: Arc<RecordingClock>,
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<VideoFrame>,
 ) -> Result<(), AppError> {
     unsafe {
@@ -198,6 +199,10 @@ pub async fn run_video_capture(
     };
 
     loop {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
         let frame = match frame_pool.TryGetNextFrame() {
             Ok(f) => f,
             Err(_) => {

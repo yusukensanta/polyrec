@@ -187,6 +187,7 @@ pub async fn run_audio_capture(
     is_loopback: bool,
     clock: Arc<RecordingClock>,
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
 ) -> Result<(), AppError> {
     unsafe {
@@ -241,7 +242,7 @@ pub async fn run_audio_capture(
         }
         let bytes_per_frame = (*mix_format).nBlockAlign as usize;
 
-        run_capture_loop(audio_client, sample_rate, channels, bytes_per_frame, track_id, clock, pause_flag, tx).await
+        run_capture_loop(audio_client, sample_rate, channels, bytes_per_frame, track_id, clock, pause_flag, stop_flag, tx).await
     }
 }
 
@@ -254,6 +255,7 @@ pub async fn run_process_loopback_capture(
     track_id: TrackId,
     clock: Arc<RecordingClock>,
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
 ) -> Result<(), AppError> {
     unsafe {
@@ -296,6 +298,7 @@ pub async fn run_process_loopback_capture(
             track_id,
             clock,
             pause_flag,
+            stop_flag,
             tx,
         )
         .await
@@ -319,6 +322,7 @@ async unsafe fn run_capture_loop(
     track_id: TrackId,
     clock: Arc<RecordingClock>,
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
 ) -> Result<(), AppError> { unsafe {
     let capture_client: IAudioCaptureClient = audio_client
@@ -333,6 +337,10 @@ async unsafe fn run_capture_loop(
     let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
     loop {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
         let mut data: *mut u8 = std::ptr::null_mut();
         let mut frames_available: u32 = 0;
         let mut flags: u32 = 0;
@@ -511,6 +519,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<AudioSamples>(64);
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pid = std::process::id();
 
         // COM objects (IAudioClient etc.) aren't Send, so this must run on its own
@@ -523,7 +532,7 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ = run_process_loopback_capture(
-                    pid, true, TrackId::new(0), clock, pause_flag, tx,
+                    pid, true, TrackId::new(0), clock, pause_flag, stop_flag, tx,
                 )
                 .await;
             });
@@ -550,6 +559,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<AudioSamples>(256);
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -559,7 +569,7 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ = run_audio_capture(
-                    String::new(), TrackId::new(0), true, clock, pause_flag, tx,
+                    String::new(), TrackId::new(0), true, clock, pause_flag, stop_flag, tx,
                 )
                 .await;
             });

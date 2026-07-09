@@ -53,6 +53,11 @@ pub struct ActiveCapture {
     pub recording_tx: mpsc::Sender<RecordingCommand>,
     pub clock: Arc<RecordingClock>,
     pub pause_flag: Arc<AtomicBool>,
+    /// Signals capture loops (running on their own `spawn_blocking` OS threads) to
+    /// exit their loop on the next iteration. `capture_handles.abort()` alone does
+    /// NOT stop these -- `abort()` has no effect on an already-running blocking
+    /// closure; see `stop_capture`.
+    pub stop_flag: Arc<AtomicBool>,
     pub output_path: PathBuf,
     /// Set by the recorder actor if it stopped itself early because free disk
     /// space dropped below `disk_space::MIN_FREE_BYTES` — the file up to that
@@ -101,6 +106,7 @@ impl SessionManager {
     ) -> Result<PathBuf, AppError> {
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::new(AtomicBool::new(false));
 
         let app_name = app_name_from_exe(&source.exe_name);
         let (output_path, polyrec_dir) = prepare_recording_paths(output_dir, &app_name);
@@ -174,6 +180,7 @@ impl SessionManager {
         let hwnd_val = source.hwnd;
         let video_clock = Arc::clone(&clock);
         let video_pause = Arc::clone(&pause_flag);
+        let video_stop = Arc::clone(&stop_flag);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -184,7 +191,7 @@ impl SessionManager {
                 let hwnd = windows::Win32::Foundation::HWND(
                     hwnd_val as *mut core::ffi::c_void,
                 );
-                if let Err(e) = run_video_capture(hwnd, capture_width, capture_height, output_width, output_height, video_clock, video_pause, video_tx).await {
+                if let Err(e) = run_video_capture(hwnd, capture_width, capture_height, output_width, output_height, video_clock, video_pause, video_stop, video_tx).await {
                     tracing::error!("VideoCapture error: {e}");
                 }
             });
@@ -201,6 +208,7 @@ impl SessionManager {
             let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
             let audio_clock = Arc::clone(&clock);
             let audio_pause = Arc::clone(&pause_flag);
+            let audio_stop = Arc::clone(&stop_flag);
             let dev_id = dev.id.clone();
             let is_loopback = dev.is_loopback;
             let use_process_loopback = is_loopback && app_audio_only;
@@ -214,12 +222,12 @@ impl SessionManager {
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
                         run_process_loopback_capture(
-                            target_pid, true, track_id, audio_clock, audio_pause, audio_tx,
+                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx,
                         )
                         .await
                     } else {
                         run_audio_capture(
-                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_tx,
+                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx,
                         )
                         .await
                     };
@@ -240,6 +248,7 @@ impl SessionManager {
             recording_tx,
             clock,
             pause_flag,
+            stop_flag,
             output_path: output_path.clone(),
             disk_full_flag,
         });
@@ -252,6 +261,9 @@ impl SessionManager {
     /// before treating the output file as ready (see recorder-finalize-race design spec).
     pub fn stop_capture(&mut self) -> Option<JoinHandle<Result<PathBuf, AppError>>> {
         if let Some(active) = self.active.take() {
+            // Signal capture loops directly -- abort() below has no effect on the
+            // spawn_blocking closures actually running the loops (see stop_flag doc).
+            active.stop_flag.store(true, Ordering::SeqCst);
             // Abort capture sources first (stops new frame production)
             for h in active.capture_handles {
                 h.abort();
