@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-09
+
+### Fixed
+
+- A `config.toml` that exists but fails to parse now logs a warning before falling back to defaults, instead of silently resetting settings with no trace of why.
+
 ## [0.3.3] - 2026-07-09
 
 ### Fixed
@@ -140,7 +146,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/yusukensanta/polyrec/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/yusukensanta/polyrec/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/yusukensanta/polyrec/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yusukensanta/polyrec/compare/v0.3.0...v0.3.1
