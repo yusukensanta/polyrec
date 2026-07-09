@@ -61,3 +61,13 @@ tempfile = "3"
 
 [build-dependencies]
 winresource = "0.1"
+
+[profile.release]
+# Default is 16. This app is GPU/DirectX/Media-Foundation-bound (screen
+# capture, hardware video encode), not CPU-tight-loop-bound, so the extra
+# cross-crate inlining/optimization opt at the default codegen-units count
+# buys little here -- but it measurably slows every release build (~7-8 min
+# for "Build release binary" alone in CI, dependencies fully cached). Higher
+# codegen-units trades a small amount of that optimization for meaningfully
+# more parallel codegen. opt-level is untouched (still fully optimized).
+codegen-units = 256
