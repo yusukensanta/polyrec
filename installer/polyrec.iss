@@ -41,6 +41,12 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 LicenseFile=..\LICENSE
 ; Unsigned binary -- see SECURITY.md's "out of scope" note on SmartScreen warnings.
 ; Nothing in this script can suppress that; only a real code-signing cert would.
+; Supports the in-app self-updater (src/self_update.rs): it launches this
+; installer silently while PolyRec is (about to be) still running, so the
+; installer needs to be able to close/reopen it around the file replace
+; rather than just failing on a locked polyrec.exe.
+CloseApplications=yes
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -24,6 +24,12 @@ windows-core = "0.62"
 chrono = "0.4"
 semver = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# Release zips are produced by PowerShell's Compress-Archive, which only ever
+# writes standard DEFLATE entries -- default-features=false + "deflate" avoids
+# pulling in the bzip2/zstd/aes-crypto backends this app never needs.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+self-replace = "1"
 
 [dependencies.windows]
 version = "0.62"

@@ -61,6 +61,19 @@ pub struct Strings {
     pub update_available_suffix: &'static str, // used as "⬆ {version} {suffix}"
     pub update_tooltip: &'static str,
 
+    // Self-update confirm/progress popup
+    pub update_confirm_title: &'static str,
+    /// "{prefix}{version}{suffix}" -- the version is inserted between these.
+    pub update_confirm_prefix: &'static str,
+    pub update_confirm_suffix: &'static str,
+    pub update_confirm_uac_note: &'static str,
+    pub update_now_button: &'static str,
+    pub update_not_now_button: &'static str,
+    pub update_view_release_notes: &'static str,
+    pub update_working_message: &'static str,
+    pub update_failed_prefix: &'static str,
+    pub update_blocked_while_recording: &'static str,
+
     // Left panel — source list / audio
     pub capture_source_header: &'static str,
     pub no_windows_found: &'static str,
@@ -168,7 +181,18 @@ pub static EN: Strings = Strings {
     overlay_on: "Overlay: ON",
     overlay_off: "Overlay: OFF",
     update_available_suffix: "available",
-    update_tooltip: "Click to open the release page",
+    update_tooltip: "Click to update now",
+
+    update_confirm_title: "Update PolyRec",
+    update_confirm_prefix: "Update to ",
+    update_confirm_suffix: " now? PolyRec will close and restart.",
+    update_confirm_uac_note: "Windows may show a permission prompt during the update.",
+    update_now_button: "Update Now",
+    update_not_now_button: "Not Now",
+    update_view_release_notes: "View release notes",
+    update_working_message: "Updating… PolyRec will restart shortly.",
+    update_failed_prefix: "Update failed: ",
+    update_blocked_while_recording: "Can't update while a recording or Highlight buffering is in progress — stop it first.",
 
     capture_source_header: "CAPTURE SOURCE",
     no_windows_found: "No visible windows found — try Refresh.",
@@ -264,7 +288,18 @@ pub static JA: Strings = Strings {
     overlay_on: "オーバーレイ: オン",
     overlay_off: "オーバーレイ: オフ",
     update_available_suffix: "が利用可能",
-    update_tooltip: "クリックしてリリースページを開く",
+    update_tooltip: "クリックして今すぐ更新",
+
+    update_confirm_title: "PolyRecを更新",
+    update_confirm_prefix: "",
+    update_confirm_suffix: " に今すぐ更新しますか？PolyRecは一度終了して再起動します。",
+    update_confirm_uac_note: "更新中にWindowsの権限確認ダイアログが表示される場合があります。",
+    update_now_button: "今すぐ更新",
+    update_not_now_button: "後で",
+    update_view_release_notes: "リリースノートを見る",
+    update_working_message: "更新中…まもなくPolyRecが再起動します。",
+    update_failed_prefix: "更新に失敗しました: ",
+    update_blocked_while_recording: "録画中またはハイライトバッファ動作中は更新できません。先に停止してください。",
 
     capture_source_header: "キャプチャ ソース",
     no_windows_found: "表示中のウィンドウが見つかりません。更新をお試しください。",
@@ -389,6 +424,10 @@ mod tests {
             assert!(!strings.export_failed_header.is_empty());
             assert!(!strings.highlight_header.is_empty());
             assert!(!strings.highlight_enabled_label.is_empty());
+            assert!(!strings.update_confirm_title.is_empty());
+            assert!(!strings.update_now_button.is_empty());
+            assert!(!strings.update_working_message.is_empty());
+            assert!(!strings.update_blocked_while_recording.is_empty());
             assert!(!strings.hotkey_save_highlight_header.is_empty());
         }
     }

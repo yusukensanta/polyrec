@@ -61,6 +61,13 @@ enum HighlightSaveState {
     Failed(String),
 }
 
+enum SelfUpdateState {
+    Idle,
+    Confirming(crate::update_check::AvailableUpdate),
+    Working,
+    Failed(String),
+}
+
 pub struct App {
     config: Config,
     session: SessionManager,
@@ -113,6 +120,8 @@ pub struct App {
     hotkey_capture_warning: Option<String>,
     highlight_save_state: HighlightSaveState,
     highlight_save_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
+    self_update_state: SelfUpdateState,
+    self_update_handle: Option<tokio::task::JoinHandle<Result<(), crate::error::AppError>>>,
 }
 
 impl App {
@@ -184,6 +193,8 @@ impl App {
             hotkey_capture_warning: None,
             highlight_save_state: HighlightSaveState::Idle,
             highlight_save_handle: None,
+            self_update_state: SelfUpdateState::Idle,
+            self_update_handle: None,
         }
     }
 }
@@ -203,7 +214,7 @@ impl eframe::App for App {
         let ctx = &ctx;
         let s: &'static Strings = self.config.lang().strings();
 
-        self.poll_background_work(s);
+        self.poll_background_work(ctx, s);
 
         self.render_menu_bar(ui, s);
         self.render_source_panel(ui, s);
@@ -212,6 +223,7 @@ impl eframe::App for App {
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);
         self.render_error_banner(ctx, s);
+        self.render_self_update_popup(ctx, s);
 
         self.request_repaints(ctx);
     }
@@ -230,10 +242,11 @@ impl App {
     /// just-finished recorder's finalize result. None of this renders
     /// anything -- it only updates `self` before the render_* methods below
     /// read it.
-    fn poll_background_work(&mut self, s: &'static Strings) {
+    fn poll_background_work(&mut self, ctx: &egui::Context, s: &'static Strings) {
         let is_recording = self.session.is_recording();
 
         self.refresh_free_space();
+        self.poll_self_update_result(ctx);
 
         // Poll update-check result (one-shot; None result also clears the receiver
         // so we stop polling a channel whose sender has already sent its one message)
@@ -370,14 +383,22 @@ impl App {
                             tracing::error!("failed to save config: {e}");
                         }
                     }
-                    if let Some(update) = &self.update_available {
-                        let update_url = update.url.clone();
+                    if let Some(update) = self.update_available.clone() {
                         let clicked = ui
                             .add(accent_button(&format!("⬆ {} {}", update.version, s.update_available_suffix), ACCENT_SECONDARY))
                             .on_hover_text(s.update_tooltip)
                             .clicked();
                         if clicked {
-                            open_url(&update_url);
+                            // Closing/restarting mid-recording (or mid-Highlight-
+                            // buffering) would corrupt or lose it -- block the
+                            // confirm dialog from even opening in that case,
+                            // same "explain why, don't just silently ignore the
+                            // click" approach as the other blocked-action paths.
+                            if self.session.is_recording() || self.session.is_paused() || self.session.is_highlighting() {
+                                self.error_message = Some(s.update_blocked_while_recording.to_string());
+                            } else {
+                                self.self_update_state = SelfUpdateState::Confirming(update);
+                            }
                         }
                     }
                 });
@@ -980,6 +1001,104 @@ impl App {
             });
         if close {
             self.error_message = None;
+        }
+    }
+
+    fn render_self_update_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        match &self.self_update_state {
+            SelfUpdateState::Idle => {}
+            SelfUpdateState::Confirming(update) => {
+                let update = update.clone();
+                let mut action: Option<&str> = None;
+                egui::Window::new(s.update_confirm_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}{}{}",
+                                s.update_confirm_prefix, update.version, s.update_confirm_suffix
+                            ))
+                            .size(13.0)
+                            .color(TEXT_PRIMARY),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(s.update_confirm_uac_note).size(11.0).color(TEXT_MUTED));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(accent_button(s.update_now_button, ACCENT_IDLE)).clicked() {
+                                action = Some("now");
+                            }
+                            if ui.add(accent_button(s.update_not_now_button, TEXT_MUTED)).clicked() {
+                                action = Some("not_now");
+                            }
+                        });
+                        if ui.link(s.update_view_release_notes).clicked() {
+                            open_url(&update.url);
+                        }
+                    });
+                match action {
+                    Some("now") => {
+                        let version = update.version.clone();
+                        self.self_update_handle =
+                            Some(tokio::spawn(crate::self_update::perform_self_update(version)));
+                        self.self_update_state = SelfUpdateState::Working;
+                    }
+                    Some("not_now") => self.self_update_state = SelfUpdateState::Idle,
+                    _ => {}
+                }
+            }
+            SelfUpdateState::Working => {
+                egui::Window::new(s.update_confirm_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.label(egui::RichText::new(s.update_working_message).size(13.0).color(TEXT_PRIMARY));
+                    });
+            }
+            SelfUpdateState::Failed(msg) => {
+                let msg = msg.clone();
+                let mut close = false;
+                egui::Window::new(s.update_confirm_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
+                                .size(13.0)
+                                .color(ACCENT_REC),
+                        );
+                        ui.add_space(8.0);
+                        if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                            close = true;
+                        }
+                    });
+                if close {
+                    self.self_update_state = SelfUpdateState::Idle;
+                }
+            }
+        }
+    }
+
+    /// Polls the self-update background task -- on success the exe has
+    /// already been swapped-and-relaunched (portable) or the installer has
+    /// already been launched (installed); our only remaining job is to close
+    /// our own window so the old process actually exits (portable's file
+    /// swap already happened, but the new process is running alongside us
+    /// until we do; the installed path also wants this process's file lock
+    /// on polyrec.exe released as soon as possible for the installer).
+    fn poll_self_update_result(&mut self, ctx: &egui::Context) {
+        if !self.self_update_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        let handle = self.self_update_handle.take().unwrap();
+        match tokio::runtime::Handle::current().block_on(handle) {
+            Ok(Ok(())) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Ok(Err(e)) => self.self_update_state = SelfUpdateState::Failed(e.to_string()),
+            Err(e) => self.self_update_state = SelfUpdateState::Failed(e.to_string()),
         }
     }
 

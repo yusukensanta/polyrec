@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("Windows API error: {0}")]
     Windows(String),
 
+    #[error("Update error: {0}")]
+    Update(String),
+
     // The MB figure is a plain string literal, not computed from
     // disk_space::MIN_FREE_BYTES -- thiserror's #[error(...)] can't mix a
     // field reference ({0}) with an extra formatted expression unambiguously.
