@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-07-10
+
+### Added
+
+- Highlight buffer: continuously captures the foreground app in the background, and a hotkey (default F10) saves the last N seconds (configurable 30-300s, default 120s) to a file on demand -- no need to have pressed record beforehand. Enable it in Quality settings. Follows foreground-window switches automatically, pauses whenever a manual recording is active, and stops itself gracefully if free disk space runs low.
+
 ## [v0.3.8] - 2026-07-10
 
 ### Fixed
@@ -174,7 +180,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.4.0...HEAD
+[v0.4.0]: https://github.com/yusukensanta/polyrec/compare/v0.3.8...v0.4.0
 [v0.3.8]: https://github.com/yusukensanta/polyrec/compare/v0.3.7...v0.3.8
 [v0.3.7]: https://github.com/yusukensanta/polyrec/compare/v0.3.6...v0.3.7
 [v0.3.6]: https://github.com/yusukensanta/polyrec/compare/v0.3.5...v0.3.6
