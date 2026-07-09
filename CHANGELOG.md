@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-07-10
+
+### Added
+
+- Clicking the "update available" menu bar button now performs the update directly instead of just opening the release page: downloads and verifies the new version, then either swaps the running app in place (portable zip) or silently re-runs the installer (installed copies), restarting automatically. Blocked while a recording or Highlight buffering is active.
+
 ## [v0.4.1] - 2026-07-10
 
 ### Added
@@ -190,7 +196,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.5.0...HEAD
+[v0.5.0]: https://github.com/yusukensanta/polyrec/compare/v0.4.1...v0.5.0
 [v0.4.1]: https://github.com/yusukensanta/polyrec/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/yusukensanta/polyrec/compare/v0.3.8...v0.4.0
 [v0.3.8]: https://github.com/yusukensanta/polyrec/compare/v0.3.7...v0.3.8
