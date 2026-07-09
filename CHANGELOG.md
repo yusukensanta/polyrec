@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.8] - 2026-07-10
+
+### Fixed
+
+- Stopping a recording relied on aborting an internal channel-pump task as an indirect way of making the capture threads notice and exit -- worked today only as a side effect, with no direct signal reaching the capture loops themselves. Capture threads now check an explicit stop flag every loop iteration, the same pattern already used for pause.
+
 ## [v0.3.7] - 2026-07-09
 
 ### Added
@@ -168,7 +174,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.3.8...HEAD
+[v0.3.8]: https://github.com/yusukensanta/polyrec/compare/v0.3.7...v0.3.8
 [v0.3.7]: https://github.com/yusukensanta/polyrec/compare/v0.3.6...v0.3.7
 [v0.3.6]: https://github.com/yusukensanta/polyrec/compare/v0.3.5...v0.3.6
 [v0.3.5]: https://github.com/yusukensanta/polyrec/compare/v0.3.4...v0.3.5
