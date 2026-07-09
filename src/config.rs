@@ -17,6 +17,17 @@ pub struct Config {
     /// disabled).
     #[serde(default)]
     pub highlight: HighlightConfig,
+    /// Default state of the "App audio only" checkbox on launch (and thus
+    /// what a hotkey-started recording uses, since the hotkey starts a
+    /// recording with whatever the checkbox is currently set to). Defaults
+    /// to true — `#[serde(default = "default_true")]` so a `config.toml`
+    /// saved before this field existed still loads instead of failing.
+    #[serde(default = "default_true")]
+    pub default_app_audio_only: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,6 +155,7 @@ impl Default for Config {
             },
             language: "en".into(),
             highlight: HighlightConfig::default(),
+            default_app_audio_only: true,
         }
     }
 }
@@ -340,6 +352,37 @@ mod tests {
         assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(1_000_000)));
         c.encode.manual_bitrate_mbps = 500;
         assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(100_000_000)));
+    }
+
+    #[test]
+    fn default_app_audio_only_is_true() {
+        assert!(Config::default().default_app_audio_only);
+    }
+
+    #[test]
+    fn default_app_audio_only_missing_from_toml_falls_back_to_true() {
+        // Simulates a config.toml saved before this field existed.
+        let text = r#"
+            output_dir = "."
+            language = "en"
+            [hotkeys]
+            start_stop = "F9"
+            pause = "F8"
+            toggle_overlay = "F7"
+            [overlay]
+            enabled = false
+            opacity = 0.85
+            [encode]
+            codec = "h265"
+            fps = 60
+            resolution_mode = "native"
+            custom_width = 1920
+            custom_height = 1080
+            bitrate_mode = "auto"
+            manual_bitrate_mbps = 12
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert!(parsed.default_app_audio_only);
     }
 
     #[test]
