@@ -10,6 +10,7 @@ pub(super) enum HotkeySlot {
     StartStop,
     Pause,
     ToggleOverlay,
+    SaveHighlight,
 }
 
 impl App {
@@ -59,6 +60,7 @@ impl App {
                                 HotkeySlot::StartStop => self.config.hotkeys.start_stop = combo.clone(),
                                 HotkeySlot::Pause => self.config.hotkeys.pause = combo.clone(),
                                 HotkeySlot::ToggleOverlay => self.config.hotkeys.toggle_overlay = combo.clone(),
+                                HotkeySlot::SaveHighlight => self.config.hotkeys.save_highlight = combo.clone(),
                             }
                             self.hotkey_capture_warning = None;
                         } else {
@@ -83,15 +85,18 @@ impl App {
                 self.render_hotkey_row(ui, s, s.hotkey_start_stop_header, HotkeySlot::StartStop);
                 self.render_hotkey_row(ui, s, s.hotkey_pause_header, HotkeySlot::Pause);
                 self.render_hotkey_row(ui, s, s.hotkey_overlay_header, HotkeySlot::ToggleOverlay);
+                self.render_hotkey_row(ui, s, s.hotkey_save_highlight_header, HotkeySlot::SaveHighlight);
 
                 let bindings = [
                     &self.config.hotkeys.start_stop,
                     &self.config.hotkeys.pause,
                     &self.config.hotkeys.toggle_overlay,
+                    &self.config.hotkeys.save_highlight,
                 ];
-                let has_collision = bindings[0] == bindings[1]
-                    || bindings[0] == bindings[2]
-                    || bindings[1] == bindings[2];
+                let has_collision = bindings
+                    .iter()
+                    .enumerate()
+                    .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
                 if has_collision {
                     ui.add_space(8.0);
                     ui.label(
@@ -130,6 +135,7 @@ impl App {
                 &self.config.hotkeys.start_stop,
                 &self.config.hotkeys.pause,
                 &self.config.hotkeys.toggle_overlay,
+                &self.config.hotkeys.save_highlight,
                 move || wake_ctx.request_repaint(),
             ));
         }
@@ -144,6 +150,7 @@ impl App {
             HotkeySlot::StartStop => &self.config.hotkeys.start_stop,
             HotkeySlot::Pause => &self.config.hotkeys.pause,
             HotkeySlot::ToggleOverlay => &self.config.hotkeys.toggle_overlay,
+            HotkeySlot::SaveHighlight => &self.config.hotkeys.save_highlight,
         }
         .clone();
         ui.horizontal(|ui| {

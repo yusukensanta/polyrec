@@ -11,6 +11,12 @@ pub struct Config {
     /// "en" | "ja" — see `crate::i18n::Lang`. Unknown values fall back to
     /// English, same convention as the other mode fields in this file.
     pub language: String,
+    /// The rolling "Highlight" background buffer — see `crate::highlight`.
+    /// `#[serde(default)]` so a `config.toml` saved before this field existed
+    /// still loads instead of failing (falls back to `HighlightConfig::default()`,
+    /// disabled).
+    #[serde(default)]
+    pub highlight: HighlightConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -18,6 +24,37 @@ pub struct HotkeyConfig {
     pub start_stop: String,
     pub pause: String,
     pub toggle_overlay: String,
+    /// Saves the last `highlight.buffer_seconds` of the Highlight buffer to a
+    /// file — only takes effect while Highlight buffering is active. Same
+    /// back-compat reasoning as `Config::highlight`.
+    #[serde(default = "default_save_highlight_hotkey")]
+    pub save_highlight: String,
+}
+
+fn default_save_highlight_hotkey() -> String {
+    "F10".into()
+}
+
+/// Minimum/maximum for `HighlightConfig::buffer_seconds`, enforced by the
+/// settings UI (not by `Config` itself, same convention as `EncodeConfig`'s
+/// `manual_bitrate_mbps` clamp living in `bitrate_mode()` rather than here).
+pub const HIGHLIGHT_BUFFER_SECONDS_MIN: u32 = 30;
+pub const HIGHLIGHT_BUFFER_SECONDS_MAX: u32 = 300;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HighlightConfig {
+    pub enabled: bool,
+    /// How much of the buffer to save on the Highlight hotkey — clamped to
+    /// `[HIGHLIGHT_BUFFER_SECONDS_MIN, HIGHLIGHT_BUFFER_SECONDS_MAX]` by the
+    /// settings UI, not enforced here (same convention as the rest of this
+    /// file's numeric settings).
+    pub buffer_seconds: u32,
+}
+
+impl Default for HighlightConfig {
+    fn default() -> Self {
+        Self { enabled: false, buffer_seconds: 120 }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -90,6 +127,7 @@ impl Default for Config {
                 start_stop: "F9".into(),
                 pause: "F8".into(),
                 toggle_overlay: "F7".into(),
+                save_highlight: default_save_highlight_hotkey(),
             },
             overlay: OverlayConfig {
                 enabled: false,
@@ -105,6 +143,7 @@ impl Default for Config {
                 manual_bitrate_mbps: 12,
             },
             language: "en".into(),
+            highlight: HighlightConfig::default(),
         }
     }
 }
@@ -156,6 +195,50 @@ mod tests {
         assert_eq!(c.encode.codec, "h265");
         assert_eq!(c.encode.fps, 60);
         assert!(!c.overlay.enabled);
+        assert!(!c.highlight.enabled, "Highlight buffering should be opt-in");
+        assert_eq!(c.highlight.buffer_seconds, 120);
+        assert_eq!(c.hotkeys.save_highlight, "F10");
+    }
+
+    #[test]
+    fn highlight_settings_round_trip_toml_with_non_default_values() {
+        let original = Config {
+            highlight: HighlightConfig { enabled: true, buffer_seconds: 90 },
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.highlight, original.highlight);
+        assert!(parsed.highlight.enabled);
+        assert_eq!(parsed.highlight.buffer_seconds, 90);
+    }
+
+    #[test]
+    fn highlight_and_save_highlight_hotkey_missing_from_toml_fall_back_to_defaults() {
+        // Simulates a config.toml saved before Highlight buffering existed.
+        let text = r#"
+            output_dir = "."
+            language = "en"
+            [hotkeys]
+            start_stop = "F9"
+            pause = "F8"
+            toggle_overlay = "F7"
+            [overlay]
+            enabled = false
+            opacity = 0.85
+            [encode]
+            codec = "h265"
+            fps = 60
+            resolution_mode = "native"
+            custom_width = 1920
+            custom_height = 1080
+            bitrate_mode = "auto"
+            manual_bitrate_mbps = 12
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert!(!parsed.highlight.enabled);
+        assert_eq!(parsed.highlight.buffer_seconds, 120);
+        assert_eq!(parsed.hotkeys.save_highlight, "F10");
     }
 
     #[test]

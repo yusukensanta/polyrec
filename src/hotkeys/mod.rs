@@ -29,6 +29,7 @@ pub enum HotkeyEvent {
     StartStop,
     Pause,
     ToggleOverlay,
+    SaveHighlight,
 }
 
 pub struct HotkeyListener {
@@ -48,10 +49,11 @@ impl HotkeyListener {
     /// doesn't poll for work on its own -- it blocks in `GetMessageW` between
     /// real window events and explicit repaint requests). Callers must pass
     /// something equivalent to `egui::Context::request_repaint`.
-    pub fn spawn(start_stop: &str, pause: &str, toggle_overlay: &str, wake: impl Fn() + Send + 'static) -> Self {
+    pub fn spawn(start_stop: &str, pause: &str, toggle_overlay: &str, save_highlight: &str, wake: impl Fn() + Send + 'static) -> Self {
         let start_stop_hk = parse_hotkey(start_stop);
         let pause_hk = parse_hotkey(pause);
         let toggle_overlay_hk = parse_hotkey(toggle_overlay);
+        let save_highlight_hk = parse_hotkey(save_highlight);
 
         let (event_tx, event_rx) = mpsc::channel::<HotkeyEvent>();
         let (id_tx, id_rx) = mpsc::channel::<u32>();
@@ -65,7 +67,7 @@ impl HotkeyListener {
                 let _ = PeekMessageW(&mut dummy, None, 0, 0, PM_NOREMOVE);
             }
             id_tx.send(tid).ok();
-            run_hook_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk, Box::new(wake));
+            run_hook_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk, save_highlight_hk, Box::new(wake));
         });
 
         let thread_id = id_rx.recv().expect("hotkey thread panicked before sending thread ID");
@@ -332,6 +334,7 @@ fn run_hook_loop(
     start_stop_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     pause_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     toggle_overlay_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
+    save_highlight_hk: Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)>,
     wake: Box<dyn Fn() + Send>,
 ) {
     let mut bindings = Vec::new();
@@ -343,6 +346,9 @@ fn run_hook_loop(
     }
     if let Some((vk, mods)) = toggle_overlay_hk {
         bindings.push(Binding { vk, mods, event: HotkeyEvent::ToggleOverlay });
+    }
+    if let Some((vk, mods)) = save_highlight_hk {
+        bindings.push(Binding { vk, mods, event: HotkeyEvent::SaveHighlight });
     }
 
     HOOK_CTX.with(|ctx| {

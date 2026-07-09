@@ -4,6 +4,7 @@ mod capture;
 mod config;
 mod disk_space;
 mod encode;
+mod highlight;
 mod hotkeys;
 mod i18n;
 mod error;

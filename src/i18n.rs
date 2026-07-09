@@ -122,6 +122,7 @@ pub struct Strings {
     pub hotkey_start_stop_header: &'static str,
     pub hotkey_pause_header: &'static str,
     pub hotkey_overlay_header: &'static str,
+    pub hotkey_save_highlight_header: &'static str,
     pub hotkey_collision_warning: &'static str,
     pub hotkey_change_button: &'static str,
     pub hotkey_press_any_key_prompt: &'static str,
@@ -148,6 +149,18 @@ pub struct Strings {
     pub please_wait: &'static str,
     pub export_complete_header: &'static str,
     pub export_failed_header: &'static str,
+
+    // Highlight buffer -- Quality popup settings section, status indicator
+    pub highlight_header: &'static str,
+    pub highlight_enabled_label: &'static str,
+    pub tooltip_highlight_enabled: &'static str,
+    pub highlight_buffer_seconds_label: &'static str,
+    pub highlight_status_active: &'static str,
+    pub highlight_save_not_active: &'static str,
+    pub highlight_saving_label: &'static str,
+    pub highlight_saved_prefix: &'static str,
+    pub highlight_save_failed_prefix: &'static str,
+    pub highlight_disk_full_message: &'static str,
 }
 
 pub static EN: Strings = Strings {
@@ -211,6 +224,7 @@ pub static EN: Strings = Strings {
     hotkey_start_stop_header: "START / STOP RECORDING",
     hotkey_pause_header: "PAUSE / RESUME",
     hotkey_overlay_header: "TOGGLE OVERLAY",
+    hotkey_save_highlight_header: "SAVE HIGHLIGHT",
     hotkey_collision_warning: "⚠ Two actions share the same key — only one will respond.",
     hotkey_change_button: "Change",
     hotkey_press_any_key_prompt: "Press any key (Ctrl/Alt/Shift optional)…",
@@ -232,6 +246,17 @@ pub static EN: Strings = Strings {
     please_wait: "Please wait…",
     export_complete_header: "EXPORT COMPLETE",
     export_failed_header: "EXPORT FAILED",
+
+    highlight_header: "HIGHLIGHT",
+    highlight_enabled_label: "✨ Enable Highlight buffer",
+    tooltip_highlight_enabled: "Continuously captures the foreground app in the background. Press the Save Highlight hotkey any time to save the last few seconds/minutes to a file — no need to have pressed record beforehand.",
+    highlight_buffer_seconds_label: "Buffer length (seconds):",
+    highlight_status_active: "● Highlight buffering",
+    highlight_save_not_active: "Highlight buffering isn't active — enable it in Quality settings first.",
+    highlight_saving_label: "Saving highlight…",
+    highlight_saved_prefix: "Highlight saved: ",
+    highlight_save_failed_prefix: "Highlight save failed: ",
+    highlight_disk_full_message: "Highlight buffering stopped automatically — your disk ran low on free space (below 500 MB).",
 };
 
 pub static JA: Strings = Strings {
@@ -295,6 +320,7 @@ pub static JA: Strings = Strings {
     hotkey_start_stop_header: "録画の開始/停止",
     hotkey_pause_header: "一時停止/再開",
     hotkey_overlay_header: "オーバーレイ切替",
+    hotkey_save_highlight_header: "ハイライトを保存",
     hotkey_collision_warning: "⚠ 2つの操作が同じキーに割り当てられています。片方のみ動作します。",
     hotkey_change_button: "変更",
     hotkey_press_any_key_prompt: "何かキーを押してください（Ctrl/Alt/Shiftとの組み合わせも可）…",
@@ -316,6 +342,17 @@ pub static JA: Strings = Strings {
     please_wait: "お待ちください…",
     export_complete_header: "エクスポート完了",
     export_failed_header: "エクスポート失敗",
+
+    highlight_header: "ハイライト",
+    highlight_enabled_label: "✨ ハイライトバッファを有効にする",
+    tooltip_highlight_enabled: "フォアグラウンドのアプリをバックグラウンドで常時録画します。ハイライト保存のショートカットを押すと、事前に録画を開始していなくても直近の数秒〜数分をファイルに保存できます。",
+    highlight_buffer_seconds_label: "バッファ長（秒）:",
+    highlight_status_active: "● ハイライト録画中",
+    highlight_save_not_active: "ハイライトバッファが有効になっていません。まず画質設定で有効にしてください。",
+    highlight_saving_label: "ハイライトを保存中…",
+    highlight_saved_prefix: "ハイライトを保存しました: ",
+    highlight_save_failed_prefix: "ハイライトの保存に失敗しました: ",
+    highlight_disk_full_message: "空き容量が不足したため、ハイライトバッファを自動停止しました（500MB未満）。",
 };
 
 #[cfg(test)]
@@ -350,6 +387,9 @@ mod tests {
             assert!(!strings.close_button.is_empty());
             assert!(!strings.hotkey_collision_warning.is_empty());
             assert!(!strings.export_failed_header.is_empty());
+            assert!(!strings.highlight_header.is_empty());
+            assert!(!strings.highlight_enabled_label.is_empty());
+            assert!(!strings.hotkey_save_highlight_header.is_empty());
         }
     }
 }
