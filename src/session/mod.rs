@@ -354,6 +354,19 @@ impl SessionManager {
     ) -> Result<(), AppError> {
         let segment_dir = highlight_segment_dir(output_dir);
         std::fs::create_dir_all(&segment_dir)?;
+        // Each call starts a brand-new, empty tracking deque -- any files
+        // left over from a *previous* buffering session (e.g. one that was
+        // paused via `stop_highlight_buffering(false)` for a manual
+        // recording, rather than stopped-and-discarded) would otherwise sit
+        // in this directory forever: untracked by the new deque, so never
+        // eligible for eviction or inclusion in a future save. Found via a
+        // real pause/resume run, not by inspection -- clear the directory
+        // instead of orphaning it.
+        if let Ok(entries) = std::fs::read_dir(&segment_dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
 
         let free = crate::disk_space::free_bytes(&segment_dir)?;
         if free < crate::disk_space::MIN_FREE_BYTES {
@@ -492,8 +505,14 @@ impl SessionManager {
     /// Stops Highlight buffering. `discard` deletes every segment file on
     /// disk (used when the setting is disabled, or the foreground window
     /// changed to one with a different resolution -- see lifecycle rule 2);
-    /// pass `false` to keep segments around (e.g. briefly pausing buffering
-    /// so a manual recording can start, per lifecycle rule 3).
+    /// pass `false` to leave files in place without waiting for the actor to
+    /// exit (e.g. briefly pausing buffering so a manual recording can start,
+    /// per lifecycle rule 3) -- purely a "don't bother deleting them right
+    /// now" optimization, not a promise they'll be usable later:
+    /// `start_highlight_buffering` clears any leftover files from a prior
+    /// session as soon as it (re)starts, so buffering effectively begins
+    /// fresh each time, whether resuming after a pause or following a
+    /// different window.
     ///
     /// `discard: false` doesn't wait for the background actor thread to
     /// exit -- its segments are already durable files on disk, unlike manual
@@ -1062,5 +1081,61 @@ mod tests {
             !segment_dir.exists() || std::fs::read_dir(&segment_dir).unwrap().count() == 0,
             "segment files should be gone after stop_highlight_buffering(discard: true)"
         );
+    }
+
+    /// Regression test for a real bug caught via a live manual run: pausing
+    /// Highlight buffering with `stop_highlight_buffering(false)` (e.g. so a
+    /// manual recording can start) then resuming with a fresh
+    /// `start_highlight_buffering` call used to leave the *previous*
+    /// session's segment files sitting in the segment directory forever --
+    /// untracked by the new session's empty deque, so never eligible for
+    /// eviction or cleanup. `start_highlight_buffering` now clears any
+    /// leftover files from a prior session as soon as it (re)starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn pausing_then_resuming_highlight_buffering_does_not_orphan_segment_files() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+
+        let sources = enumerate_sources();
+        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+
+        let dir = tempfile::tempdir().unwrap();
+        let segment_dir = dir.path().join("polyrec").join("_highlight_buffer");
+        let mut sm = SessionManager::new();
+
+        sm.start_highlight_buffering(&source, audio_devices.clone(), false, dir.path(), EncodeSettings::default(), 30)
+            .expect("first start_highlight_buffering failed");
+        tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+        let files_before_pause = std::fs::read_dir(&segment_dir).unwrap().count();
+        assert!(files_before_pause > 0, "expected at least one segment file before pausing");
+
+        // Pause (discard: false) -- as `refresh_highlight_buffering` does
+        // right before a manual recording starts.
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(false));
+        assert!(!sm.is_highlighting());
+        let files_immediately_after_pause = std::fs::read_dir(&segment_dir).unwrap().count();
+        assert_eq!(
+            files_immediately_after_pause, files_before_pause,
+            "pausing (discard: false) must not delete anything by itself"
+        );
+
+        // Resume -- as `refresh_highlight_buffering` does right after a
+        // manual recording stops.
+        sm.start_highlight_buffering(&source, audio_devices, false, dir.path(), EncodeSettings::default(), 30)
+            .expect("resumed start_highlight_buffering failed");
+
+        // The pre-pause files must be gone immediately on resume, not just
+        // eventually -- they're never tracked by the new session's deque, so
+        // nothing else will ever clean them up.
+        let files_right_after_resume: Vec<_> = std::fs::read_dir(&segment_dir).unwrap().collect();
+        assert!(
+            files_right_after_resume.len() <= 1,
+            "expected the pre-pause segments to be cleared on resume (at most the brand-new in-progress one), found {}",
+            files_right_after_resume.len()
+        );
+
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true));
     }
 }

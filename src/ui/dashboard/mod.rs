@@ -1397,9 +1397,13 @@ impl App {
 
         // Highlight buffering and manual recording never run at once --
         // doubling GPU/encode load for no benefit while the thing the user
-        // actually pressed record for is what matters. Segments already on
-        // disk survive the pause; Save Highlight still works right after
-        // stopping the manual recording.
+        // actually pressed record for is what matters. `discard: false` here
+        // (not `true`) is just about not wastefully deleting files that are
+        // about to get cleaned up anyway the moment buffering resumes for
+        // whatever's foreground once the recording stops (see
+        // `start_highlight_buffering`'s stale-file cleanup) -- buffering
+        // effectively restarts fresh after a manual recording, it does not
+        // carry the pre-recording buffer forward.
         if self.session.is_recording() || self.session.is_paused() {
             if self.session.is_highlighting() {
                 self.session.stop_highlight_buffering(false);
