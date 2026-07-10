@@ -95,6 +95,10 @@ pub struct App {
     session: SessionManager,
     sources: Vec<CaptureSource>,
     selected_source: Option<usize>,
+    /// Live text from the source-panel search box -- filters `sources` by
+    /// window title or exe name at render time (see `render_source_panel`),
+    /// never mutates `sources` itself.
+    source_filter: String,
     audio_devices: Vec<AudioDevice>,
     selected_audio: Vec<bool>,
     app_audio_only: bool,
@@ -189,6 +193,7 @@ impl App {
             session: SessionManager::new(),
             sources: enumerate_sources(),
             selected_source: None,
+            source_filter: String::new(),
             audio_devices,
             selected_audio,
             app_audio_only,
@@ -427,6 +432,14 @@ impl App {
             .size_range(200.0..=380.0)
             .show(ui, |ui| {
                 section_header(ui, s.capture_source_header);
+
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.source_filter)
+                        .hint_text(s.source_filter_placeholder)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+
                 if self.sources.is_empty() {
                     ui.label(
                         egui::RichText::new(s.no_windows_found)
@@ -434,10 +447,43 @@ impl App {
                             .color(TEXT_MUTED),
                     );
                 }
+
+                // Filters by index rather than cloning matches -- source_icon_textures
+                // and selected_source are both keyed by index into self.sources, so
+                // the real (unfiltered) indices need to survive filtering.
+                let filter = self.source_filter.to_lowercase();
+                let filtered_indices: Vec<usize> = self
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, src)| {
+                        filter.is_empty()
+                            || src.window_title.to_lowercase().contains(&filter)
+                            || src.exe_name.to_lowercase().contains(&filter)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if !self.sources.is_empty() && filtered_indices.is_empty() {
+                    ui.label(
+                        egui::RichText::new(s.no_matching_windows)
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                }
+
+                // Fixed cap (not "all remaining panel height") -- the Audio
+                // device section below is rendered after this ScrollArea in
+                // the same non-scrolling panel layout, so claiming every
+                // last pixel of available height here left it pushed below
+                // the panel's visible area (reads as the source list
+                // "overlapping" the audio section) whenever there were
+                // enough source cards to fill it.
                 egui::ScrollArea::vertical()
-                    .max_height(ui.available_height().max(120.0))
+                    .max_height(280.0)
+                    .id_salt("source_list_scroll")
                     .show(ui, |ui| {
-                        for (i, source) in self.sources.iter().enumerate() {
+                        for &i in &filtered_indices {
+                            let source = &self.sources[i];
                             let selected = self.selected_source == Some(i);
                             // The card's size depends on its content (title/exe_name
                             // wrapping), so its Response -- and hover state -- isn't
@@ -527,12 +573,21 @@ impl App {
                             .color(TEXT_MUTED),
                     );
                 }
-                for (i, dev) in self.audio_devices.iter().enumerate() {
-                    ui.checkbox(
-                        &mut self.selected_audio[i],
-                        format!("{} {}", audio_device_icon(dev), dev.name),
-                    );
-                }
+                // Bounded like the source list above -- a machine with many
+                // audio devices (virtual cables, multiple interfaces) could
+                // otherwise reintroduce the same "pushes the rest of the
+                // panel out of view" problem the source list had.
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .id_salt("audio_device_scroll")
+                    .show(ui, |ui| {
+                        for (i, dev) in self.audio_devices.iter().enumerate() {
+                            ui.checkbox(
+                                &mut self.selected_audio[i],
+                                format!("{} {}", audio_device_icon(dev), dev.name),
+                            );
+                        }
+                    });
 
                 let loopback_selected = self
                     .audio_devices
@@ -972,8 +1027,18 @@ impl App {
         egui::Window::new(s.quality_title)
             .collapsible(false)
             .resizable(false)
+            // Explicit width instead of relying on auto-sizing -- an
+            // unconstrained floating Window's content area is effectively as
+            // wide as the whole app window, and section_header's separator
+            // (which fills "available width") would stretch the Grid/Window
+            // out to match it otherwise.
+            .default_width(320.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
+                // Caps the popup's height below a typical app window's, so a
+                // short window (or more settings added later) scrolls instead
+                // of forcing the popup taller than its parent.
+                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
                 section_header(ui, s.fps_header);
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.config.encode.fps, 30, "30");
@@ -1036,6 +1101,7 @@ impl App {
                         );
                     });
                 }
+                }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
                 if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
