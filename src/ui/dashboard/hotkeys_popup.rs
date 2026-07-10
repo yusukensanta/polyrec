@@ -80,8 +80,19 @@ impl App {
         egui::Window::new(s.hotkeys_title)
             .collapsible(false)
             .resizable(false)
+            // Explicit width instead of relying on auto-sizing -- the Grid
+            // below computes its column width from the widest cell, and
+            // section_header's separator (which fills "available width")
+            // would otherwise stretch the Grid -- and the whole Window -- out
+            // to the full app window's width, since an unconstrained floating
+            // Window's content area has no real upper bound of its own.
+            .default_width(320.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
+                // Caps the popup's height below a typical app window's, so a
+                // short window (or a future 5th/6th hotkey row) scrolls
+                // instead of forcing the popup taller than its parent.
+                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
                 // Grid (not four independent ui.horizontal calls) so the
                 // current-binding label and Change button land in the same
                 // two columns across all four rows structurally -- previously
@@ -120,6 +131,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(warning).size(TEXT_CAPTION).color(ACCENT_PAUSE));
                 }
+                }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
                 if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {

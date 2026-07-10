@@ -81,6 +81,10 @@ pub struct Strings {
     // Left panel — source list / audio
     pub capture_source_header: &'static str,
     pub no_windows_found: &'static str,
+    pub source_filter_placeholder: &'static str,
+    /// Shown when the search box's filter matches nothing, distinct from
+    /// `no_windows_found` (no capturable windows exist at all).
+    pub no_matching_windows: &'static str,
     pub audio_header: &'static str,
     pub no_audio_devices: &'static str,
     pub app_audio_only_label: &'static str,
@@ -209,7 +213,9 @@ pub static EN: Strings = Strings {
     update_blocked_while_recording: "Can't update while a recording or Highlight buffering is in progress — stop it first.",
 
     capture_source_header: "CAPTURE SOURCE",
-    no_windows_found: "No visible windows found — try Refresh.",
+    no_windows_found: "No visible windows found.",
+    source_filter_placeholder: "Search windows or apps...",
+    no_matching_windows: "No windows match your search.",
     audio_header: "AUDIO",
     no_audio_devices: "No audio devices found.",
     app_audio_only_label: "🎯 App audio only (exclude other system sounds)",
@@ -324,7 +330,9 @@ pub static JA: Strings = Strings {
     update_blocked_while_recording: "録画中またはハイライトバッファ動作中は更新できません。先に停止してください。",
 
     capture_source_header: "キャプチャ ソース",
-    no_windows_found: "表示中のウィンドウが見つかりません。更新をお試しください。",
+    no_windows_found: "表示中のウィンドウが見つかりません。",
+    source_filter_placeholder: "ウィンドウやアプリを検索...",
+    no_matching_windows: "検索に一致するウィンドウがありません。",
     audio_header: "オーディオ",
     no_audio_devices: "オーディオデバイスが見つかりません。",
     app_audio_only_label: "🎯 このアプリの音声のみ（他のシステム音を除外）",
