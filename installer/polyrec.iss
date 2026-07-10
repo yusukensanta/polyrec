@@ -39,8 +39,10 @@ ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 LicenseFile=..\LICENSE
-; Unsigned binary -- see SECURITY.md's "out of scope" note on SmartScreen warnings.
-; Nothing in this script can suppress that; only a real code-signing cert would.
+; Both this installer and the polyrec.exe it bundles are Authenticode-signed
+; in CI (release.yml, via SignPath Foundation's free OSS code signing) --
+; still expect a SmartScreen warning until the cert/binary build up enough
+; download reputation over time, see SECURITY.md.
 ; Supports the in-app self-updater (src/self_update.rs): it launches this
 ; installer silently while PolyRec is (about to be) still running, so the
 ; installer needs to be able to close/reopen it around the file replace
