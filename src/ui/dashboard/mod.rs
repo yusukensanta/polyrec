@@ -1001,6 +1001,14 @@ impl App {
                     ui.selectable_value(&mut self.config.encode.codec, "h265".into(), "H265");
                 });
 
+                section_header(ui, s.encoder_mode_header);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.config.encode.encoder_mode, "hardware".into(), s.encoder_mode_hardware)
+                        .on_hover_text(s.encoder_mode_hardware_tooltip);
+                    ui.selectable_value(&mut self.config.encode.encoder_mode, "software".into(), s.encoder_mode_software)
+                        .on_hover_text(s.encoder_mode_software_tooltip);
+                });
+
                 section_header(ui, s.resolution_header);
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), s.resolution_native);
@@ -1563,6 +1571,7 @@ impl App {
             fps: self.config.encode.fps,
             resolution_mode: self.config.encode.resolution_mode(),
             bitrate_mode: self.config.encode.bitrate_mode(),
+            encoder_mode: self.config.encode.encoder_mode(),
         };
         // Only transition to the Recording state once start_capture actually
         // succeeds -- otherwise a disk-full refusal would leave the UI showing
@@ -1670,6 +1679,7 @@ impl App {
             fps: self.config.encode.fps,
             resolution_mode: self.config.encode.resolution_mode(),
             bitrate_mode: self.config.encode.bitrate_mode(),
+            encoder_mode: self.config.encode.encoder_mode(),
         };
         let buffer_seconds = self.config.highlight.buffer_seconds.clamp(
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN,

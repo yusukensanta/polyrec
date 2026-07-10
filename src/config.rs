@@ -88,6 +88,18 @@ pub struct EncodeConfig {
     pub bitrate_mode: String,
     /// Only read when `bitrate_mode == "manual"`.
     pub manual_bitrate_mbps: u32,
+    /// "hardware" (default, uses a GPU encoder like NVENC/QSV/AMF when one's
+    /// available) | "software" (forces Media Foundation's built-in software
+    /// H264/HEVC encoder -- frees up the GPU at the cost of higher CPU use,
+    /// useful while a demanding game/app is running). `#[serde(default)]` so
+    /// a `config.toml` saved before this field existed still loads instead
+    /// of failing (falls back to "hardware", today's behavior).
+    #[serde(default = "default_encoder_mode")]
+    pub encoder_mode: String,
+}
+
+fn default_encoder_mode() -> String {
+    "hardware".into()
 }
 
 /// Resolved form of `EncodeConfig::resolution_mode` — see `EncodeConfig::resolution_mode()`.
@@ -110,6 +122,17 @@ pub enum BitrateMode {
     Manual(u32),
 }
 
+/// Resolved form of `EncodeConfig::encoder_mode` — see `EncodeConfig::encoder_mode()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderMode {
+    /// Prefer a GPU hardware encoder (NVENC/QSV/AMF) when one's available --
+    /// Media Foundation falls back to software transparently if not.
+    Hardware,
+    /// Force Media Foundation's built-in software encoder, bypassing any
+    /// hardware transform even if one's available.
+    Software,
+}
+
 impl EncodeConfig {
     pub fn resolution_mode(&self) -> ResolutionMode {
         match self.resolution_mode.as_str() {
@@ -126,6 +149,13 @@ impl EncodeConfig {
         match self.bitrate_mode.as_str() {
             "manual" => BitrateMode::Manual(self.manual_bitrate_mbps.clamp(1, 100) * 1_000_000),
             _ => BitrateMode::Auto,
+        }
+    }
+
+    pub fn encoder_mode(&self) -> EncoderMode {
+        match self.encoder_mode.as_str() {
+            "software" => EncoderMode::Software,
+            _ => EncoderMode::Hardware,
         }
     }
 }
@@ -152,6 +182,7 @@ impl Default for Config {
                 custom_height: 1080,
                 bitrate_mode: "auto".into(),
                 manual_bitrate_mbps: 12,
+                encoder_mode: "hardware".into(),
             },
             language: "en".into(),
             highlight: HighlightConfig::default(),
@@ -355,6 +386,22 @@ mod tests {
     }
 
     #[test]
+    fn encoder_mode_parses_known_strings() {
+        let mut c = Config::default();
+        c.encode.encoder_mode = "hardware".into();
+        assert!(matches!(c.encode.encoder_mode(), EncoderMode::Hardware));
+        c.encode.encoder_mode = "software".into();
+        assert!(matches!(c.encode.encoder_mode(), EncoderMode::Software));
+    }
+
+    #[test]
+    fn encoder_mode_unknown_string_falls_back_to_hardware() {
+        let mut c = Config::default();
+        c.encode.encoder_mode = "not-a-real-mode".into();
+        assert!(matches!(c.encode.encoder_mode(), EncoderMode::Hardware));
+    }
+
+    #[test]
     fn default_app_audio_only_is_true() {
         assert!(Config::default().default_app_audio_only);
     }
@@ -383,6 +430,9 @@ mod tests {
         "#;
         let parsed: Config = toml::from_str(text).unwrap();
         assert!(parsed.default_app_audio_only);
+        // Also confirms encoder_mode -- likewise absent from this pre-existing
+        // TOML -- falls back to "hardware" instead of failing to parse.
+        assert!(matches!(parsed.encode.encoder_mode(), EncoderMode::Hardware));
     }
 
     #[test]

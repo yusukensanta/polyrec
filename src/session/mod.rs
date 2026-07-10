@@ -5,7 +5,7 @@ use crate::capture::audio::{
     run_audio_capture, run_process_loopback_capture, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
 };
 use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
-use crate::config::{BitrateMode, ResolutionMode};
+use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::highlight_export;
 use crate::encode::writer::video_bitrate_bps;
@@ -33,6 +33,7 @@ pub struct EncodeSettings {
     pub fps: u32,
     pub resolution_mode: ResolutionMode,
     pub bitrate_mode: BitrateMode,
+    pub encoder_mode: EncoderMode,
 }
 
 impl Default for EncodeSettings {
@@ -40,11 +41,13 @@ impl Default for EncodeSettings {
         let d = crate::config::Config::default().encode;
         let resolution_mode = d.resolution_mode();
         let bitrate_mode = d.bitrate_mode();
+        let encoder_mode = d.encoder_mode();
         Self {
             codec: d.codec,
             fps: d.fps,
             resolution_mode,
             bitrate_mode,
+            encoder_mode,
         }
     }
 }
@@ -210,6 +213,7 @@ impl SessionManager {
             bitrate_bps,
             audio_specs,
             Arc::clone(&disk_full_flag),
+            matches!(encode.encoder_mode, EncoderMode::Hardware),
         );
 
         // Spawn video capture + pump
@@ -428,6 +432,7 @@ impl SessionManager {
             max_segments,
             Arc::clone(&segments),
             Arc::clone(&disk_full_flag),
+            matches!(encode.encoder_mode, EncoderMode::Hardware),
         );
 
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
