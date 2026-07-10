@@ -54,6 +54,16 @@ pub fn query_capture_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
 /// resolution-regression fix: forcing this by default caused nearest-neighbor
 /// upscale artifacts combined with an under-provisioned bitrate).
 pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
+    let rect = query_monitor_rect(hwnd)?;
+    let w = (rect.right - rect.left) as u32;
+    let h = (rect.bottom - rect.top) as u32;
+    Ok((w, h))
+}
+
+/// Full bounds (not just size) of the monitor nearest `hwnd` -- used by the
+/// overlay HUD to position itself on whichever monitor the recorded window
+/// is actually on, instead of assuming the primary display.
+pub fn query_monitor_rect(hwnd: HWND) -> Result<windows::Win32::Foundation::RECT, AppError> {
     unsafe {
         let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
@@ -63,9 +73,7 @@ pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
         if !GetMonitorInfoW(hmonitor, &mut info).as_bool() {
             return Err(AppError::Capture("GetMonitorInfoW failed".into()));
         }
-        let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
-        let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
-        Ok((w, h))
+        Ok(info.rcMonitor)
     }
 }
 
