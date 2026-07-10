@@ -17,7 +17,7 @@ Grab the latest release from the [Releases page](https://github.com/yusukensanta
 - **`polyrec-vX.Y.Z-windows-x64-setup.exe`** — a normal installer. Double-click, click through the wizard, get a Start Menu shortcut and an Add/Remove Programs entry. Recommended if you just want to install it like any other app.
 - **`polyrec-vX.Y.Z-windows-x64.zip`** — portable, no installer: unzip and run `polyrec.exe` directly. Nothing is written outside the folder you unzip it to.
 
-Either way, the app checks for newer releases on launch and shows a banner in the menu bar if one's available (click it to open the release page; nothing downloads or installs automatically).
+Either way, the app checks for newer releases on launch and shows a banner if one's available. Clicking it opens an "Update Now" / "Not Now" confirmation (with a separate link to view release notes without updating) — choosing **Update Now** downloads the release, verifies its SHA256 against the published `SHA256SUMS.txt`, then either swaps the running exe in place (portable) or silently re-launches the installer (installed, triggering the usual UAC prompt). Nothing downloads or installs without that confirmation.
 
 The installer is unsigned (no code-signing certificate), so Windows SmartScreen will show an "Unknown Publisher" warning on first run — click **More info → Run anyway**. See [SECURITY.md](SECURITY.md) for why, and the verification steps below if you want independent confirmation of what you're running instead of just trusting the warning-click.
 
@@ -46,10 +46,12 @@ Releases are also immutable once published — assets can't be silently replaced
 - **Multi-track audio** — record system loopback (Speakers) and microphone as independent tracks. Loopback is selected by default so the common case is one clean, unambiguous track; check Microphone to add a second.
 - **App audio only** — scope loopback capture to just the selected app's process via the Windows Process Loopback Capture API, instead of the full desktop mix.
 - **Pause / resume** without cutting the recording.
-- **Global hotkeys** — start/stop, pause, and toggle the on-screen overlay from anywhere, rebindable from the in-app **⌨ Hotkeys** popup (F9 / F8 / F7 by default). Pressing start/stop while some other window has focus records *that* window, not whatever's selected in the list.
-- **Quality settings** (**⚙ Quality**) — FPS (30/60), codec (H265 with automatic fallback to H264 if your machine lacks an HEVC encoder, or H264 directly), resolution mode, and bitrate (auto-calculated from resolution×fps, or a manual Mbps override).
+- **Global hotkeys** — start/stop, pause, toggle the on-screen overlay, and save a Highlight clip from anywhere, rebindable from the in-app **⌨ Hotkeys** popup (F9 / F8 / F7 / F10 by default). Pressing start/stop while some other window has focus records *that* window, not whatever's selected in the list.
+- **Highlight** — an optional rolling background buffer (30–300s, configurable) that keeps recording even when you're not; hit the save-highlight hotkey to export the last N seconds without having started a manual recording.
+- **Quality settings** (**⚙ Quality**) — FPS (30/60), codec (H265 with automatic fallback to H264 if your machine lacks an HEVC encoder, or H264 directly), resolution mode, bitrate (auto-calculated from resolution×fps, or a manual Mbps override), and encoder mode (hardware GPU encoder by default, or software to free up the GPU).
 - **Export** — remux the recording with only the audio tracks you want, no re-encoding.
-- **Update check** — compares your version against the latest GitHub release on launch; no auto-download.
+- **Update check** — compares your version against the latest GitHub release on launch and offers an in-app, checksum-verified self-update.
+- **English / 日本語** — UI language toggle, persisted in config.
 
 ## Requirements
 
