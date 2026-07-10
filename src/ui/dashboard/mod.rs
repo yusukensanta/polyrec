@@ -1310,6 +1310,14 @@ impl App {
         if self.finalizing_handle.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Without this, a Highlight save that finishes in the background
+        // between frames never gets picked up by poll_highlight_save_result
+        // until something else happens to wake the UI (e.g. another
+        // keypress) -- looking like the save silently did nothing on its
+        // first press.
+        if matches!(self.highlight_save_state, HighlightSaveState::Saving) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 }
 
