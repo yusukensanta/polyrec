@@ -163,42 +163,11 @@ impl SessionManager {
             .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
             .collect();
 
-        // Query the size Windows.Graphics.Capture will actually deliver frames at —
-        // NOT GetClientRect, which excludes the title bar/borders and doesn't match
-        // WGC's window capture size. Used to size the capture-side staging texture;
-        // does NOT need to match the encoder (frames are scaled to output_width/height
-        // below), only itself internally (frame pool vs. staging texture).
         let real_hwnd = windows::Win32::Foundation::HWND(
             source.hwnd as *mut core::ffi::c_void,
         );
-        let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
-            Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
-            Err(e) => {
-                tracing::warn!("query_capture_size failed for hwnd {:x}: {e}; using 1920x1080", source.hwnd);
-                (1920u32, 1080u32)
-            }
-        };
-
-        // Only query the display when the user explicitly asked for it — this is not
-        // the default (see the resolution-regression fix). No wasted syscall otherwise.
-        let display_size = if matches!(encode.resolution_mode, ResolutionMode::Display) {
-            match query_display_size(real_hwnd) {
-                Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
-                Err(e) => {
-                    tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", source.hwnd);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let (output_width, output_height) =
-            resolve_output_size(&encode.resolution_mode, (capture_width, capture_height), display_size);
-
-        let bitrate_bps = match encode.bitrate_mode {
-            BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
-            BitrateMode::Manual(bps) => bps,
-        };
+        let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
+            resolve_capture_and_output_dimensions(real_hwnd, source.hwnd, &encode);
 
         // Spawn RecordingActor
         let disk_full_flag = Arc::new(AtomicBool::new(false));
@@ -223,10 +192,13 @@ impl SessionManager {
         let video_pause = Arc::clone(&pause_flag);
         let video_stop = Arc::clone(&stop_flag);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("video capture runtime");
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("failed to build video capture runtime: {e}");
+                    return;
+                }
+            };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let hwnd = windows::Win32::Foundation::HWND(
@@ -255,10 +227,13 @@ impl SessionManager {
             let use_process_loopback = is_loopback && app_audio_only;
             let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("audio capture runtime");
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("failed to build audio capture runtime: {e}");
+                        return;
+                    }
+                };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
@@ -392,30 +367,8 @@ impl SessionManager {
             .collect();
 
         let real_hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
-        let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
-            Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
-            Err(e) => {
-                tracing::warn!("query_capture_size failed for hwnd {:x}: {e}; using 1920x1080", source.hwnd);
-                (1920u32, 1080u32)
-            }
-        };
-        let display_size = if matches!(encode.resolution_mode, ResolutionMode::Display) {
-            match query_display_size(real_hwnd) {
-                Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
-                Err(e) => {
-                    tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", source.hwnd);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let (output_width, output_height) =
-            resolve_output_size(&encode.resolution_mode, (capture_width, capture_height), display_size);
-        let bitrate_bps = match encode.bitrate_mode {
-            BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
-            BitrateMode::Manual(bps) => bps,
-        };
+        let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
+            resolve_capture_and_output_dimensions(real_hwnd, source.hwnd, &encode);
 
         let max_segments = buffer_seconds.max(1).div_ceil(HIGHLIGHT_SEGMENT_SECONDS).max(1) as usize;
         let segments: Arc<Mutex<VecDeque<SegmentInfo>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -441,10 +394,13 @@ impl SessionManager {
         let video_pause = Arc::clone(&pause_flag);
         let video_stop = Arc::clone(&stop_flag);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("highlight video capture runtime");
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("failed to build highlight video capture runtime: {e}");
+                    return;
+                }
+            };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
@@ -469,10 +425,13 @@ impl SessionManager {
             let use_process_loopback = is_loopback && app_audio_only;
             let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("highlight audio capture runtime");
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("failed to build highlight audio capture runtime: {e}");
+                        return;
+                    }
+                };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
@@ -679,6 +638,52 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
         .as_millis();
     let temp_path = polyrec_dir.join(format!("{app_name}_recording_{start_ts}.tmp.mp4"));
     (temp_path, polyrec_dir)
+}
+
+/// Resolves the capture-side staging size, encoder output size, and bitrate --
+/// shared by `start_capture` and `start_highlight_buffering`, which otherwise
+/// deliberately don't share their capture-thread setup (see
+/// `start_highlight_buffering`'s doc comment): this part runs before either
+/// spawns any capture threads and is pure query + math, so extracting it
+/// doesn't compromise that independence.
+///
+/// Queries the size Windows.Graphics.Capture will actually deliver frames at —
+/// NOT GetClientRect, which excludes the title bar/borders and doesn't match
+/// WGC's window capture size. Used to size the capture-side staging texture;
+/// does NOT need to match the encoder (frames are scaled to output_width/height),
+/// only itself internally (frame pool vs. staging texture). The display size is
+/// only queried when the resolution mode is `Display` — the non-default mode
+/// (see the resolution-regression fix) — to avoid a wasted syscall otherwise.
+fn resolve_capture_and_output_dimensions(
+    real_hwnd: windows::Win32::Foundation::HWND,
+    hwnd_val: usize,
+    encode: &EncodeSettings,
+) -> (u32, u32, u32, u32, u32) {
+    let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
+        Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
+        Err(e) => {
+            tracing::warn!("query_capture_size failed for hwnd {:x}: {e}; using 1920x1080", hwnd_val);
+            (1920u32, 1080u32)
+        }
+    };
+    let display_size = if matches!(encode.resolution_mode, ResolutionMode::Display) {
+        match query_display_size(real_hwnd) {
+            Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
+            Err(e) => {
+                tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", hwnd_val);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let (output_width, output_height) =
+        resolve_output_size(&encode.resolution_mode, (capture_width, capture_height), display_size);
+    let bitrate_bps = match encode.bitrate_mode {
+        BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
+        BitrateMode::Manual(bps) => bps,
+    };
+    (capture_width, capture_height, output_width, output_height, bitrate_bps)
 }
 
 /// Pure resolution-mode resolution — no I/O, so it's directly unit-testable without
