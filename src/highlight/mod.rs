@@ -68,6 +68,7 @@ pub fn spawn_highlight_actor(
     max_segments: usize,
     segments: Arc<Mutex<VecDeque<SegmentInfo>>>,
     disk_full_flag: Arc<AtomicBool>,
+    allow_hardware_encode: bool,
 ) -> (
     mpsc::Sender<RecordingCommand>,
     mpsc::UnboundedSender<SaveNowRequest>,
@@ -88,7 +89,7 @@ pub fn spawn_highlight_actor(
             let seg_path = segment_dir.join(format!("highlight_seg_{seg_id}.mp4"));
 
             let writer = RecordingWriter::new(
-                &seg_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, true,
+                &seg_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, allow_hardware_encode,
             )?;
             writer.begin_writing()?;
 
@@ -230,6 +231,7 @@ mod tests {
             3, // keep at most 3 segments
             Arc::clone(&segments),
             disk_full_flag,
+            false,
         );
 
         // Send frames spaced out past several 1s segment boundaries.
@@ -272,6 +274,7 @@ mod tests {
             10,
             Arc::clone(&segments),
             disk_full_flag,
+            false,
         );
         tx.send(RecordingCommand::WriteVideo(tiny_video_frame(Duration::ZERO))).await.unwrap();
         tx.send(RecordingCommand::Stop).await.unwrap();
@@ -301,6 +304,7 @@ mod tests {
             10,
             Arc::clone(&segments),
             disk_full_flag,
+            false,
         );
 
         tx.send(RecordingCommand::WriteVideo(tiny_video_frame(Duration::ZERO))).await.unwrap();

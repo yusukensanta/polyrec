@@ -39,6 +39,7 @@ pub fn spawn_recording_actor(
     bitrate_bps: u32,
     audio_device_specs: Vec<(u32, u16)>,
     disk_full_flag: Arc<AtomicBool>,
+    allow_hardware_encode: bool,
 ) -> (
     mpsc::Sender<RecordingCommand>,
     JoinHandle<Result<PathBuf, AppError>>,
@@ -46,7 +47,7 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, true)?;
+        let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, allow_hardware_encode)?;
         writer.begin_writing()?;
 
         let mut last_disk_check = Instant::now();
