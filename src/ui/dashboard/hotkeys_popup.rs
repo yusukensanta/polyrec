@@ -1,4 +1,4 @@
-use super::{accent_button, section_header, App, ACCENT_PAUSE, ACCENT_SECONDARY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY};
+use super::{accent_button, section_header, App, ACCENT_PAUSE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY};
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -86,7 +86,14 @@ impl App {
             // would otherwise stretch the Grid -- and the whole Window -- out
             // to the full app window's width, since an unconstrained floating
             // Window's content area has no real upper bound of its own.
-            .default_width(320.0)
+            // min/max pinned to the same value (shared with the Quality
+            // popup) so egui's Resize area can't widen permanently the first
+            // time the "press any key" prompt -- wider than any bound-key
+            // label -- gets measured; egui only ever grows a Window's
+            // remembered size to fit its widest frame, never shrinks it back.
+            .default_width(POPUP_WIDTH)
+            .min_width(POPUP_WIDTH)
+            .max_width(POPUP_WIDTH)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
@@ -181,7 +188,10 @@ impl App {
         }
         .clone();
         if self.recording_hotkey == Some(slot) {
-            ui.horizontal(|ui| {
+            // Stacked, not side-by-side -- the prompt string alone is close to
+            // the popup's full pinned width, so keeping "(Esc to cancel)" on
+            // the same line would overflow it rather than wrap.
+            ui.vertical(|ui| {
                 ui.label(
                     egui::RichText::new(s.hotkey_press_any_key_prompt)
                         .color(ACCENT_SECONDARY)

@@ -69,6 +69,15 @@ const SPACE_TIGHT: f32 = 4.0;
 /// Between distinct concepts/sections that aren't tightly related.
 const SPACE_NORMAL: f32 = 8.0;
 
+/// Fixed width shared by every modal popup (Quality, Hotkeys). One constant
+/// (not separate literals) is what guarantees they match; setting both
+/// `min_width` and `max_width` to it pins the Window so it can't grow --
+/// egui's Resize area auto-expands to whatever the widest content seen so
+/// far was and never shrinks back, so without this the Hotkeys popup would
+/// permanently widen the first time its longer "press any key" prompt
+/// rendered, and never return to `default_width` afterward.
+const POPUP_WIDTH: f32 = 320.0;
+
 enum ExportState {
     Idle,
     Running,
@@ -1031,8 +1040,11 @@ impl App {
             // unconstrained floating Window's content area is effectively as
             // wide as the whole app window, and section_header's separator
             // (which fills "available width") would stretch the Grid/Window
-            // out to match it otherwise.
-            .default_width(320.0)
+            // out to match it otherwise. min/max pinned to the same value so
+            // the Window can never grow or shrink away from it either.
+            .default_width(POPUP_WIDTH)
+            .min_width(POPUP_WIDTH)
+            .max_width(POPUP_WIDTH)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
