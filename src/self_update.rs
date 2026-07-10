@@ -113,14 +113,58 @@ async fn fetch_expected_sha256(version_tag: &str, filename: &str) -> Result<Stri
         .ok_or_else(|| AppError::Update(format!("no checksum entry for {filename} in SHA256SUMS.txt")))
 }
 
+#[derive(serde::Deserialize)]
+struct AttestationsResponse {
+    #[serde(default)]
+    attestations: Vec<serde::de::IgnoredAny>,
+}
+
+/// Confirms GitHub has a build-provenance attestation on file for this exact
+/// artifact (see `release.yml`'s "Attest build provenance" step, which runs
+/// unconditionally on every release regardless of SignPath's signing
+/// status) -- ties the downloaded bytes back to a specific GitHub Actions
+/// run/commit that produced them, on top of the `SHA256SUMS.txt` check in
+/// `download_and_verify`. An attacker able to replace both the release
+/// asset and `SHA256SUMS.txt` (the one scenario the checksum check alone
+/// can't catch) would also have to forge or delete this attestation record,
+/// which lives in GitHub's own attestation store rather than the release
+/// itself.
+///
+/// Deliberately advisory, not blocking: rejecting a real update every time
+/// this lookup has a network hiccup or GitHub API rate limit would be worse
+/// than the marginal coverage this check adds on top of the hash check
+/// above. Only logged, never returned as an error.
+async fn check_build_attestation(digest_hex: &str) {
+    let url = format!("https://api.github.com/repos/{REPO}/attestations/sha256:{digest_hex}");
+    let Ok(client) = http_client() else { return };
+    match client.get(&url).header("Accept", "application/vnd.github+json").send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<AttestationsResponse>().await {
+            Ok(parsed) if parsed.attestations.is_empty() => {
+                tracing::warn!(
+                    "no GitHub build-provenance attestation found for sha256:{digest_hex} -- proceeding on checksum verification alone"
+                );
+            }
+            Ok(_) => tracing::info!("build-provenance attestation confirmed for sha256:{digest_hex}"),
+            Err(e) => tracing::warn!("could not parse attestation lookup response: {e}"),
+        },
+        Ok(resp) => {
+            tracing::warn!("attestation lookup returned {}: proceeding on checksum verification alone", resp.status());
+        }
+        Err(e) => tracing::warn!("attestation lookup failed: {e} -- proceeding on checksum verification alone"),
+    }
+}
+
 /// Downloads `filename` for `version_tag` and verifies it against the
 /// release's published `SHA256SUMS.txt` before returning its bytes. This is
 /// the single gate every self-update path goes through -- nothing
-/// downstream ever sees unverified bytes.
+/// downstream ever sees unverified bytes. Also checks (advisory-only, see
+/// `check_build_attestation`) for a matching GitHub build-provenance
+/// attestation as defense-in-depth against a compromised release.
 async fn download_and_verify(version_tag: &str, filename: &str) -> Result<Vec<u8>, AppError> {
     let expected = fetch_expected_sha256(version_tag, filename).await?;
     let bytes = download_bytes(&release_asset_url(version_tag, filename)).await?;
     verify_sha256(&bytes, &expected)?;
+    check_build_attestation(&expected).await;
     Ok(bytes)
 }
 
