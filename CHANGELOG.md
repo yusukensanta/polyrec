@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-07-10
+
+### Security
+
+- Release binaries (portable exe and installer) are now Authenticode-signed in CI via SignPath Foundation's free open-source code signing program. SmartScreen reputation still builds up gradually rather than disappearing instantly (OV-tier certificate, not EV).
+
 ## [v0.5.0] - 2026-07-10
 
 ### Added
@@ -196,7 +202,8 @@ First tagged release. Covers the initial feature set plus disk-space handling:
 - Fixed an NTLM-hash-leak vector: a network-sourced update URL passed to `explorer.exe` is now validated to start with `https://github.com/` before opening, closing off a UNC-path (`\\host\share`) SMB-credential-leak technique.
 - Removed an unused dependency carrying a known RustSec advisory.
 
-[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/yusukensanta/polyrec/compare/v0.5.1...HEAD
+[v0.5.1]: https://github.com/yusukensanta/polyrec/compare/v0.5.0...v0.5.1
 [v0.5.0]: https://github.com/yusukensanta/polyrec/compare/v0.4.1...v0.5.0
 [v0.4.1]: https://github.com/yusukensanta/polyrec/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/yusukensanta/polyrec/compare/v0.3.8...v0.4.0
