@@ -76,32 +76,23 @@ jobs:
       # Signs polyrec.exe itself, in place, before it goes into the zip (and,
       # via installer/polyrec.iss's [Files] entry, before Inno Setup bundles
       # this exact file into the installer too -- one signed exe, reused by
-      # both artifacts). SignPath's free OSS tier requires build-origin
-      # verification on every signing request; the GitHub Action (rather
-      # than calling Submit-SigningRequest directly) supplies that
-      # automatically from the workflow run itself.
-      - name: Upload unsigned exe for signing
-        id: upload-unsigned-exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: unsigned-polyrec-exe
-          path: target/release/polyrec.exe
-
+      # both artifacts). Calls SignPath's plain REST API directly (see
+      # .github/scripts/Submit-SignPathRequest.ps1) rather than SignPath's
+      # GitHub Actions connector/action -- that connector requires a
+      # "Trusted Build System" linked at the organization level, which isn't
+      # available on the free/Foundation OSS tier this project's certificate
+      # comes from. The generic REST API has no such requirement.
       - name: Sign polyrec.exe
-        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: decb64a5-8938-4442-8848-36981e8328f0
-          project-slug: polyrec
-          signing-policy-slug: polyrec
-          artifact-configuration-slug: polyrec-exe
-          github-artifact-id: ${{ steps.upload-unsigned-exe.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed/exe
-
-      - name: Replace unsigned exe with the signed one
         shell: pwsh
-        run: Copy-Item signed/exe/polyrec.exe target/release/polyrec.exe -Force
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          . .github/scripts/Submit-SignPathRequest.ps1
+          Submit-SignPathRequest `
+            -ArtifactPath target/release/polyrec.exe `
+            -ArtifactConfigurationSlug polyrec-exe `
+            -Description "${{ steps.tag.outputs.tag }} polyrec.exe" `
+            -OutputPath target/release/polyrec.exe
 
       - name: Package zip
         shell: pwsh
@@ -131,28 +122,17 @@ jobs:
       # Separate signing request from polyrec.exe's -- the installer is its
       # own PE file (with its own Authenticode signature slot), signed
       # independently even though the exe it contains is already signed too.
-      - name: Upload unsigned installer for signing
-        id: upload-unsigned-installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: unsigned-polyrec-installer
-          path: ${{ steps.installer.outputs.installerPath }}
-
       - name: Sign installer
-        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: decb64a5-8938-4442-8848-36981e8328f0
-          project-slug: polyrec
-          signing-policy-slug: polyrec
-          artifact-configuration-slug: polyrec-installer
-          github-artifact-id: ${{ steps.upload-unsigned-installer.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed/installer
-
-      - name: Replace unsigned installer with the signed one
         shell: pwsh
-        run: Copy-Item "signed/installer/${{ steps.installer.outputs.installerPath }}" "${{ steps.installer.outputs.installerPath }}" -Force
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          . .github/scripts/Submit-SignPathRequest.ps1
+          Submit-SignPathRequest `
+            -ArtifactPath "${{ steps.installer.outputs.installerPath }}" `
+            -ArtifactConfigurationSlug polyrec-installer `
+            -Description "${{ steps.tag.outputs.tag }} installer" `
+            -OutputPath "${{ steps.installer.outputs.installerPath }}"
 
       - name: Generate checksums
         shell: pwsh
