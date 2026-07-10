@@ -56,10 +56,16 @@ impl Lang {
 pub struct Strings {
     // Menu bar
     pub refresh: &'static str,
+    pub refresh_tooltip: &'static str,
     pub overlay_on: &'static str,
     pub overlay_off: &'static str,
+    pub overlay_toggle_tooltip: &'static str,
+    pub language_toggle_tooltip: &'static str,
     pub update_available_suffix: &'static str, // used as "⬆ {version} {suffix}"
     pub update_tooltip: &'static str,
+    /// "{prefix}{error}" -- shown in the error banner alongside the existing
+    /// tracing::error! log whenever Config::save() fails.
+    pub config_save_failed_prefix: &'static str,
 
     // Self-update confirm/progress popup
     pub update_confirm_title: &'static str,
@@ -92,10 +98,10 @@ pub struct Strings {
     pub frames_word: &'static str,  // used as "{n} {frames_word}"
     pub saving_recording: &'static str,
     pub select_source_prompt: &'static str,
-    pub state_prefix: &'static str, // "State: " — followed by one of the three below
+    // Only shown while Idle -- Recording/Paused already show their state via
+    // the pulsing dot + colored label at the top of the center panel.
+    pub state_prefix: &'static str, // "State: " — followed by session_state_idle
     pub session_state_idle: &'static str,
-    pub session_state_recording: &'static str,
-    pub session_state_paused: &'static str,
 
     // Center panel — output / buttons
     pub output_header: &'static str,
@@ -138,6 +144,7 @@ pub struct Strings {
     pub hotkey_save_highlight_header: &'static str,
     pub hotkey_collision_warning: &'static str,
     pub hotkey_change_button: &'static str,
+    pub hotkey_change_tooltip: &'static str,
     pub hotkey_press_any_key_prompt: &'static str,
     pub hotkey_press_esc_to_cancel: &'static str,
     /// Prefix for "'<key>' is already in use or reserved by Windows — try a
@@ -157,7 +164,9 @@ pub struct Strings {
     pub recording_saved_label: &'static str,
     pub audio_tracks_header: &'static str,
     pub export_button: &'static str,
+    pub export_tooltip: &'static str,
     pub open_folder_button: &'static str,
+    pub open_folder_tooltip: &'static str,
     pub exporting_header: &'static str,
     pub please_wait: &'static str,
     pub export_complete_header: &'static str,
@@ -178,10 +187,14 @@ pub struct Strings {
 
 pub static EN: Strings = Strings {
     refresh: "⟳ Refresh",
+    refresh_tooltip: "Re-scan for windows and audio devices",
     overlay_on: "Overlay: ON",
     overlay_off: "Overlay: OFF",
+    overlay_toggle_tooltip: "Show/hide the recording HUD overlay",
+    language_toggle_tooltip: "Switch display language",
     update_available_suffix: "available",
     update_tooltip: "Click to update now",
+    config_save_failed_prefix: "Failed to save settings: ",
 
     update_confirm_title: "Update PolyRec",
     update_confirm_prefix: "Update to ",
@@ -212,8 +225,6 @@ pub static EN: Strings = Strings {
     select_source_prompt: "Select a source and press REC to start.",
     state_prefix: "State: ",
     session_state_idle: "Idle",
-    session_state_recording: "Recording",
-    session_state_paused: "Paused",
 
     output_header: "OUTPUT",
     quality_button: "⚙ Quality",
@@ -251,6 +262,7 @@ pub static EN: Strings = Strings {
     hotkey_save_highlight_header: "SAVE HIGHLIGHT",
     hotkey_collision_warning: "⚠ Two actions share the same key — only one will respond.",
     hotkey_change_button: "Change",
+    hotkey_change_tooltip: "Press a new key combination for this action",
     hotkey_press_any_key_prompt: "Press any key (Ctrl/Alt/Shift optional)…",
     hotkey_press_esc_to_cancel: "(Esc to cancel)",
     hotkey_unavailable_prefix: "⚠ '",
@@ -265,7 +277,9 @@ pub static EN: Strings = Strings {
     recording_saved_label: "Recording saved:",
     audio_tracks_header: "AUDIO TRACKS",
     export_button: "Export",
+    export_tooltip: "Remux with only the checked audio tracks (no re-encoding)",
     open_folder_button: "Open Folder",
+    open_folder_tooltip: "Open the folder containing this recording",
     exporting_header: "EXPORTING…",
     please_wait: "Please wait…",
     export_complete_header: "EXPORT COMPLETE",
@@ -285,10 +299,14 @@ pub static EN: Strings = Strings {
 
 pub static JA: Strings = Strings {
     refresh: "⟳ 更新",
+    refresh_tooltip: "ウィンドウとオーディオデバイスを再スキャン",
     overlay_on: "オーバーレイ: オン",
     overlay_off: "オーバーレイ: オフ",
+    overlay_toggle_tooltip: "録画中のHUDオーバーレイの表示/非表示を切り替え",
+    language_toggle_tooltip: "表示言語を切り替え",
     update_available_suffix: "が利用可能",
     update_tooltip: "クリックして今すぐ更新",
+    config_save_failed_prefix: "設定の保存に失敗しました: ",
 
     update_confirm_title: "PolyRecを更新",
     update_confirm_prefix: "",
@@ -319,8 +337,6 @@ pub static JA: Strings = Strings {
     select_source_prompt: "ソースを選択して REC を押すと開始します。",
     state_prefix: "状態: ",
     session_state_idle: "待機中",
-    session_state_recording: "録画中",
-    session_state_paused: "一時停止中",
 
     output_header: "出力",
     quality_button: "⚙ 画質",
@@ -358,6 +374,7 @@ pub static JA: Strings = Strings {
     hotkey_save_highlight_header: "ハイライトを保存",
     hotkey_collision_warning: "⚠ 2つの操作が同じキーに割り当てられています。片方のみ動作します。",
     hotkey_change_button: "変更",
+    hotkey_change_tooltip: "この操作の新しいキーの組み合わせを押してください",
     hotkey_press_any_key_prompt: "何かキーを押してください（Ctrl/Alt/Shiftとの組み合わせも可）…",
     hotkey_press_esc_to_cancel: "(Escでキャンセル)",
     hotkey_unavailable_prefix: "⚠「",
@@ -372,7 +389,9 @@ pub static JA: Strings = Strings {
     recording_saved_label: "録画を保存しました:",
     audio_tracks_header: "オーディオ トラック",
     export_button: "エクスポート",
+    export_tooltip: "チェックした音声トラックのみで再多重化します（再エンコードなし）",
     open_folder_button: "フォルダを開く",
+    open_folder_tooltip: "この録画が入っているフォルダを開く",
     exporting_header: "エクスポート中…",
     please_wait: "お待ちください…",
     export_complete_header: "エクスポート完了",

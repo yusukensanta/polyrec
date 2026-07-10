@@ -46,6 +46,28 @@ const BG_BTN_IDLE: egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
 /// action buttons, so they read as the one clearly primary action instead
 /// of blending into every other rounded rectangle in the UI.
 const ROUNDING_PRIMARY_BTN: u8 = 14;
+/// Every other rounded rectangle (source cards, the mini pause button) --
+/// one deliberate secondary tier instead of incidentally falling through to
+/// whatever the theme's own default happens to be.
+const CORNER_CONTROL: u8 = 6;
+
+// Named type scale -- consolidates what had drifted into seven ad-hoc sizes
+// (10/11/12/13/14/18/40) down to five. Roughly modeled on Fluent 2's type
+// ramp (Microsoft's current Windows design system: Caption/Body/Subtitle/
+// Title steps), not copied literally -- this app's own already-similar
+// numbers just needed names, not a redesign.
+const TEXT_CAPTION: f32 = 11.0; // status lines, tooltips, secondary info
+const TEXT_BODY: f32 = 13.0; // popup body copy, prompts
+const TEXT_SUBTITLE: f32 = 14.0; // section headers
+const TEXT_BUTTON: f32 = 18.0; // primary action button labels
+const TEXT_DISPLAY: f32 = 40.0; // the recording timer
+
+/// Related sub-lines within one status concept (e.g. the Highlight-save
+/// outcome lines) -- Fluent 2's own spacing scale has a 2px/XXS step too,
+/// this just names it instead of leaving it as an unexplained literal.
+const SPACE_TIGHT: f32 = 4.0;
+/// Between distinct concepts/sections that aren't tightly related.
+const SPACE_NORMAL: f32 = 8.0;
 
 enum ExportState {
     Idle,
@@ -353,14 +375,21 @@ impl App {
                 // update_check compares against.
                 ui.label(
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .size(11.0)
+                        .size(TEXT_CAPTION)
                         .color(TEXT_MUTED),
                 );
                 ui.separator();
-                if ui.add(accent_button(s.refresh, ACCENT_SECONDARY)).clicked() {
+                if ui.add(accent_button(s.refresh, ACCENT_SECONDARY)).on_hover_text(s.refresh_tooltip).clicked() {
+                    // Re-select the same source after refreshing if it's still
+                    // present (matched by hwnd) -- e.g. refreshing just to pick
+                    // up a newly-opened window shouldn't silently drop whatever
+                    // was already selected.
+                    let previously_selected_hwnd =
+                        self.selected_source.and_then(|i| self.sources.get(i)).map(|src| src.hwnd);
                     self.sources = enumerate_sources();
                     self.source_icon_textures.clear();
-                    self.selected_source = None;
+                    self.selected_source = previously_selected_hwnd
+                        .and_then(|hwnd| self.sources.iter().position(|src| src.hwnd == hwnd));
                     self.audio_devices = enumerate_audio_devices().unwrap_or_default();
                     self.selected_audio = self.audio_devices.iter().map(|d| d.is_loopback).collect();
                     // export_track_selection is NOT reset here -- it's tied to the last
@@ -372,20 +401,21 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled { s.overlay_on } else { s.overlay_off };
-                    if ui.add(accent_button(label, ACCENT_SECONDARY)).clicked() {
+                    if ui.add(accent_button(label, ACCENT_SECONDARY)).on_hover_text(s.overlay_toggle_tooltip).clicked() {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
                     }
                     let lang = self.config.lang();
-                    if ui.add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY)).clicked() {
+                    if ui.add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY)).on_hover_text(s.language_toggle_tooltip).clicked() {
                         self.config.language = lang.toggle().config_value().to_string();
                         if let Err(e) = self.config.save() {
                             tracing::error!("failed to save config: {e}");
+                            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
                         }
                     }
                     if let Some(update) = self.update_available.clone() {
                         let clicked = ui
-                            .add(accent_button(&format!("⬆ {} {}", update.version, s.update_available_suffix), ACCENT_SECONDARY))
+                            .add(accent_button(&format!("⬆ {} {}", update.version, s.update_available_suffix), ACCENT_PAUSE))
                             .on_hover_text(s.update_tooltip)
                             .clicked();
                         if clicked {
@@ -415,12 +445,12 @@ impl App {
                 if self.sources.is_empty() {
                     ui.label(
                         egui::RichText::new(s.no_windows_found)
-                            .size(12.0)
+                            .size(TEXT_CAPTION)
                             .color(TEXT_MUTED),
                     );
                 }
                 egui::ScrollArea::vertical()
-                    .max_height(200.0)
+                    .max_height(ui.available_height().max(120.0))
                     .show(ui, |ui| {
                         for (i, source) in self.sources.iter().enumerate() {
                             let selected = self.selected_source == Some(i);
@@ -476,14 +506,14 @@ impl App {
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 egui::RichText::new(&source.window_title)
-                                                    .size(13.0)
+                                                    .size(TEXT_BODY)
                                                     .strong()
                                                     .color(TEXT_PRIMARY),
                                             );
                                             if !source.exe_name.is_empty() {
                                                 ui.label(
                                                     egui::RichText::new(&source.exe_name)
-                                                        .size(11.0)
+                                                        .size(TEXT_CAPTION)
                                                         .color(TEXT_MUTED),
                                                 );
                                             }
@@ -508,7 +538,7 @@ impl App {
                 if self.audio_devices.is_empty() {
                     ui.label(
                         egui::RichText::new(s.no_audio_devices)
-                            .size(12.0)
+                            .size(TEXT_CAPTION)
                             .color(TEXT_MUTED),
                     );
                 }
@@ -546,6 +576,7 @@ impl App {
                         self.config.default_app_audio_only = self.app_audio_only;
                         if let Err(e) = self.config.save() {
                             tracing::error!("failed to save config: {e}");
+                            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
                         }
                     }
                 });
@@ -595,7 +626,7 @@ impl App {
                     let state_color = if is_paused { ACCENT_PAUSE } else { ACCENT_REC };
                     ui.label(
                         egui::RichText::new(state_label)
-                            .size(10.0)
+                            .size(TEXT_CAPTION)
                             .color(state_color)
                             .strong(),
                     );
@@ -611,7 +642,7 @@ impl App {
                         (secs % 3600) / 60,
                         secs % 60,
                     ))
-                    .font(egui::FontId::monospace(40.0))
+                    .font(egui::FontId::monospace(TEXT_DISPLAY))
                     .color(TEXT_PRIMARY),
                 );
 
@@ -622,13 +653,13 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!("{track_count} {}", s.tracks_word))
-                            .size(12.0)
+                            .size(TEXT_CAPTION)
                             .color(TEXT_MUTED),
                     );
-                    ui.label(egui::RichText::new("  ·  ").size(12.0).color(TEXT_MUTED));
+                    ui.label(egui::RichText::new("  ·  ").size(TEXT_CAPTION).color(TEXT_MUTED));
                     ui.label(
                         egui::RichText::new(format!("{frames} {}", s.frames_word))
-                            .size(12.0)
+                            .size(TEXT_CAPTION)
                             .color(TEXT_MUTED),
                     );
                 });
@@ -643,7 +674,7 @@ impl App {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("recording.mp4"),
                         )
-                        .size(11.0)
+                        .size(TEXT_CAPTION)
                         .color(TEXT_MUTED),
                     );
                 }
@@ -651,7 +682,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(s.saving_recording)
-                        .size(13.0)
+                        .size(TEXT_BODY)
                         .color(TEXT_MUTED),
                 );
             } else if let Some(path) = self.last_output_path.clone() {
@@ -660,7 +691,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(s.select_source_prompt)
-                        .size(13.0)
+                        .size(TEXT_BODY)
                         .color(TEXT_MUTED),
                 );
             }
@@ -697,6 +728,7 @@ impl App {
                     self.config.output_dir = PathBuf::from(&self.output_dir_input);
                     if let Err(e) = self.config.save() {
                         tracing::error!("failed to save config: {e}");
+                        self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
                     }
                 }
                 if ui.add(accent_button(s.browse_button, ACCENT_SECONDARY)).clicked()
@@ -708,59 +740,85 @@ impl App {
                     self.config.output_dir = path;
                     if let Err(e) = self.config.save() {
                         tracing::error!("failed to save config: {e}");
+                        self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
                     }
                 }
             });
 
-            if let Some(free) = self.free_space_bytes {
-                // Same threshold the recording loop itself refuses to start/
-                // continue below (disk_space::MIN_FREE_BYTES) -- flagging it
-                // here too means the user sees it coming before pressing REC,
-                // not just as a refusal/mid-recording stop after the fact.
-                let low = free < crate::disk_space::MIN_FREE_BYTES;
-                let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(format!("{}{}", s.free_space_prefix, format_bytes_free(free)))
-                        .size(11.0)
-                        .color(color),
-                );
-            }
+            let show_free_space = self.free_space_bytes.is_some();
+            let show_highlight_active = self.session.is_highlighting();
+            let show_highlight_save = !matches!(self.highlight_save_state, HighlightSaveState::Idle);
+            // Grouped into one visually distinct region (rather than a flat
+            // pile of same-size lines distinguished only by color) so it
+            // reads as "the status area" separate from the output-dir
+            // controls above it -- same treatment as source cards.
+            if show_free_space || show_highlight_active || show_highlight_save {
+                ui.add_space(SPACE_NORMAL);
+                egui::Frame::NONE
+                    .fill(BG_FAINT)
+                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .corner_radius(CORNER_CONTROL)
+                    .inner_margin(8i8)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let mut first = true;
 
-            if self.session.is_highlighting() {
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(s.highlight_status_active)
-                        .size(11.0)
-                        .color(ACCENT_SECONDARY),
-                );
-            }
-            match &self.highlight_save_state {
-                HighlightSaveState::Idle => {}
-                HighlightSaveState::Saving => {
-                    ui.add_space(2.0);
-                    ui.label(egui::RichText::new(s.highlight_saving_label).size(11.0).color(TEXT_MUTED));
-                }
-                HighlightSaveState::Done(path) => {
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}{}",
-                            s.highlight_saved_prefix,
-                            path.file_name().and_then(|n| n.to_str()).unwrap_or("highlight.mp4")
-                        ))
-                        .size(11.0)
-                        .color(ACCENT_IDLE),
-                    );
-                }
-                HighlightSaveState::Failed(msg) => {
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new(format!("{}{msg}", s.highlight_save_failed_prefix))
-                            .size(11.0)
-                            .color(ACCENT_PAUSE),
-                    );
-                }
+                        if let Some(free) = self.free_space_bytes {
+                            // Same threshold the recording loop itself refuses
+                            // to start/continue below (disk_space::MIN_FREE_BYTES)
+                            // -- flagging it here too means the user sees it
+                            // coming before pressing REC, not just as a
+                            // refusal/mid-recording stop after the fact.
+                            let low = free < crate::disk_space::MIN_FREE_BYTES;
+                            let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
+                            ui.label(
+                                egui::RichText::new(format!("{}{}", s.free_space_prefix, format_bytes_free(free)))
+                                    .size(TEXT_CAPTION)
+                                    .color(color),
+                            );
+                            first = false;
+                        }
+
+                        if show_highlight_active {
+                            if !first {
+                                ui.add_space(SPACE_TIGHT);
+                            }
+                            ui.label(
+                                egui::RichText::new(s.highlight_status_active)
+                                    .size(TEXT_CAPTION)
+                                    .color(TEXT_PRIMARY),
+                            );
+                            first = false;
+                        }
+
+                        if !first && show_highlight_save {
+                            ui.add_space(SPACE_TIGHT);
+                        }
+                        match &self.highlight_save_state {
+                            HighlightSaveState::Idle => {}
+                            HighlightSaveState::Saving => {
+                                ui.label(egui::RichText::new(s.highlight_saving_label).size(TEXT_CAPTION).color(TEXT_MUTED));
+                            }
+                            HighlightSaveState::Done(path) => {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}{}",
+                                        s.highlight_saved_prefix,
+                                        path.file_name().and_then(|n| n.to_str()).unwrap_or("highlight.mp4")
+                                    ))
+                                    .size(TEXT_CAPTION)
+                                    .color(ACCENT_IDLE),
+                                );
+                            }
+                            HighlightSaveState::Failed(msg) => {
+                                ui.label(
+                                    egui::RichText::new(format!("{}{msg}", s.highlight_save_failed_prefix))
+                                        .size(TEXT_CAPTION)
+                                        .color(ACCENT_REC),
+                                );
+                            }
+                        }
+                    });
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -768,20 +826,21 @@ impl App {
 
                 let is_paused = self.session.is_paused();
 
-                let state_name = match self.session.state() {
-                    SessionState::Idle => s.session_state_idle,
-                    SessionState::Recording => s.session_state_recording,
-                    SessionState::Paused => s.session_state_paused,
-                };
-                ui.label(
-                    egui::RichText::new(format!("{}{state_name}", s.state_prefix))
-                        .size(10.0)
-                        .color(TEXT_MUTED),
-                );
+                // Recording/Paused already show their state via the pulsing
+                // dot + colored label at the top of this panel -- showing it
+                // again here too would just be the same fact twice. Idle has
+                // no other indicator, so it's the only state this line adds.
+                if matches!(self.session.state(), SessionState::Idle) {
+                    ui.label(
+                        egui::RichText::new(format!("{}{}", s.state_prefix, s.session_state_idle))
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                }
 
                 if is_paused {
                     let btn = egui::Button::new(
-                        egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(18.0),
+                        egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -794,7 +853,7 @@ impl App {
                         let stop_btn = egui::Button::new(
                             egui::RichText::new(s.stop_button)
                                 .color(ACCENT_REC)
-                                .size(18.0),
+                                .size(TEXT_BUTTON),
                         )
                         .fill(BG_BTN_STOP)
                         .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -804,7 +863,7 @@ impl App {
                         }
 
                         let pause_btn = egui::Button::new(
-                            egui::RichText::new("⏸").color(TEXT_MUTED).size(18.0),
+                            egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
                         )
                         .fill(egui::Color32::from_rgb(30, 30, 46))
                         .min_size(egui::Vec2::new(44.0, 52.0));
@@ -814,7 +873,7 @@ impl App {
                     });
                 } else {
                     let btn = egui::Button::new(
-                        egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(18.0),
+                        egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -844,10 +903,25 @@ impl App {
             .map(|a| a.clock.elapsed().as_secs())
             .unwrap_or(0);
 
-        let screen_w = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
-            ) as f32
+        // Position on whichever monitor the recorded window is actually on --
+        // falls back to the primary display (matching query_capture_size's
+        // existing graceful-degradation convention) if the hwnd is gone or
+        // the monitor query fails.
+        let active_hwnd = self.session.active.as_ref().map(|a| a.hwnd);
+        let monitor_rect = active_hwnd.and_then(|hwnd_val| {
+            let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
+            crate::capture::video::query_monitor_rect(hwnd).ok()
+        });
+        let (screen_right, screen_top) = match monitor_rect {
+            Some(rect) => (rect.right as f32, rect.top as f32),
+            None => {
+                let screen_w = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                        windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+                    ) as f32
+                };
+                (screen_w, 0.0)
+            }
         };
         let tracks_word = s.tracks_word;
         let stop_word = s.overlay_hud_stop_word;
@@ -866,7 +940,7 @@ impl App {
                 // Widened from 310 to fit longer modifier combos (e.g.
                 // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
                 .with_inner_size([400.0, 32.0])
-                .with_position(egui::pos2(screen_w - 410.0, 10.0)),
+                .with_position(egui::pos2(screen_right - 410.0, screen_top + 10.0)),
             move |ctx, _class| {
                 // CentralPanel::show(ctx, ...) is soft-deprecated in favor of
                 // show_inside(ui, ...), but this closure only ever receives a
@@ -888,7 +962,7 @@ impl App {
                                 elapsed_secs % 60,
                             ))
                             .color(egui::Color32::WHITE)
-                            .size(13.0),
+                            .size(TEXT_BODY),
                         );
                     });
             },
@@ -975,10 +1049,12 @@ impl App {
                     close = true;
                 }
             });
-        if close {
+        // Escape as an emergency exit -- same effect as clicking Close.
+        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_quality_popup = false;
             if let Err(e) = self.config.save() {
                 tracing::error!("failed to save config: {e}");
+                self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
             }
         }
     }
@@ -993,13 +1069,13 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(&msg).size(13.0).color(ACCENT_REC));
+                ui.label(egui::RichText::new(&msg).size(TEXT_BODY).color(ACCENT_REC));
                 ui.add_space(8.0);
                 if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                     close = true;
                 }
             });
-        if close {
+        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.error_message = None;
         }
     }
@@ -1020,14 +1096,14 @@ impl App {
                                 "{}{}{}",
                                 s.update_confirm_prefix, update.version, s.update_confirm_suffix
                             ))
-                            .size(13.0)
+                            .size(TEXT_BODY)
                             .color(TEXT_PRIMARY),
                         );
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new(s.update_confirm_uac_note).size(11.0).color(TEXT_MUTED));
+                        ui.label(egui::RichText::new(s.update_confirm_uac_note).size(TEXT_CAPTION).color(TEXT_MUTED));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.add(accent_button(s.update_now_button, ACCENT_IDLE)).clicked() {
+                            if ui.add(accent_button(s.update_now_button, ACCENT_PAUSE)).clicked() {
                                 action = Some("now");
                             }
                             if ui.add(accent_button(s.update_not_now_button, TEXT_MUTED)).clicked() {
@@ -1038,6 +1114,13 @@ impl App {
                             open_url(&update.url);
                         }
                     });
+                // Escape == "Not Now" here, but deliberately not wired into the
+                // Working/Failed branches below -- Working shouldn't let Escape
+                // interrupt an in-flight update, and Failed already has its own
+                // Escape handling.
+                if action.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    action = Some("not_now");
+                }
                 match action {
                     Some("now") => {
                         let version = update.version.clone();
@@ -1055,7 +1138,7 @@ impl App {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(s.update_working_message).size(13.0).color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new(s.update_working_message).size(TEXT_BODY).color(TEXT_PRIMARY));
                     });
             }
             SelfUpdateState::Failed(msg) => {
@@ -1068,7 +1151,7 @@ impl App {
                     .show(ctx, |ui| {
                         ui.label(
                             egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
-                                .size(13.0)
+                                .size(TEXT_BODY)
                                 .color(ACCENT_REC),
                         );
                         ui.add_space(8.0);
@@ -1111,11 +1194,11 @@ impl App {
     /// with the live recording status, same as it already did before any
     /// export UI existed.
     fn render_export_controls(&mut self, ui: &mut egui::Ui, s: &'static Strings, path: &std::path::Path) {
-        ui.label(egui::RichText::new(s.recording_saved_label).size(11.0).color(TEXT_MUTED));
+        ui.label(egui::RichText::new(s.recording_saved_label).size(TEXT_CAPTION).color(TEXT_MUTED));
         ui.add_space(2.0);
         ui.label(
             egui::RichText::new(path.to_string_lossy().as_ref())
-                .size(12.0)
+                .size(TEXT_CAPTION)
                 .color(TEXT_PRIMARY),
         );
         ui.add_space(8.0);
@@ -1125,7 +1208,7 @@ impl App {
         // that could be exported, so the export button/track list would just
         // be a confusing no-op. Still offer Open Folder either way.
         if self.export_available_tracks < 2 {
-            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).on_hover_text(s.open_folder_tooltip).clicked() {
                 open_folder(path);
             }
             return;
@@ -1158,7 +1241,7 @@ impl App {
 
         if is_idle {
             ui.horizontal(|ui| {
-                if ui.add(accent_button(s.export_button, ACCENT_IDLE)).clicked()
+                if ui.add(accent_button(s.export_button, ACCENT_IDLE)).on_hover_text(s.export_tooltip).clicked()
                     && let Some(dest) = rfd::FileDialog::new()
                         .add_filter("MP4 video", &["mp4"])
                         .set_file_name("export.mp4")
@@ -1181,7 +1264,7 @@ impl App {
                     self.export_result_rx = Some(rx);
                     self.export_state = ExportState::Running;
                 }
-                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).on_hover_text(s.open_folder_tooltip).clicked() {
                     open_folder(path);
                 }
             });
@@ -1189,25 +1272,25 @@ impl App {
             section_header(ui, s.exporting_header);
             ui.label(
                 egui::RichText::new(s.please_wait)
-                    .size(11.0)
+                    .size(TEXT_CAPTION)
                     .color(TEXT_MUTED),
             );
         } else if let Some(export_path) = done_path {
             section_header(ui, s.export_complete_header);
             ui.label(
                 egui::RichText::new(export_path.to_string_lossy().as_ref())
-                    .size(11.0)
+                    .size(TEXT_CAPTION)
                     .color(TEXT_PRIMARY),
             );
             ui.add_space(4.0);
-            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).clicked() {
+            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).on_hover_text(s.open_folder_tooltip).clicked() {
                 open_folder(&export_path);
             }
         } else if let Some(msg) = failed_msg {
             section_header(ui, s.export_failed_header);
             ui.label(
                 egui::RichText::new(&msg)
-                    .size(11.0)
+                    .size(TEXT_CAPTION)
                     .color(ACCENT_REC),
             );
         }
@@ -1247,7 +1330,7 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     // still clearly below the "PolyRec" heading's default 18pt so it reads as
     // a subordinate label, not competing with it.
     ui.add_space(4.0);
-    ui.label(egui::RichText::new(title).size(14.0).color(TEXT_MUTED).strong());
+    ui.label(egui::RichText::new(title).size(TEXT_SUBTITLE).color(TEXT_MUTED).strong());
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(4.0);

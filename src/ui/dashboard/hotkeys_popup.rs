@@ -1,4 +1,4 @@
-use super::{accent_button, section_header, App, ACCENT_PAUSE, ACCENT_SECONDARY, TEXT_MUTED, TEXT_PRIMARY};
+use super::{accent_button, section_header, App, ACCENT_PAUSE, ACCENT_SECONDARY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY};
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -82,10 +82,20 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                self.render_hotkey_row(ui, s, s.hotkey_start_stop_header, HotkeySlot::StartStop);
-                self.render_hotkey_row(ui, s, s.hotkey_pause_header, HotkeySlot::Pause);
-                self.render_hotkey_row(ui, s, s.hotkey_overlay_header, HotkeySlot::ToggleOverlay);
-                self.render_hotkey_row(ui, s, s.hotkey_save_highlight_header, HotkeySlot::SaveHighlight);
+                // Grid (not four independent ui.horizontal calls) so the
+                // current-binding label and Change button land in the same
+                // two columns across all four rows structurally -- previously
+                // each row's Change button drifted left/right depending on
+                // how wide that row's own binding text happened to render.
+                egui::Grid::new("hotkeys_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        self.render_hotkey_row(ui, s, s.hotkey_start_stop_header, HotkeySlot::StartStop);
+                        self.render_hotkey_row(ui, s, s.hotkey_pause_header, HotkeySlot::Pause);
+                        self.render_hotkey_row(ui, s, s.hotkey_overlay_header, HotkeySlot::ToggleOverlay);
+                        self.render_hotkey_row(ui, s, s.hotkey_save_highlight_header, HotkeySlot::SaveHighlight);
+                    });
 
                 let bindings = [
                     &self.config.hotkeys.start_stop,
@@ -101,14 +111,14 @@ impl App {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(s.hotkey_collision_warning)
-                            .size(11.0)
+                            .size(TEXT_CAPTION)
                             .color(ACCENT_PAUSE),
                     );
                 }
 
                 if let Some(warning) = &self.hotkey_capture_warning {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(warning).size(11.0).color(ACCENT_PAUSE));
+                    ui.label(egui::RichText::new(warning).size(TEXT_CAPTION).color(ACCENT_PAUSE));
                 }
 
                 ui.add_space(8.0);
@@ -122,6 +132,7 @@ impl App {
             self.hotkey_capture_warning = None;
             if let Err(e) = self.config.save() {
                 tracing::error!("failed to save config: {e}");
+                self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
             }
             // The listener registers its hotkeys once at spawn time, so a rebind
             // needs a fresh thread — stop() unregisters the old bindings before
@@ -141,11 +152,15 @@ impl App {
         }
     }
 
-    /// One row in the Hotkeys popup: a header, the currently bound key (or a
-    /// "press any key" prompt while `self.recording_hotkey == Some(slot)`),
-    /// and a Change button to start capturing a new one.
+    /// One hotkey's two grid rows: a header spanning the row, then the
+    /// currently bound key (or a "press any key" prompt while
+    /// `self.recording_hotkey == Some(slot)`) in column 0 and a Change
+    /// button in column 1 -- called from inside an `egui::Grid::show`
+    /// closure, so every row's button lands in the same column position.
     fn render_hotkey_row(&mut self, ui: &mut egui::Ui, s: &'static Strings, header: &str, slot: HotkeySlot) {
         section_header(ui, header);
+        ui.end_row();
+
         let current = match slot {
             HotkeySlot::StartStop => &self.config.hotkeys.start_stop,
             HotkeySlot::Pause => &self.config.hotkeys.pause,
@@ -153,22 +168,23 @@ impl App {
             HotkeySlot::SaveHighlight => &self.config.hotkeys.save_highlight,
         }
         .clone();
-        ui.horizontal(|ui| {
-            if self.recording_hotkey == Some(slot) {
+        if self.recording_hotkey == Some(slot) {
+            ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(s.hotkey_press_any_key_prompt)
                         .color(ACCENT_SECONDARY)
                         .strong(),
                 );
-                ui.label(egui::RichText::new(s.hotkey_press_esc_to_cancel).size(11.0).color(TEXT_MUTED));
-            } else {
-                ui.label(egui::RichText::new(&current).strong().color(TEXT_PRIMARY));
-                if ui.add(accent_button(s.hotkey_change_button, ACCENT_SECONDARY)).clicked() {
-                    self.recording_hotkey = Some(slot);
-                    self.hotkey_capture_warning = None;
-                }
+                ui.label(egui::RichText::new(s.hotkey_press_esc_to_cancel).size(TEXT_CAPTION).color(TEXT_MUTED));
+            });
+        } else {
+            ui.label(egui::RichText::new(&current).strong().color(TEXT_PRIMARY));
+            if ui.add(accent_button(s.hotkey_change_button, ACCENT_SECONDARY)).on_hover_text(s.hotkey_change_tooltip).clicked() {
+                self.recording_hotkey = Some(slot);
+                self.hotkey_capture_warning = None;
             }
-        });
+        }
+        ui.end_row();
     }
 }
 

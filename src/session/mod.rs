@@ -67,6 +67,10 @@ pub struct ActiveCapture {
     /// point is still finalized normally, this just tells the caller *why* the
     /// recording ended without the user pressing stop, so it can be surfaced.
     pub disk_full_flag: Arc<AtomicBool>,
+    /// The window this recording is capturing -- used to position the overlay
+    /// HUD on whichever monitor that window is actually on (see
+    /// `render_overlay_viewport`), instead of assuming the primary display.
+    pub hwnd: usize,
 }
 
 /// The rolling "Highlight" background buffer -- entirely separate from
@@ -284,6 +288,7 @@ impl SessionManager {
             stop_flag,
             output_path: output_path.clone(),
             disk_full_flag,
+            hwnd: source.hwnd,
         });
 
         Ok(output_path)
@@ -576,8 +581,10 @@ impl SessionManager {
             };
 
             tokio::task::spawn_blocking(move || {
+                let saved_dir = highlight_saved_dir(&output_dir);
+                std::fs::create_dir_all(&saved_dir)?;
                 let finish_stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
-                let output_path = output_dir.join(format!("{app_name}_highlight_{finish_stamp}.mp4"));
+                let output_path = saved_dir.join(format!("{app_name}_{finish_stamp}.mp4"));
                 highlight_export::concat_and_trim(&snapshot, buffer_seconds, &output_path)
             })
             .await
@@ -641,6 +648,15 @@ pub(crate) fn app_name_from_exe(exe_name: &str) -> String {
 /// user's actual finished recordings.
 fn highlight_segment_dir(output_dir: &Path) -> PathBuf {
     output_dir.join("polyrec").join("_highlight_buffer")
+}
+
+/// Directory a `save_highlight` result is written to -- a sibling of the
+/// main `polyrec/` recording directory (and of `highlight_segment_dir`'s
+/// internal segment-rotation folder), under the same drive/directory the
+/// user has configured for recordings, so saved highlights are easy to find
+/// alongside normal recordings without being mixed into either.
+fn highlight_saved_dir(output_dir: &Path) -> PathBuf {
+    output_dir.join("polyrec").join("highlights")
 }
 
 /// Creates `<base_dir>/polyrec/` and returns (temp_recording_path, polyrec_dir).
