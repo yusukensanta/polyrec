@@ -38,8 +38,9 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
+        with:
+          tool: cargo-audit
 
       # RUSTSEC-2026-0194/0195 (quick-xml) and RUSTSEC-2026-0192 (ttf-parser,
       # unmaintained) are pulled in only via winit's Linux/Wayland backend
