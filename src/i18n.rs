@@ -55,8 +55,6 @@ impl Lang {
 
 pub struct Strings {
     // Menu bar
-    pub refresh: &'static str,
-    pub refresh_tooltip: &'static str,
     pub overlay_on: &'static str,
     pub overlay_off: &'static str,
     pub overlay_toggle_tooltip: &'static str,
@@ -191,8 +189,6 @@ pub struct Strings {
 }
 
 pub static EN: Strings = Strings {
-    refresh: "⟳ Refresh",
-    refresh_tooltip: "Re-scan for windows and audio devices",
     overlay_on: "Overlay: ON",
     overlay_off: "Overlay: OFF",
     overlay_toggle_tooltip: "Show/hide the recording HUD overlay",
@@ -308,8 +304,6 @@ pub static EN: Strings = Strings {
 };
 
 pub static JA: Strings = Strings {
-    refresh: "⟳ 更新",
-    refresh_tooltip: "ウィンドウとオーディオデバイスを再スキャン",
     overlay_on: "オーバーレイ: オン",
     overlay_off: "オーバーレイ: オフ",
     overlay_toggle_tooltip: "録画中のHUDオーバーレイの表示/非表示を切り替え",
@@ -451,7 +445,6 @@ mod tests {
         // A blank field would silently render as invisible UI text -- catches
         // a copy-paste-and-forgot-to-fill-in mistake at test time instead.
         for strings in [&EN, &JA] {
-            assert!(!strings.refresh.is_empty());
             assert!(!strings.quality_title.is_empty());
             assert!(!strings.close_button.is_empty());
             assert!(!strings.hotkey_collision_warning.is_empty());

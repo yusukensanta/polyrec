@@ -114,6 +114,9 @@ pub struct App {
     free_space_bytes: Option<u64>,
     free_space_checked_at: Option<Instant>,
     free_space_checked_dir: Option<PathBuf>,
+    /// Last time `refresh_sources_and_audio_if_due` actually ran (see there
+    /// for why this is throttled rather than run every frame).
+    sources_checked_at: Option<Instant>,
     /// How many audio streams the last finished recording actually contains,
     /// probed from the file itself (see `remux::count_audio_tracks`) rather
     /// than trusted from the pre-recording device selection. Export controls
@@ -200,6 +203,7 @@ impl App {
             free_space_bytes: None,
             free_space_checked_at: None,
             free_space_checked_dir: None,
+            sources_checked_at: None,
             export_available_tracks: 0,
             export_track_selection,
             export_state: ExportState::Idle,
@@ -268,6 +272,7 @@ impl App {
         let is_recording = self.session.is_recording();
 
         self.refresh_free_space();
+        self.refresh_sources_and_audio_if_due();
         self.poll_self_update_result(ctx);
 
         // Poll update-check result (one-shot; None result also clears the receiver
@@ -379,26 +384,6 @@ impl App {
                         .color(TEXT_MUTED),
                 );
                 ui.separator();
-                if ui.add(accent_button(s.refresh, ACCENT_SECONDARY)).on_hover_text(s.refresh_tooltip).clicked() {
-                    // Re-select the same source after refreshing if it's still
-                    // present (matched by hwnd) -- e.g. refreshing just to pick
-                    // up a newly-opened window shouldn't silently drop whatever
-                    // was already selected.
-                    let previously_selected_hwnd =
-                        self.selected_source.and_then(|i| self.sources.get(i)).map(|src| src.hwnd);
-                    self.sources = enumerate_sources();
-                    self.source_icon_textures.clear();
-                    self.selected_source = previously_selected_hwnd
-                        .and_then(|hwnd| self.sources.iter().position(|src| src.hwnd == hwnd));
-                    self.audio_devices = enumerate_audio_devices().unwrap_or_default();
-                    self.selected_audio = self.audio_devices.iter().map(|d| d.is_loopback).collect();
-                    // export_track_selection is NOT reset here -- it's tied to the last
-                    // finished recording's actually-probed track count
-                    // (export_available_tracks), set once in poll_background_work after
-                    // finalize succeeds, not to the live device list. Resetting it here
-                    // to match the current device count would desync it from what the
-                    // export checkboxes are actually supposed to represent.
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled { s.overlay_on } else { s.overlay_off };
                     if ui.add(accent_button(label, ACCENT_SECONDARY)).on_hover_text(s.overlay_toggle_tooltip).clicked() {
@@ -1305,6 +1290,13 @@ impl App {
     }
 
     fn request_repaints(&self, ctx: &egui::Context) {
+        // Unconditional, independent of every other state below -- without
+        // this, refresh_sources_and_audio_if_due's 2s timer only actually
+        // fires when something else happens to wake the UI (mouse move,
+        // click), same class of bug as the Highlight-save repaint gap: the
+        // background check would run, but the app would sit fully idle and
+        // never repaint to pick up its result.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
         if self.session.is_recording() {
             // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -1533,6 +1525,56 @@ impl App {
         self.free_space_bytes = crate::disk_space::free_bytes(&self.config.output_dir).ok();
         self.free_space_checked_at = Some(Instant::now());
         self.free_space_checked_dir = Some(self.config.output_dir.clone());
+    }
+
+    /// Keeps the source/audio-device lists live without a manual Refresh
+    /// button, at most every `SOURCES_CHECK_INTERVAL`. Two things this
+    /// deliberately does NOT do, both found while designing this:
+    ///
+    /// - Replace `self.sources` on every check, unconditionally. Window
+    ///   Z-order shifts every time the user alt-tabs, even when nothing
+    ///   opened or closed -- unconditionally replacing the list would make
+    ///   entries visibly reorder while the user is trying to click one. Only
+    ///   replace it (and only then clear/reload icon textures) when the SET
+    ///   of window handles actually changed.
+    /// - Reset `selected_audio` on every check. The old manual Refresh
+    ///   button did this unconditionally (fine for a deliberate click); doing
+    ///   it silently every couple of seconds would stomp on audio tracks the
+    ///   user just manually checked. Only reset it when the SET of device
+    ///   IDs actually changed (a device was plugged/unplugged).
+    ///
+    /// Both preserve the current selection by hwnd, same as the old Refresh
+    /// button did.
+    fn refresh_sources_and_audio_if_due(&mut self) {
+        const SOURCES_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.sources_checked_at.is_some_and(|t| t.elapsed() < SOURCES_CHECK_INTERVAL) {
+            return;
+        }
+        self.sources_checked_at = Some(Instant::now());
+
+        let new_sources = enumerate_sources();
+        let current_hwnds: std::collections::HashSet<usize> = self.sources.iter().map(|s| s.hwnd).collect();
+        let new_hwnds: std::collections::HashSet<usize> = new_sources.iter().map(|s| s.hwnd).collect();
+        if new_hwnds != current_hwnds {
+            let previously_selected_hwnd =
+                self.selected_source.and_then(|i| self.sources.get(i)).map(|src| src.hwnd);
+            self.sources = new_sources;
+            self.source_icon_textures.clear();
+            self.selected_source = previously_selected_hwnd
+                .and_then(|hwnd| self.sources.iter().position(|src| src.hwnd == hwnd));
+        }
+
+        let new_audio_devices = enumerate_audio_devices().unwrap_or_default();
+        let current_ids: std::collections::HashSet<&str> =
+            self.audio_devices.iter().map(|d| d.id.as_str()).collect();
+        let new_ids: std::collections::HashSet<&str> = new_audio_devices.iter().map(|d| d.id.as_str()).collect();
+        if new_ids != current_ids {
+            self.selected_audio = new_audio_devices.iter().map(|d| d.is_loopback).collect();
+            self.audio_devices = new_audio_devices;
+            // export_track_selection is NOT reset here -- same reasoning as the
+            // old Refresh button: it's tied to the last finished recording's
+            // actually-probed track count, not the live device list.
+        }
     }
 
     fn stop_recording(&mut self) {
