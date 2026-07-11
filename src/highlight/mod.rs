@@ -166,7 +166,7 @@ pub fn spawn_highlight_actor(
             match writer.finalize() {
                 Ok(finished_path) => {
                     let info = SegmentInfo { path: finished_path, duration: last_pts };
-                    let mut guard = segments.lock().expect("highlight segments mutex poisoned");
+                    let mut guard = segments.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.push_back(info);
                     while guard.len() > max_segments {
                         if let Some(old) = guard.pop_front() {
@@ -198,7 +198,7 @@ pub fn spawn_highlight_actor(
 /// foreground window (segments from a different app/resolution can't be
 /// concatenated with new ones, see `encode::highlight_export::concat_and_trim`).
 pub fn discard_segments(segments: &Mutex<VecDeque<SegmentInfo>>) {
-    let mut guard = segments.lock().expect("highlight segments mutex poisoned");
+    let mut guard = segments.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for seg in guard.drain(..) {
         let _ = std::fs::remove_file(&seg.path);
     }

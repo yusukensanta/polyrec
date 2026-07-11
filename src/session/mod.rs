@@ -540,7 +540,12 @@ impl SessionManager {
                 .map_err(|_| AppError::Encode("highlight actor stopped before confirming save".into()))?;
 
             let snapshot: Vec<SegmentInfo> = {
-                let guard = segments_arc.lock().expect("highlight segments mutex poisoned");
+                // Recover rather than propagate a second panic -- poisoning only
+                // means some *other* holder of this lock already panicked, and
+                // every operation under this lock (here and in highlight/mod.rs)
+                // is infallible Vec/Deque bookkeeping, so the data itself can't
+                // be left in a torn state.
+                let guard = segments_arc.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.iter().cloned().collect()
             };
 

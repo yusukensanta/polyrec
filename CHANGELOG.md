@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unplugging or disabling an audio device (microphone/speakers) mid-recording used to spin retrying forever with a warning logged every 10ms while that track silently went dead; it's now detected and stops that track cleanly with a single error log, leaving other tracks/video unaffected.
+
+## [v0.5.9] - 2026-07-10
+
+### Fixed
+
 - A rare failure building a capture worker's per-thread Tokio runtime (video/audio, manual recording or Highlight) now logs and stops that worker cleanly instead of panicking its OS thread.
 
 ## [v0.5.1] - 2026-07-10
