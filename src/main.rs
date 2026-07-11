@@ -49,7 +49,19 @@ fn main() -> eframe::Result<()> {
             // actual content (Quality/Hotkeys buttons, output-dir row, REC
             // button) tops out around 420-450px; 760 keeps the resizable
             // 200-380px source-list panel comfortable without the excess.
-            .with_inner_size([760.0, 600.0])
+            //
+            // Height bumped 600 -> 680: each checked audio device's volume
+            // slider adds a row to the left panel's AUDIO section, and that
+            // section's own internal scroll area reserves its full capped
+            // height once content exceeds it (rather than shrinking to fit) —
+            // with just the default-checked device, this already pushed
+            // "App audio only" a few pixels below the window's bottom edge at
+            // 600, with no scrollbar reaching it. Measured empirically (UI
+            // Automation bounding rects: at 600, "App audio only"'s bottom
+            // sat 9px past the window's bottom edge with only the
+            // default-checked device; at 680, it clears the edge by 43px
+            // even with both Speakers and Microphone checked).
+            .with_inner_size([760.0, 680.0])
             .with_min_inner_size([620.0, 450.0])
             .with_icon(icon),
         ..Default::default()
