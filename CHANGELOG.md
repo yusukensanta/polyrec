@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.21] - 2026-07-12
+
 ### Added
 
 - Individual running applications with sound (Discord, Spotify, a game, etc.) can now be selected as their own independent audio recording track, in a new "APPLICATIONS" section below AUDIO in the source panel. Each entry gets the same per-source volume slider as physical audio devices. Captured via the same Process Loopback Capture mechanism "App audio only" already uses, just targeting an arbitrary app instead of requiring it to also be the video capture source -- the two are independent and can be combined.
