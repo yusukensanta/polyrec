@@ -1,6 +1,6 @@
 [package]
 name = "polyrec"
-version = "0.5.19"
+version = "0.5.20"
 edition = "2024"
 description = "Multi-track screen recorder for Windows"
 license = "Apache-2.0"
