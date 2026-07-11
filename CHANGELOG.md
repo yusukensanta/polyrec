@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.22] - 2026-07-12
+
 ### Changed
 
 - Reorganized the source panel's AUDIO section: SYSTEM (Speakers/Microphone) and APPLICATIONS are now both subsections under one AUDIO heading, in a smaller font than top-level section headers, since both are audio *inputs* just scoped differently. SYSTEM always shows every device at once (sized to fit all of them, since the device list is effectively fixed for the process's lifetime) rather than the fixed small cap it had before.
