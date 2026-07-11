@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.18] - 2026-07-11
+
 ### Fixed
 
 - The left panel's "App audio only" checkbox (and, with both audio devices checked, the Microphone volume slider above it) could be cut off below the default window's bottom edge -- each checked device's volume slider (v0.5.16) grew the AUDIO section, and its internal scroll area reserves its full capped height once content exceeds it rather than shrinking to fit. Default window height increased 600 -> 680.
