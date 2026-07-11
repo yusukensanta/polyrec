@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- With two audio devices checked, the second device's volume slider could be clipped by the AUDIO section's own internal scroll boundary (capped at 140px, tuned before sliders existed -- two checked devices with sliders need ~160px) while its checkbox label stayed visible above the cut. Cap raised to 180px; default window height raised 680 -> 720 to keep "App audio only" comfortably clear of the bottom edge with the larger AUDIO section.
+
 ## [v0.5.19] - 2026-07-11
 
 ### Added

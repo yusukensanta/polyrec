@@ -49,18 +49,22 @@ fn main() -> eframe::Result<()> {
         // button) tops out around 420-450px; 760 keeps the resizable
         // 200-380px source-list panel comfortable without the excess.
         //
-        // Height bumped 600 -> 680: each checked audio device's volume
-        // slider adds a row to the left panel's AUDIO section, and that
-        // section's own internal scroll area reserves its full capped
+        // Height bumped 600 -> 680 -> 720: each checked audio device's
+        // volume slider adds a row to the left panel's AUDIO section, and
+        // that section's own internal scroll area reserves its full capped
         // height once content exceeds it (rather than shrinking to fit) —
         // with just the default-checked device, this already pushed
         // "App audio only" a few pixels below the window's bottom edge at
-        // 600, with no scrollbar reaching it. Measured empirically (UI
-        // Automation bounding rects: at 600, "App audio only"'s bottom
-        // sat 9px past the window's bottom edge with only the
-        // default-checked device; at 680, it clears the edge by 43px
-        // even with both Speakers and Microphone checked).
-        .with_inner_size([760.0, 680.0])
+        // 600 (measured empirically via UI Automation bounding rects: 9px
+        // past the edge). 680 fixed that, but the AUDIO section's own
+        // scroll cap was still only 140px (render_source_panel), too small
+        // for two checked devices' sliders (~160px) -- the second device's
+        // slider was itself clipped by that inner scroll boundary. Bumping
+        // the cap to 180 to fit both fixes that, but reclaims some of the
+        // margin 680 gave "App audio only"; bumped again to 720 to restore
+        // it (verified empirically, see render_source_panel's comment on
+        // the 180 cap).
+        .with_inner_size([760.0, 720.0])
         .with_min_inner_size([620.0, 450.0])
         .with_icon(icon);
     // Reopen where the window was left (including across a self-update's
