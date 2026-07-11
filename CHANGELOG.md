@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Stop/Pause buttons shown while recording were left-aligned instead of sharing the REC button's centered position, and the extra "State: Idle" hint line (shown only when idle) shifted the whole action row up or down relative to Recording/Paused -- both now sit at the same centered position regardless of state.
+
+### Changed
+
+- Recording start/stop/finalize now log at info level (source, audio track count, output path) instead of being silent on success -- previously only failures were logged, so there was no way to reconstruct a recording session's timeline from the log alone.
+
+## [v0.5.11] - 2026-07-11
+
+### Fixed
+
 - Unplugging or disabling an audio device (microphone/speakers) mid-recording used to spin retrying forever with a warning logged every 10ms while that track silently went dead; it's now detected and stops that track cleanly with a single error log, leaving other tracks/video unaffected.
 
 ## [v0.5.9] - 2026-07-10

@@ -358,6 +358,11 @@ impl App {
                     self.export_available_tracks = crate::encode::remux::count_audio_tracks(&path)
                         .inspect_err(|e| tracing::warn!("count_audio_tracks failed, export controls will stay hidden: {e}"))
                         .unwrap_or(0);
+                    tracing::info!(
+                        "recording finalized: {} ({} audio track(s))",
+                        path.display(),
+                        self.export_available_tracks
+                    );
                     self.export_track_selection = vec![true; self.export_available_tracks];
                     self.export_state = ExportState::Idle;
                     self.export_result_rx = None;
@@ -879,13 +884,21 @@ impl App {
                 // dot + colored label at the top of this panel -- showing it
                 // again here too would just be the same fact twice. Idle has
                 // no other indicator, so it's the only state this line adds.
-                if matches!(self.session.state(), SessionState::Idle) {
-                    ui.label(
-                        egui::RichText::new(format!("{}{}", s.state_prefix, s.session_state_idle))
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                }
+                //
+                // Always render this label -- even with empty text -- rather
+                // than skipping it outside Idle. Skipping it changed the
+                // action row's position in this Ui's widget order between
+                // states, which shifted REC/STOP+pause/Resume up or down
+                // relative to each other (and separately tripped egui's
+                // "widget rect changed id between passes" warning, since the
+                // row landing at a given screen rect had a different id from
+                // one frame to the next).
+                let state_line = if matches!(self.session.state(), SessionState::Idle) {
+                    format!("{}{}", s.state_prefix, s.session_state_idle)
+                } else {
+                    String::new()
+                };
+                ui.label(egui::RichText::new(state_line).size(TEXT_CAPTION).color(TEXT_MUTED));
 
                 if is_paused {
                     let btn = egui::Button::new(
@@ -898,28 +911,39 @@ impl App {
                         self.handle_pause_button();
                     }
                 } else if is_recording {
-                    ui.horizontal(|ui| {
-                        let stop_btn = egui::Button::new(
-                            egui::RichText::new(s.stop_button)
-                                .color(ACCENT_REC)
-                                .size(TEXT_BUTTON),
-                        )
-                        .fill(BG_BTN_STOP)
-                        .corner_radius(ROUNDING_PRIMARY_BTN)
-                        .min_size(egui::Vec2::new(90.0, 52.0));
-                        if ui.add(stop_btn).clicked() {
-                            self.handle_rec_button(is_recording);
-                        }
+                    // `ui.horizontal` claims this Ui's full remaining width for
+                    // its own rect rather than shrinking to its children's
+                    // combined size, so the outer bottom_up(Align::Center)
+                    // centers that already-full-width rect (a no-op) instead of
+                    // centering the buttons within it -- they were left-aligned
+                    // to the panel's left edge instead of sharing REC's centered
+                    // position. `with_main_align(Center)` centers the row's
+                    // actual content within the available width instead.
+                    ui.with_layout(
+                        egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
+                        |ui| {
+                            let stop_btn = egui::Button::new(
+                                egui::RichText::new(s.stop_button)
+                                    .color(ACCENT_REC)
+                                    .size(TEXT_BUTTON),
+                            )
+                            .fill(BG_BTN_STOP)
+                            .corner_radius(ROUNDING_PRIMARY_BTN)
+                            .min_size(egui::Vec2::new(90.0, 52.0));
+                            if ui.add(stop_btn).clicked() {
+                                self.handle_rec_button(is_recording);
+                            }
 
-                        let pause_btn = egui::Button::new(
-                            egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
-                        )
-                        .fill(egui::Color32::from_rgb(30, 30, 46))
-                        .min_size(egui::Vec2::new(44.0, 52.0));
-                        if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
-                            self.handle_pause_button();
-                        }
-                    });
+                            let pause_btn = egui::Button::new(
+                                egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
+                            )
+                            .fill(egui::Color32::from_rgb(30, 30, 46))
+                            .min_size(egui::Vec2::new(44.0, 52.0));
+                            if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
+                                self.handle_pause_button();
+                            }
+                        },
+                    );
                 } else {
                     let btn = egui::Button::new(
                         egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
@@ -1661,6 +1685,9 @@ impl App {
             .active
             .as_ref()
             .map(|a| a.output_path.clone());
+        if let Some(p) = &path {
+            tracing::info!("recording stop requested, finalizing: {}", p.display());
+        }
         let disk_full = self
             .session
             .active
@@ -1679,6 +1706,7 @@ impl App {
     }
 
     fn start_recording_with_source(&mut self, source: CaptureSource) {
+        let source_title = source.window_title.clone();
         let selected_devices: Vec<_> = self
             .audio_devices
             .iter()
@@ -1686,6 +1714,7 @@ impl App {
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
+        let track_count = selected_devices.len();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps,
@@ -1704,11 +1733,16 @@ impl App {
             &self.config.output_dir,
             encode,
         ) {
-            Ok(_) => {
+            Ok(path) => {
+                tracing::info!(
+                    "recording started: source={source_title:?} audio_tracks={track_count} output={}",
+                    path.display()
+                );
                 self.session.apply(SessionAction::Start);
                 self.recording_start = Some(Instant::now());
             }
             Err(e) => {
+                tracing::error!("start_capture failed for source={source_title:?}: {e}");
                 let prefix = self.config.lang().strings().couldnt_start_recording_prefix;
                 self.error_message = Some(format!("{prefix}{e}"));
             }
