@@ -160,6 +160,13 @@ pub struct App {
     highlight_save_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
     self_update_state: SelfUpdateState,
     self_update_handle: Option<tokio::task::JoinHandle<Result<(), crate::error::AppError>>>,
+    /// Window position as of the most recent frame -- updated every frame in
+    /// `ui()` (cheap, in-memory only) and written to `config.toml` exactly
+    /// once, in `on_exit()`, rather than on every change. A window drag can
+    /// generate far more position-changed frames than e.g. the volume
+    /// slider's bounded ~200 steps, so save-on-every-change would be
+    /// needlessly write-heavy here.
+    last_window_pos: Option<egui::Pos2>,
 }
 
 impl App {
@@ -235,6 +242,7 @@ impl App {
             highlight_save_handle: None,
             self_update_state: SelfUpdateState::Idle,
             self_update_handle: None,
+            last_window_pos: None,
         }
     }
 }
@@ -254,6 +262,12 @@ impl eframe::App for App {
         let ctx = &ctx;
         let s: &'static Strings = self.config.lang().strings();
 
+        // In-memory only -- see the `last_window_pos` field doc for why this
+        // isn't saved to config.toml here.
+        if let Some(outer_rect) = ctx.input(|i| i.viewport().outer_rect) {
+            self.last_window_pos = Some(outer_rect.min);
+        }
+
         self.poll_background_work(ctx, s);
 
         self.render_menu_bar(ui, s);
@@ -271,6 +285,16 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         if let Some(h) = self.hotkey_listener.take() {
             h.stop();
+        }
+        // Covers both a normal close and the close a successful self-update
+        // triggers (dashboard.rs's ViewportCommand::Close after
+        // perform_self_update returns Ok) -- no special-casing needed in
+        // self_update.rs itself.
+        if let Some(pos) = self.last_window_pos {
+            self.config.window_position = Some((pos.x, pos.y));
+            if let Err(e) = self.config.save() {
+                tracing::error!("failed to save window position: {e}");
+            }
         }
     }
 }

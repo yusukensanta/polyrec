@@ -42,28 +42,37 @@ fn main() -> eframe::Result<()> {
     });
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-1024.png"))
         .expect("failed to decode app icon");
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("PolyRec")
+        // 900px left a large empty gap on the right of the center panel —
+        // actual content (Quality/Hotkeys buttons, output-dir row, REC
+        // button) tops out around 420-450px; 760 keeps the resizable
+        // 200-380px source-list panel comfortable without the excess.
+        //
+        // Height bumped 600 -> 680: each checked audio device's volume
+        // slider adds a row to the left panel's AUDIO section, and that
+        // section's own internal scroll area reserves its full capped
+        // height once content exceeds it (rather than shrinking to fit) —
+        // with just the default-checked device, this already pushed
+        // "App audio only" a few pixels below the window's bottom edge at
+        // 600, with no scrollbar reaching it. Measured empirically (UI
+        // Automation bounding rects: at 600, "App audio only"'s bottom
+        // sat 9px past the window's bottom edge with only the
+        // default-checked device; at 680, it clears the edge by 43px
+        // even with both Speakers and Microphone checked).
+        .with_inner_size([760.0, 680.0])
+        .with_min_inner_size([620.0, 450.0])
+        .with_icon(icon);
+    // Reopen where the window was left (including across a self-update's
+    // relaunch, since config.toml lives in %APPDATA%, untouched by the exe
+    // swap) instead of the OS's default placement -- see
+    // Config::sane_window_position for why an out-of-range saved value is
+    // ignored rather than trusted outright.
+    if let Some((x, y)) = config.sane_window_position() {
+        viewport = viewport.with_position([x, y]);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("PolyRec")
-            // 900px left a large empty gap on the right of the center panel —
-            // actual content (Quality/Hotkeys buttons, output-dir row, REC
-            // button) tops out around 420-450px; 760 keeps the resizable
-            // 200-380px source-list panel comfortable without the excess.
-            //
-            // Height bumped 600 -> 680: each checked audio device's volume
-            // slider adds a row to the left panel's AUDIO section, and that
-            // section's own internal scroll area reserves its full capped
-            // height once content exceeds it (rather than shrinking to fit) —
-            // with just the default-checked device, this already pushed
-            // "App audio only" a few pixels below the window's bottom edge at
-            // 600, with no scrollbar reaching it. Measured empirically (UI
-            // Automation bounding rects: at 600, "App audio only"'s bottom
-            // sat 9px past the window's bottom edge with only the
-            // default-checked device; at 680, it clears the edge by 43px
-            // even with both Speakers and Microphone checked).
-            .with_inner_size([760.0, 680.0])
-            .with_min_inner_size([620.0, 450.0])
-            .with_icon(icon),
+        viewport,
         ..Default::default()
     };
 
