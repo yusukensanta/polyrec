@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.13] - 2026-07-11
+
 ### Fixed
 
 - The Stop/Pause buttons shown while recording still weren't actually centered under REC despite v0.5.12's fix -- that attempt centered the row within an oversized fallback area (the layout's full remaining space, in a bottom-up panel) rather than a properly reserved slot, which also nudged REC itself up from its usual spot. Both REC and Stop/Pause now reserve an exact-sized, correctly stacked slot before centering within it.
