@@ -51,3 +51,32 @@ jobs:
       # something actually reachable on Windows still fails this step.
       - name: Security audit
         run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0192
+
+  # Every release build is a `push: tags: v*.*.*` run -- its own cache scope,
+  # distinct from every other tag and from main (GitHub Actions only lets a
+  # run restore a cache from its own ref, a PR's base branch, or the default
+  # branch). Without this, every release tag was a cold, from-scratch build
+  # (~8min just for "Build release binary", confirmed via a run log showing
+  # "No cache found." then a full ~250-crate rebuild). This job builds the
+  # same --release profile on every push to main and saves under the same
+  # shared-key release.yml's cache step uses, so a release tag pushed shortly
+  # after its version-bump commit lands on main restores from here instead.
+  # Gated to push (not pull_request): a PR's cache scope can't help main's
+  # release builds anyway, so running this on every PR would just double CI
+  # time for no benefit.
+  prime-release-cache:
+    if: github.event_name == 'push'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: release-windows
+
+      - name: Build release binary (cache warm-up for release.yml)
+        run: cargo build --release --locked

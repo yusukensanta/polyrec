@@ -68,7 +68,20 @@ jobs:
         with:
           toolchain: stable
 
+      # A tag push is its own cache scope, distinct from every other tag and
+      # from main -- GitHub Actions only lets a run restore a cache from its
+      # own ref, a PR's base branch, or the default branch, so without a
+      # shared-key every release tag was a cold, from-scratch build (~8min
+      # just for "Build release binary", confirmed via the run log showing
+      # "No cache found." then a full dependency rebuild). `ci.yml`'s
+      # prime-release-cache job builds this same profile on every push to
+      # main and saves under this same shared-key, which as the default
+      # branch's cache IS visible here -- so a release tag pushed shortly
+      # after its version-bump commit lands on main restores that cache
+      # instead of rebuilding ~250 crates from scratch.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: release-windows
 
       - name: Verify tag matches Cargo.toml version
         shell: pwsh
