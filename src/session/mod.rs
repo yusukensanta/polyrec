@@ -135,10 +135,12 @@ impl SessionManager {
 
     /// Starts capture and recording actors.
     /// `frame_count` is incremented by the video pump for each frame forwarded to the encoder.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_capture(
         &mut self,
         source: CaptureSource,
         audio_devices: Vec<AudioDevice>,
+        audio_gains: Vec<f32>,
         app_audio_only: bool,
         frame_count: Arc<AtomicU64>,
         output_dir: &std::path::Path,
@@ -218,6 +220,7 @@ impl SessionManager {
 
         for (i, dev) in audio_devices.into_iter().enumerate() {
             let track_id = TrackId::new(i as u32);
+            let gain = audio_gains.get(i).copied().unwrap_or(1.0);
             let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
             let audio_clock = Arc::clone(&clock);
             let audio_pause = Arc::clone(&pause_flag);
@@ -238,12 +241,12 @@ impl SessionManager {
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
                         run_process_loopback_capture(
-                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx,
+                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx, gain,
                         )
                         .await
                     } else {
                         run_audio_capture(
-                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx,
+                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx, gain,
                         )
                         .await
                     };
@@ -331,6 +334,7 @@ impl SessionManager {
         &mut self,
         source: &CaptureSource,
         audio_devices: Vec<AudioDevice>,
+        audio_gains: Vec<f32>,
         app_audio_only: bool,
         output_dir: &Path,
         encode: EncodeSettings,
@@ -416,6 +420,7 @@ impl SessionManager {
 
         for (i, dev) in audio_devices.into_iter().enumerate() {
             let track_id = TrackId::new(i as u32);
+            let gain = audio_gains.get(i).copied().unwrap_or(1.0);
             let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
             let audio_clock = Arc::clone(&clock);
             let audio_pause = Arc::clone(&pause_flag);
@@ -436,12 +441,12 @@ impl SessionManager {
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
                         run_process_loopback_capture(
-                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx,
+                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx, gain,
                         )
                         .await
                     } else {
                         run_audio_capture(
-                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx,
+                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx, gain,
                         )
                         .await
                     };
@@ -827,7 +832,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+        sm.start_capture(source, audio_devices, vec![], false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
             .expect("start_capture failed");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture returned None");
@@ -879,7 +884,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let temp_path = sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+        let temp_path = sm.start_capture(source, audio_devices, vec![], false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
             .expect("start_capture failed");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -937,7 +942,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+        sm.start_capture(source, audio_devices, vec![], false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
             .expect("start_capture failed");
 
         // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
@@ -1041,7 +1046,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let temp_path = sm.start_capture(source, audio_devices, true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+        let temp_path = sm.start_capture(source, audio_devices, vec![], true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
             .expect("start_capture failed");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1079,7 +1084,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
-        sm.start_highlight_buffering(&source, audio_devices, false, dir.path(), EncodeSettings::default(), 30)
+        sm.start_highlight_buffering(&source, audio_devices, vec![], false, dir.path(), EncodeSettings::default(), 30)
             .expect("start_highlight_buffering failed");
         assert!(sm.is_highlighting());
         assert_eq!(sm.highlight_hwnd(), Some(source.hwnd));
@@ -1136,7 +1141,7 @@ mod tests {
         let segment_dir = dir.path().join("polyrec").join("_highlight_buffer");
         let mut sm = SessionManager::new();
 
-        sm.start_highlight_buffering(&source, audio_devices.clone(), false, dir.path(), EncodeSettings::default(), 30)
+        sm.start_highlight_buffering(&source, audio_devices.clone(), vec![], false, dir.path(), EncodeSettings::default(), 30)
             .expect("first start_highlight_buffering failed");
         tokio::time::sleep(std::time::Duration::from_secs(12)).await;
         let files_before_pause = std::fs::read_dir(&segment_dir).unwrap().count();
@@ -1154,7 +1159,7 @@ mod tests {
 
         // Resume -- as `refresh_highlight_buffering` does right after a
         // manual recording stops.
-        sm.start_highlight_buffering(&source, audio_devices, false, dir.path(), EncodeSettings::default(), 30)
+        sm.start_highlight_buffering(&source, audio_devices, vec![], false, dir.path(), EncodeSettings::default(), 30)
             .expect("resumed start_highlight_buffering failed");
 
         // The pre-pause files must be gone immediately on resume, not just
