@@ -8,6 +8,7 @@ use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem,
 };
 use windows::Graphics::SizeInt32;
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HWND;
@@ -173,6 +174,23 @@ pub async fn run_video_capture(
         .StartCapture()
         .map_err(|e| AppError::Capture(format!("StartCapture: {e}")))?;
 
+    // WGC's documented signal that the capture target is gone (the captured
+    // window was closed/destroyed, or its monitor was disconnected) --
+    // without this, TryGetNextFrame below just keeps erroring forever with
+    // nothing to distinguish "target closed" from the ordinary "no frame
+    // ready yet" case it also returns, so the loop spun indefinitely at
+    // ~1000Hz with no way to notice or log that capture had permanently died
+    // (found via the same audio-device-invalidated pattern fixed earlier;
+    // this is the video-side equivalent of that gap).
+    let item_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let item_closed_handler = Arc::clone(&item_closed);
+    item
+        .Closed(&TypedEventHandler::new(move |_, _| {
+            item_closed_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }))
+        .map_err(|e| AppError::Capture(format!("GraphicsCaptureItem::Closed: {e}")))?;
+
     // Staging texture — created once here and reused every frame via CopyResource.
     // This used to be recreated inside the loop despite this comment already
     // claiming otherwise: allocating a fresh GPU resource every frame (at 60fps)
@@ -208,6 +226,10 @@ pub async fn run_video_capture(
 
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        if item_closed.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!("capture item closed (captured window destroyed or its display disconnected), stopping video capture");
             break;
         }
 
