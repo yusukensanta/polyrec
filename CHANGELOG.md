@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reorganized the source panel's AUDIO section: SYSTEM (Speakers/Microphone) and APPLICATIONS are now both subsections under one AUDIO heading, in a smaller font than top-level section headers, since both are audio *inputs* just scoped differently. SYSTEM always shows every device at once (sized to fit all of them, since the device list is effectively fixed for the process's lifetime) rather than the fixed small cap it had before.
+- Each panel section (capture sources, SYSTEM, APPLICATIONS) now scrolls independently instead of the whole panel sharing one scroll area, so every section header stays reachable without having to scroll past a long source list first.
+- A checkbox's volume slider now appears on its own row underneath, indented, instead of stacking sideways -- unchanged from the original per-device slider design, just also applied to the new APPLICATIONS list. Toggling a checkbox never resizes the panel: each section's scroll area reserves a fixed height regardless of how many rows are currently expanded.
+- Volume sliders are capped at 100% (down from 200%) -- this is a recorder, not a mixing console, so only attenuation is offered, not boost.
+
 ## [v0.5.21] - 2026-07-12
 
 ### Added

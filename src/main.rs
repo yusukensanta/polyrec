@@ -48,12 +48,16 @@ fn main() -> eframe::Result<()> {
         // button) tops out around 420-450px; 760 keeps the resizable
         // 200-380px source-list panel comfortable without the excess.
         //
-        // 720 is just a comfortable starting height, not a hard requirement
-        // -- the source panel is one scroll area top to bottom (see
-        // render_source_panel), so however many devices/apps a given
-        // machine has, content past the bottom edge is always reachable by
-        // scrolling rather than clipped or overlapping whatever follows it.
-        .with_inner_size([760.0, 720.0])
+        // 740: the left panel's sections (source list, SYSTEM, APPLICATIONS)
+        // each scroll independently with a fixed max_height (see
+        // render_source_panel), so the panel's total content height no
+        // longer varies with how many devices/apps exist or are checked --
+        // unlike the per-row height used to before every checkbox+slider
+        // was made a single fixed-height row. 740 was measured empirically
+        // (via UI Automation bounding rects) to give "App audio only" a
+        // comfortable margin below the window's bottom edge at that fixed
+        // total.
+        .with_inner_size([760.0, 740.0])
         .with_min_inner_size([620.0, 450.0])
         .with_icon(icon);
     // Reopen where the window was left (including across a self-update's
