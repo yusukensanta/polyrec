@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.19] - 2026-07-11
+
 ### Added
 
 - The window reopens wherever it was last left instead of the OS's default placement -- saved on close (including the close a self-update triggers, so it survives updating too), restored on next launch.
