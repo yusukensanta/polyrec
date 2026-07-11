@@ -615,8 +615,19 @@ impl App {
                 // audio devices (virtual cables, multiple interfaces) could
                 // otherwise reintroduce the same "pushes the rest of the
                 // panel out of view" problem the source list had.
+                //
+                // 180, not the original 140: each checked device's volume
+                // slider added a second row (checkbox ~32 + slider row ~32 +
+                // spacing) per device, so two checked devices need ~160px,
+                // not the ~64px two checkbox-only rows used to. At the old
+                // 140 cap, a second checked device's slider was clipped by
+                // this scroll area's own boundary while its checkbox label
+                // stayed visible above the cut -- reported as "the slider is
+                // cut off by another audio source name". Paired with the
+                // main.rs window-height bump below, so "App audio only"
+                // doesn't lose the margin this reclaims.
                 egui::ScrollArea::vertical()
-                    .max_height(140.0)
+                    .max_height(180.0)
                     .id_salt("audio_device_scroll")
                     .show(ui, |ui| {
                         for (i, dev) in self.audio_devices.iter().enumerate() {
