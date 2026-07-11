@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.17] - 2026-07-11
+
 ### Fixed
 
 - The per-device volume slider (added in v0.5.16) only persisted a change to config.toml when an actual pointer-drag ended, so a value change from anywhere else (keyboard, assistive tech) could silently never be saved -- found via a live restart-and-check. Now saves on any confirmed value change.
