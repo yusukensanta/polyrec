@@ -52,6 +52,28 @@ pub struct AudioDevice {
     pub is_loopback: bool,
 }
 
+/// A running application's WASAPI audio session -- lets a specific app's
+/// audio (Discord, Spotify, a game) be selected as its own independent
+/// recording track via Process Loopback Capture, the same mechanism the
+/// "App audio only" checkbox already uses for whichever window is selected
+/// as the video capture source. This is deliberately separate from that:
+/// picking an app here doesn't require it to be the video source, and vice
+/// versa (see `capture::audio::enumerate_app_audio_sessions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppAudioSource {
+    pub process_id: u32,
+    /// e.g. "Discord.exe" -- used as the stable key for
+    /// `Config::audio_device_gain` (prefixed `"app:"`) since `process_id`
+    /// isn't stable across the app's own restarts.
+    pub exe_name: String,
+    /// WASAPI's own session display name if the app set one (most don't);
+    /// falls back to `exe_name` with the `.exe` suffix stripped.
+    pub display_name: String,
+    /// (RGBA bytes, width, height) of the exe's small icon, if extractable --
+    /// same convention as `CaptureSource::icon_rgba`.
+    pub icon_rgba: Option<(Vec<u8>, u32, u32)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

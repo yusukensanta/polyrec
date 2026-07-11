@@ -1,23 +1,29 @@
 use crate::error::AppError;
 use crate::session::clock::RecordingClock;
-use crate::types::{AudioDevice, AudioSamples, TrackId};
+use crate::types::{AppAudioSource, AudioDevice, AudioSamples, TrackId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use windows::core::{implement, Interface};
-use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eMultimedia, eRender, ActivateAudioInterfaceAsync,
-    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
-    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
-    IMMDeviceEnumerator, MMDeviceEnumerator, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
-    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, WAVEFORMATEX,
-    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-};
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ, BLOB};
-use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
+use windows::Win32::Media::Audio::{
+    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    ActivateAudioInterfaceAsync, AudioSessionStateExpired, IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
+    IAudioCaptureClient, IAudioClient, IAudioSessionControl2, IAudioSessionManager2,
+    IMMDeviceEnumerator, MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    WAVEFORMATEX, eCapture, eConsole, eMultimedia, eRender,
+};
+use windows::Win32::System::Com::StructuredStorage::{
+    PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+};
+use windows::Win32::System::Com::{
+    BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    STGM_READ,
+};
 use windows::Win32::System::Variant::VT_BLOB;
+use windows::core::{Interface, implement};
 
 /// Fixed target format all captured audio is normalized to before it reaches the
 /// encoder. Devices report all kinds of native mix formats (e.g. 96kHz/8ch);
@@ -88,7 +94,11 @@ impl LinearResampler {
         let ch = self.channels;
         let in_frames = input.len() / ch;
         fn frame_at<'a>(i: usize, input: &'a [f32], prev: &'a [f32], ch: usize) -> &'a [f32] {
-            if i == 0 { prev } else { &input[(i - 1) * ch..i * ch] }
+            if i == 0 {
+                prev
+            } else {
+                &input[(i - 1) * ch..i * ch]
+            }
         }
 
         let mut out = Vec::new();
@@ -112,7 +122,8 @@ impl LinearResampler {
         }
 
         self.pos -= in_frames as f64;
-        self.prev_frame.copy_from_slice(&input[(in_frames - 1) * ch..in_frames * ch]);
+        self.prev_frame
+            .copy_from_slice(&input[(in_frames - 1) * ch..in_frames * ch]);
         out
     }
 }
@@ -135,8 +146,8 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
                 .GetId()
                 .map(|p| p.to_string().unwrap_or_default())
                 .unwrap_or_default();
-            let name = get_device_friendly_name(&dev)
-                .unwrap_or_else(|| "Default Output".to_string());
+            let name =
+                get_device_friendly_name(&dev).unwrap_or_else(|| "Default Output".to_string());
             devices.push(AudioDevice {
                 id,
                 name,
@@ -150,8 +161,8 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
                 .GetId()
                 .map(|p| p.to_string().unwrap_or_default())
                 .unwrap_or_default();
-            let name = get_device_friendly_name(&dev)
-                .unwrap_or_else(|| "Default Input".to_string());
+            let name =
+                get_device_friendly_name(&dev).unwrap_or_else(|| "Default Input".to_string());
             devices.push(AudioDevice {
                 id,
                 name,
@@ -162,11 +173,111 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
     Ok(devices)
 }
 
+/// Enumerate running applications that currently have a WASAPI audio session
+/// on the default render (Speakers) endpoint -- lets a specific app (Discord,
+/// Spotify, a game) be picked as its own recording track via
+/// `run_process_loopback_capture`, independent of whichever window is
+/// selected as the video capture source (see `AppAudioSource`'s doc comment).
+///
+/// Includes both `Active` and `Inactive` sessions (an app that's currently
+/// silent -- paused music, nobody talking -- still keeps its session and
+/// should still be pickable), excludes `Expired` ones (the app's audio
+/// client was torn down, effectively closed) and the OS's own system-sounds
+/// session (not a real app). De-duplicates by process id -- one app can hold
+/// several concurrent sessions (e.g. multiple simultaneous sounds).
+pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
+    let mut sources = Vec::new();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| {
+                AppError::Windows(format!("CoCreateInstance MMDeviceEnumerator: {e}"))
+            })?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .map_err(|e| AppError::Windows(format!("GetDefaultAudioEndpoint: {e}")))?;
+        let session_manager: IAudioSessionManager2 = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| AppError::Windows(format!("Activate IAudioSessionManager2: {e}")))?;
+        let session_enum = session_manager
+            .GetSessionEnumerator()
+            .map_err(|e| AppError::Windows(format!("GetSessionEnumerator: {e}")))?;
+        let count = session_enum
+            .GetCount()
+            .map_err(|e| AppError::Windows(format!("GetCount: {e}")))?;
+
+        let mut seen_pids = std::collections::HashSet::new();
+        for i in 0..count {
+            let Ok(control) = session_enum.GetSession(i) else {
+                continue;
+            };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+                continue;
+            };
+            // HRESULT is a "boolean success code" here (S_OK = is the system
+            // sounds session, S_FALSE = isn't) -- NOT a Result to treat with
+            // is_ok(), which would be true for both (S_FALSE is still
+            // SUCCEEDED). Compare the raw code directly.
+            if control2.IsSystemSoundsSession().0 == 0 {
+                continue;
+            }
+            if control.GetState().unwrap_or(AudioSessionStateExpired) == AudioSessionStateExpired {
+                continue;
+            }
+            let Ok(pid) = control2.GetProcessId() else {
+                continue;
+            };
+            if pid == 0 || !seen_pids.insert(pid) {
+                continue;
+            }
+
+            let exe_path = crate::sources::get_exe_path(pid);
+            let Some(exe_name) = exe_path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+            else {
+                // Can't identify the process (already exited, or access
+                // denied) -- not worth listing an audio source with no name.
+                continue;
+            };
+
+            // WASAPI's own session display name, if the app bothered to set
+            // one -- most don't, so this is usually empty and we fall back
+            // to the exe name, same convention CaptureSource uses.
+            let wasapi_name = control.GetDisplayName().ok().and_then(|pwsz| {
+                let s = pwsz.to_string().ok().filter(|s| !s.is_empty());
+                CoTaskMemFree(Some(pwsz.0 as *const _));
+                s
+            });
+            let display_name = wasapi_name.unwrap_or_else(|| {
+                exe_name
+                    .strip_suffix(".exe")
+                    .or_else(|| exe_name.strip_suffix(".EXE"))
+                    .unwrap_or(&exe_name)
+                    .to_string()
+            });
+
+            let icon_rgba = exe_path
+                .as_deref()
+                .and_then(crate::sources::extract_exe_icon_rgba);
+
+            sources.push(AppAudioSource {
+                process_id: pid,
+                exe_name,
+                display_name,
+                icon_rgba,
+            });
+        }
+    }
+    Ok(sources)
+}
+
 /// Read PKEY_Device_FriendlyName from the device property store.
 /// GUID: {A45C254E-DF1C-4EFD-8020-67D146A850E0}, pid = 14
-fn get_device_friendly_name(
-    device: &windows::Win32::Media::Audio::IMMDevice,
-) -> Option<String> {
+fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Option<String> {
     unsafe {
         let store = device.OpenPropertyStore(STGM_READ).ok()?;
 
@@ -258,7 +369,19 @@ pub async fn run_audio_capture(
         }
         let bytes_per_frame = (*mix_format).nBlockAlign as usize;
 
-        run_capture_loop(audio_client, sample_rate, channels, bytes_per_frame, track_id, clock, pause_flag, stop_flag, tx, gain).await
+        run_capture_loop(
+            audio_client,
+            sample_rate,
+            channels,
+            bytes_per_frame,
+            track_id,
+            clock,
+            pause_flag,
+            stop_flag,
+            tx,
+            gain,
+        )
+        .await
     }
 }
 
@@ -306,7 +429,9 @@ pub async fn run_process_loopback_capture(
                 &wave_format,
                 None,
             )
-            .map_err(|e| AppError::Windows(format!("IAudioClient::Initialize (process loopback): {e}")))?;
+            .map_err(|e| {
+                AppError::Windows(format!("IAudioClient::Initialize (process loopback): {e}"))
+            })?;
 
         run_capture_loop(
             audio_client,
@@ -344,105 +469,115 @@ async unsafe fn run_capture_loop(
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
-) -> Result<(), AppError> { unsafe {
-    let capture_client: IAudioCaptureClient = audio_client
-        .GetService()
-        .map_err(|e| AppError::Windows(format!("GetService IAudioCaptureClient: {e}")))?;
+) -> Result<(), AppError> {
+    unsafe {
+        let capture_client: IAudioCaptureClient = audio_client
+            .GetService()
+            .map_err(|e| AppError::Windows(format!("GetService IAudioCaptureClient: {e}")))?;
 
-    audio_client
-        .Start()
-        .map_err(|e| AppError::Windows(format!("IAudioClient::Start: {e}")))?;
+        audio_client
+            .Start()
+            .map_err(|e| AppError::Windows(format!("IAudioClient::Start: {e}")))?;
 
-    let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-    let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
+        let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+        let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
-    loop {
-        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-
-        let mut data: *mut u8 = std::ptr::null_mut();
-        let mut frames_available: u32 = 0;
-        let mut flags: u32 = 0;
-
-        match capture_client.GetBuffer(&mut data, &mut frames_available, &mut flags, None, None) {
-            Ok(()) if frames_available > 0 => {
-                let sample_count = frames_available as usize * channels as usize;
-                let mut samples = vec![0.0f32; sample_count];
-
-                for (i, sample) in samples.iter_mut().enumerate() {
-                    let byte_offset = i * bytes_per_sample;
-                    let sample_ptr = data.add(byte_offset);
-                    *sample = if bytes_per_sample == 4 {
-                        *(sample_ptr as *const f32)
-                    } else if bytes_per_sample == 2 {
-                        *(sample_ptr as *const i16) as f32 / 32768.0
-                    } else {
-                        0.0
-                    };
-                }
-
-                capture_client
-                    .ReleaseBuffer(frames_available)
-                    .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
-
-                // Always release buffer first (above), then discard if paused.
-                if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    continue;
-                }
-
-                let pts = clock.elapsed();
-                let stereo = to_stereo(&samples, channels);
-                let mut resampled = resampler.process(&stereo);
-                apply_gain(&mut resampled, gain);
-                let audio = AudioSamples {
-                    track_id,
-                    pts,
-                    samples: resampled,
-                    sample_rate: TARGET_SAMPLE_RATE,
-                    channels: TARGET_CHANNELS,
-                };
-
-                if tx.send(audio).await.is_err() {
-                    // Receiver dropped — stop gracefully
-                    break;
-                }
-            }
-            Ok(()) => {
-                // No data yet; yield to the async runtime
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            }
-            Err(e) if e.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
-                // The endpoint was unplugged/disabled mid-capture -- retrying
-                // GetBuffer on it forever just spins and spams the warning
-                // below every 10ms, since the device is never coming back on
-                // this handle. Log once at error level and stop the track
-                // cleanly (other tracks/video are unaffected) instead.
-                tracing::error!("audio device invalidated (unplugged/disabled), stopping this track: {e}");
+        loop {
+            if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
-            Err(e) => {
-                tracing::warn!("GetBuffer error: {e}");
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let mut frames_available: u32 = 0;
+            let mut flags: u32 = 0;
+
+            match capture_client.GetBuffer(&mut data, &mut frames_available, &mut flags, None, None)
+            {
+                Ok(()) if frames_available > 0 => {
+                    let sample_count = frames_available as usize * channels as usize;
+                    let mut samples = vec![0.0f32; sample_count];
+
+                    for (i, sample) in samples.iter_mut().enumerate() {
+                        let byte_offset = i * bytes_per_sample;
+                        let sample_ptr = data.add(byte_offset);
+                        *sample = if bytes_per_sample == 4 {
+                            *(sample_ptr as *const f32)
+                        } else if bytes_per_sample == 2 {
+                            *(sample_ptr as *const i16) as f32 / 32768.0
+                        } else {
+                            0.0
+                        };
+                    }
+
+                    capture_client
+                        .ReleaseBuffer(frames_available)
+                        .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
+
+                    // Always release buffer first (above), then discard if paused.
+                    if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+
+                    let pts = clock.elapsed();
+                    let stereo = to_stereo(&samples, channels);
+                    let mut resampled = resampler.process(&stereo);
+                    apply_gain(&mut resampled, gain);
+                    let audio = AudioSamples {
+                        track_id,
+                        pts,
+                        samples: resampled,
+                        sample_rate: TARGET_SAMPLE_RATE,
+                        channels: TARGET_CHANNELS,
+                    };
+
+                    if tx.send(audio).await.is_err() {
+                        // Receiver dropped — stop gracefully
+                        break;
+                    }
+                }
+                Ok(()) => {
+                    // No data yet; yield to the async runtime
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+                Err(e) if e.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
+                    // The endpoint was unplugged/disabled mid-capture -- retrying
+                    // GetBuffer on it forever just spins and spams the warning
+                    // below every 10ms, since the device is never coming back on
+                    // this handle. Log once at error level and stop the track
+                    // cleanly (other tracks/video are unaffected) instead.
+                    tracing::error!(
+                        "audio device invalidated (unplugged/disabled), stopping this track: {e}"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("GetBuffer error: {e}");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
             }
         }
-    }
 
-    let _ = audio_client.Stop();
-    Ok(())
-}}
+        let _ = audio_client.Stop();
+        Ok(())
+    }
+}
 
 #[implement(IActivateAudioInterfaceCompletionHandler)]
 struct ActivationCompletionHandler {
-    tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<windows::core::Result<windows::core::IUnknown>>>>,
+    tx: std::sync::Mutex<
+        Option<std::sync::mpsc::Sender<windows::core::Result<windows::core::IUnknown>>>,
+    >,
 }
 
 impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandler_Impl {
-    fn ActivateCompleted(&self, activateoperation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
+    fn ActivateCompleted(
+        &self,
+        activateoperation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows::core::Result<()> {
         let result = (|| -> windows::core::Result<windows::core::IUnknown> {
-            let op = activateoperation.as_ref().ok_or_else(|| {
-                windows::core::Error::from(windows::Win32::Foundation::E_POINTER)
-            })?;
+            let op = activateoperation
+                .as_ref()
+                .ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_POINTER))?;
             let mut hr = windows::core::HRESULT(0);
             let mut activated: Option<windows::core::IUnknown> = None;
             unsafe { op.GetActivateResult(&mut hr, &mut activated)? };
@@ -464,76 +599,78 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandl
 unsafe fn activate_process_loopback_audio_client(
     target_pid: u32,
     include_tree: bool,
-) -> Result<IAudioClient, AppError> { unsafe {
-    let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
-        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
-            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-                TargetProcessId: target_pid,
-                ProcessLoopbackMode: if include_tree {
-                    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
-                } else {
-                    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
-                },
-            },
-        },
-    };
-
-    // Manually build the PROPVARIANT (VT_BLOB) the activation params must be passed
-    // as. `pBlobData` points at our own stack-local `params` — the OS reads it
-    // synchronously during the ActivateAudioInterfaceAsync call below, so it only needs
-    // to outlive that call, not the whole async operation.
-    //
-    // windows-rs 0.62 makes PROPVARIANT a plain public struct (this module path)
-    // instead of the private windows::core::imp:: raw type that needed a
-    // from_raw() conversion in 0.58 -- constructed directly here instead.
-    let variant = PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: core::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_BLOB,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    blob: BLOB {
-                        cbSize: core::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: &mut params as *mut _ as *mut u8,
+) -> Result<IAudioClient, AppError> {
+    unsafe {
+        let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+            ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                    TargetProcessId: target_pid,
+                    ProcessLoopbackMode: if include_tree {
+                        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                    } else {
+                        PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
                     },
                 },
-            }),
-        },
-    };
+            },
+        };
 
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
-    let handler_obj = ActivationCompletionHandler {
-        tx: std::sync::Mutex::new(Some(result_tx)),
-    };
-    let handler: IActivateAudioInterfaceCompletionHandler = handler_obj.into();
+        // Manually build the PROPVARIANT (VT_BLOB) the activation params must be passed
+        // as. `pBlobData` points at our own stack-local `params` — the OS reads it
+        // synchronously during the ActivateAudioInterfaceAsync call below, so it only needs
+        // to outlive that call, not the whole async operation.
+        //
+        // windows-rs 0.62 makes PROPVARIANT a plain public struct (this module path)
+        // instead of the private windows::core::imp:: raw type that needed a
+        // from_raw() conversion in 0.58 -- constructed directly here instead.
+        let variant = PROPVARIANT {
+            Anonymous: PROPVARIANT_0 {
+                Anonymous: core::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                    vt: VT_BLOB,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: PROPVARIANT_0_0_0 {
+                        blob: BLOB {
+                            cbSize: core::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                            pBlobData: &mut params as *mut _ as *mut u8,
+                        },
+                    },
+                }),
+            },
+        };
 
-    let activate_result = ActivateAudioInterfaceAsync(
-        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-        &<IAudioClient as windows::core::Interface>::IID,
-        Some(&variant as *const _),
-        &handler,
-    )
-    .map_err(|e| AppError::Windows(format!("ActivateAudioInterfaceAsync: {e}")));
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let handler_obj = ActivationCompletionHandler {
+            tx: std::sync::Mutex::new(Some(result_tx)),
+        };
+        let handler: IActivateAudioInterfaceCompletionHandler = handler_obj.into();
 
-    // `variant.blob.pBlobData` points at our stack `params`, not CoTaskMem-allocated
-    // memory — dropping `variant` normally would run PropVariantClear, which for
-    // VT_BLOB calls CoTaskMemFree on that pointer. Forget it instead; there's nothing
-    // heap-owned in it for us to leak.
-    core::mem::forget(variant);
-    activate_result?;
+        let activate_result = ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &<IAudioClient as windows::core::Interface>::IID,
+            Some(&variant as *const _),
+            &handler,
+        )
+        .map_err(|e| AppError::Windows(format!("ActivateAudioInterfaceAsync: {e}")));
 
-    let activated = result_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| AppError::Windows("ActivateAudioInterfaceAsync timed out".into()))?
-        .map_err(|e| AppError::Windows(format!("process loopback activation failed: {e}")))?;
+        // `variant.blob.pBlobData` points at our stack `params`, not CoTaskMem-allocated
+        // memory — dropping `variant` normally would run PropVariantClear, which for
+        // VT_BLOB calls CoTaskMemFree on that pointer. Forget it instead; there's nothing
+        // heap-owned in it for us to leak.
+        core::mem::forget(variant);
+        activate_result?;
 
-    activated
-        .cast::<IAudioClient>()
-        .map_err(|e| AppError::Windows(format!("cast activated interface to IAudioClient: {e}")))
-}}
+        let activated = result_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| AppError::Windows("ActivateAudioInterfaceAsync timed out".into()))?
+            .map_err(|e| AppError::Windows(format!("process loopback activation failed: {e}")))?;
+
+        activated.cast::<IAudioClient>().map_err(|e| {
+            AppError::Windows(format!("cast activated interface to IAudioClient: {e}"))
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -562,7 +699,14 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ = run_process_loopback_capture(
-                    pid, true, TrackId::new(0), clock, pause_flag, stop_flag, tx, 1.0,
+                    pid,
+                    true,
+                    TrackId::new(0),
+                    clock,
+                    pause_flag,
+                    stop_flag,
+                    tx,
+                    1.0,
                 )
                 .await;
             });
@@ -599,7 +743,14 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ = run_audio_capture(
-                    String::new(), TrackId::new(0), true, clock, pause_flag, stop_flag, tx, 1.0,
+                    String::new(),
+                    TrackId::new(0),
+                    true,
+                    clock,
+                    pause_flag,
+                    stop_flag,
+                    tx,
+                    1.0,
                 )
                 .await;
             });
@@ -610,7 +761,10 @@ mod tests {
         // with our own capture loop below, not blocking this thread until done.
         #[allow(clippy::zombie_processes)]
         std::process::Command::new("powershell")
-            .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
+            .args([
+                "-c",
+                "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()",
+            ])
             .spawn()
             .expect("failed to spawn powershell sound player");
 
@@ -638,7 +792,10 @@ mod tests {
         handle.abort();
         println!("DIAG: packets={packet_count} peak_abs_sample={peak}");
         assert!(packet_count > 0, "no audio packets received at all");
-        assert!(peak > 0.01, "peak sample magnitude {peak} looks like silence, not the played WAV");
+        assert!(
+            peak > 0.01,
+            "peak sample magnitude {peak} looks like silence, not the played WAV"
+        );
     }
 
     // Ignored: assumes a real audio subsystem with at least one device, which
@@ -664,6 +821,38 @@ mod tests {
             loopback.is_some(),
             "expected a loopback (render) device in the enumeration"
         );
+    }
+
+    // Ignored for the same reason as enumerate_audio_devices_finds_at_least_one
+    // -- needs a real audio subsystem, which the hosted CI runner doesn't have.
+    #[test]
+    #[ignore]
+    fn enumerate_app_audio_sessions_succeeds_and_has_no_duplicate_pids() {
+        // Not asserting non-empty -- unlike audio *devices* (always at least
+        // a default endpoint), a real desktop can legitimately have zero
+        // apps with an active/inactive audio session at the moment this
+        // runs. Just confirms the WASAPI session-manager path itself works
+        // end to end and that de-duplication (each app appears once even if
+        // it holds multiple concurrent sessions) actually holds.
+        let sources = enumerate_app_audio_sessions().expect("enumerate_app_audio_sessions failed");
+        let mut pids: Vec<u32> = sources.iter().map(|s| s.process_id).collect();
+        pids.sort_unstable();
+        pids.dedup();
+        assert_eq!(
+            pids.len(),
+            sources.len(),
+            "expected no duplicate process ids"
+        );
+        for s in &sources {
+            assert!(
+                !s.exe_name.is_empty(),
+                "every listed source should have a resolved exe name"
+            );
+            assert!(
+                !s.display_name.is_empty(),
+                "every listed source should have a non-empty display name"
+            );
+        }
     }
 
     #[test]

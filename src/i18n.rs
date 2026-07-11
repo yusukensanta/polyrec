@@ -87,6 +87,11 @@ pub struct Strings {
     pub no_matching_windows: &'static str,
     pub audio_header: &'static str,
     pub no_audio_devices: &'static str,
+    /// Header for the per-app audio source list (Discord, Spotify, etc.) --
+    /// distinct from `audio_header`'s physical-device list. See
+    /// `types::AppAudioSource`.
+    pub applications_header: &'static str,
+    pub no_app_audio_sources: &'static str,
     pub app_audio_only_label: &'static str,
     pub tooltip_no_loopback_device: &'static str,
     pub tooltip_check_loopback_first: &'static str,
@@ -96,8 +101,8 @@ pub struct Strings {
     pub status_header: &'static str,
     pub state_paused: &'static str,
     pub state_recording: &'static str,
-    pub tracks_word: &'static str,  // used as "{n} {tracks_word}"
-    pub frames_word: &'static str,  // used as "{n} {frames_word}"
+    pub tracks_word: &'static str, // used as "{n} {tracks_word}"
+    pub frames_word: &'static str, // used as "{n} {frames_word}"
     pub saving_recording: &'static str,
     pub select_source_prompt: &'static str,
     // Only shown while Idle -- Recording/Paused already show their state via
@@ -218,6 +223,8 @@ pub static EN: Strings = Strings {
     no_matching_windows: "No windows match your search.",
     audio_header: "AUDIO",
     no_audio_devices: "No audio devices found.",
+    applications_header: "APPLICATIONS",
+    no_app_audio_sources: "No apps with sound found.",
     app_audio_only_label: "🎯 App audio only (exclude other system sounds)",
     tooltip_no_loopback_device: "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present).",
     tooltip_check_loopback_first: "Check the system audio (🔊) box above first.",
@@ -335,6 +342,8 @@ pub static JA: Strings = Strings {
     no_matching_windows: "検索に一致するウィンドウがありません。",
     audio_header: "オーディオ",
     no_audio_devices: "オーディオデバイスが見つかりません。",
+    applications_header: "アプリケーション",
+    no_app_audio_sources: "音声を再生しているアプリが見つかりません。",
     app_audio_only_label: "🎯 このアプリの音声のみ（他のシステム音を除外）",
     tooltip_no_loopback_device: "システム再生デバイスが見つかりません。ミュートは問題ありませんが、デバイス自体は存在している必要があります。",
     tooltip_check_loopback_first: "まず上のシステム音声（🔊）にチェックを入れてください。",

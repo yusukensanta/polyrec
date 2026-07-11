@@ -2,19 +2,21 @@ pub mod clock;
 pub mod state;
 
 use crate::capture::audio::{
-    run_audio_capture, run_process_loopback_capture, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
+    TARGET_CHANNELS, TARGET_SAMPLE_RATE, run_audio_capture, run_process_loopback_capture,
 };
 use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
+use crate::encode::RecordingCommand;
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::highlight_export;
 use crate::encode::writer::video_bitrate_bps;
-use crate::encode::RecordingCommand;
 use crate::error::AppError;
-use crate::highlight::{spawn_highlight_actor, SaveNowRequest, SegmentInfo, HIGHLIGHT_SEGMENT_SECONDS};
+use crate::highlight::{
+    HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
+};
 use crate::session::clock::RecordingClock;
-use crate::types::{AudioDevice, CaptureSource, SessionState, TrackId};
-use state::{transition, SessionAction};
+use crate::types::{AppAudioSource, AudioDevice, CaptureSource, SessionState, TrackId};
+use state::{SessionAction, transition};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -141,6 +143,8 @@ impl SessionManager {
         source: CaptureSource,
         audio_devices: Vec<AudioDevice>,
         audio_gains: Vec<f32>,
+        app_audio_sources: Vec<AppAudioSource>,
+        app_audio_source_gains: Vec<f32>,
         app_audio_only: bool,
         frame_count: Arc<AtomicU64>,
         output_dir: &std::path::Path,
@@ -158,16 +162,21 @@ impl SessionManager {
             return Err(AppError::DiskFull(polyrec_dir));
         }
 
-        // All captured audio is downmixed/resampled to this fixed target in
-        // run_audio_capture, regardless of each device's native mix format.
+        // All captured audio is downmixed/resampled (or, for app sources,
+        // already produced) at this fixed target, regardless of each
+        // device's native mix format -- so a per-app source's track needs
+        // the exact same spec entry as a device's.
         let audio_specs: Vec<(u32, u16)> = audio_devices
             .iter()
             .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
+            .chain(
+                app_audio_sources
+                    .iter()
+                    .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS)),
+            )
             .collect();
 
-        let real_hwnd = windows::Win32::Foundation::HWND(
-            source.hwnd as *mut core::ffi::c_void,
-        );
+        let real_hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
             resolve_capture_and_output_dimensions(real_hwnd, source.hwnd, &encode);
 
@@ -194,7 +203,10 @@ impl SessionManager {
         let video_pause = Arc::clone(&pause_flag);
         let video_stop = Arc::clone(&stop_flag);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     tracing::error!("failed to build video capture runtime: {e}");
@@ -203,20 +215,30 @@ impl SessionManager {
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let hwnd = windows::Win32::Foundation::HWND(
-                    hwnd_val as *mut core::ffi::c_void,
-                );
-                if let Err(e) = run_video_capture(hwnd, capture_width, capture_height, output_width, output_height, video_clock, video_pause, video_stop, video_tx).await {
+                let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
+                if let Err(e) = run_video_capture(
+                    hwnd,
+                    capture_width,
+                    capture_height,
+                    output_width,
+                    output_height,
+                    video_clock,
+                    video_pause,
+                    video_stop,
+                    video_tx,
+                )
+                .await
+                {
                     tracing::error!("VideoCapture error: {e}");
                 }
             });
         });
-        let video_pump_handle =
-            spawn_video_pump(video_rx, recording_tx.clone(), frame_count);
+        let video_pump_handle = spawn_video_pump(video_rx, recording_tx.clone(), frame_count);
 
         // Spawn audio capture + pump (one per device)
         let mut capture_handles = vec![video_capture_handle];
         let mut pump_handles = vec![video_pump_handle];
+        let device_track_count = audio_devices.len();
 
         for (i, dev) in audio_devices.into_iter().enumerate() {
             let track_id = TrackId::new(i as u32);
@@ -230,7 +252,10 @@ impl SessionManager {
             let use_process_loopback = is_loopback && app_audio_only;
             let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
                     Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!("failed to build audio capture runtime: {e}");
@@ -241,17 +266,78 @@ impl SessionManager {
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
                         run_process_loopback_capture(
-                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx, gain,
+                            target_pid,
+                            true,
+                            track_id,
+                            audio_clock,
+                            audio_pause,
+                            audio_stop,
+                            audio_tx,
+                            gain,
                         )
                         .await
                     } else {
                         run_audio_capture(
-                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx, gain,
+                            dev_id,
+                            track_id,
+                            is_loopback,
+                            audio_clock,
+                            audio_pause,
+                            audio_stop,
+                            audio_tx,
+                            gain,
                         )
                         .await
                     };
                     if let Err(e) = result {
                         tracing::error!("AudioCapture[{track_id:?}] error: {e}");
+                    }
+                });
+            });
+            let pump_handle = spawn_audio_pump(audio_rx, recording_tx.clone());
+            capture_handles.push(capture_handle);
+            pump_handles.push(pump_handle);
+        }
+
+        // Spawn per-app audio capture + pump -- independent of app_audio_only
+        // and of whichever process is the video source (source.process_id
+        // above); each selected app is its own explicit target, always via
+        // process loopback capture since that's the only way to isolate one
+        // app's audio (see AppAudioSource's doc comment).
+        for (i, app_source) in app_audio_sources.into_iter().enumerate() {
+            let track_id = TrackId::new((device_track_count + i) as u32);
+            let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
+            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+            let audio_clock = Arc::clone(&clock);
+            let audio_pause = Arc::clone(&pause_flag);
+            let audio_stop = Arc::clone(&stop_flag);
+            let target_pid = app_source.process_id;
+            let capture_handle = tokio::task::spawn_blocking(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("failed to build app audio capture runtime: {e}");
+                        return;
+                    }
+                };
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    if let Err(e) = run_process_loopback_capture(
+                        target_pid,
+                        true,
+                        track_id,
+                        audio_clock,
+                        audio_pause,
+                        audio_stop,
+                        audio_tx,
+                        gain,
+                    )
+                    .await
+                    {
+                        tracing::error!("AppAudioCapture[{track_id:?}] error: {e}");
                     }
                 });
             });
@@ -319,7 +405,9 @@ impl SessionManager {
     /// detects manual recording stopping itself early via
     /// `active.recorder_handle.is_finished()`.
     pub fn highlight_actor_finished(&self) -> bool {
-        self.highlight.as_ref().is_some_and(|h| h.highlight_handle.is_finished())
+        self.highlight
+            .as_ref()
+            .is_some_and(|h| h.highlight_handle.is_finished())
     }
 
     /// Starts (or restarts, for a different window) the Highlight background
@@ -335,6 +423,8 @@ impl SessionManager {
         source: &CaptureSource,
         audio_devices: Vec<AudioDevice>,
         audio_gains: Vec<f32>,
+        app_audio_sources: Vec<AppAudioSource>,
+        app_audio_source_gains: Vec<f32>,
         app_audio_only: bool,
         output_dir: &Path,
         encode: EncodeSettings,
@@ -368,13 +458,21 @@ impl SessionManager {
         let audio_specs: Vec<(u32, u16)> = audio_devices
             .iter()
             .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
+            .chain(
+                app_audio_sources
+                    .iter()
+                    .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS)),
+            )
             .collect();
 
         let real_hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
             resolve_capture_and_output_dimensions(real_hwnd, source.hwnd, &encode);
 
-        let max_segments = buffer_seconds.max(1).div_ceil(HIGHLIGHT_SEGMENT_SECONDS).max(1) as usize;
+        let max_segments = buffer_seconds
+            .max(1)
+            .div_ceil(HIGHLIGHT_SEGMENT_SECONDS)
+            .max(1) as usize;
         let segments: Arc<Mutex<VecDeque<SegmentInfo>>> = Arc::new(Mutex::new(VecDeque::new()));
         let disk_full_flag = Arc::new(AtomicBool::new(false));
         let (highlight_tx, save_now_tx, highlight_handle) = spawn_highlight_actor(
@@ -398,7 +496,10 @@ impl SessionManager {
         let video_pause = Arc::clone(&pause_flag);
         let video_stop = Arc::clone(&stop_flag);
         let video_capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     tracing::error!("failed to build highlight video capture runtime: {e}");
@@ -408,15 +509,29 @@ impl SessionManager {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
-                if let Err(e) = run_video_capture(hwnd, capture_width, capture_height, output_width, output_height, video_clock, video_pause, video_stop, video_tx).await {
+                if let Err(e) = run_video_capture(
+                    hwnd,
+                    capture_width,
+                    capture_height,
+                    output_width,
+                    output_height,
+                    video_clock,
+                    video_pause,
+                    video_stop,
+                    video_tx,
+                )
+                .await
+                {
                     tracing::error!("Highlight VideoCapture error: {e}");
                 }
             });
         });
-        let video_pump_handle = spawn_video_pump(video_rx, highlight_tx.clone(), Arc::new(AtomicU64::new(0)));
+        let video_pump_handle =
+            spawn_video_pump(video_rx, highlight_tx.clone(), Arc::new(AtomicU64::new(0)));
 
         let mut capture_handles = vec![video_capture_handle];
         let mut pump_handles = vec![video_pump_handle];
+        let device_track_count = audio_devices.len();
 
         for (i, dev) in audio_devices.into_iter().enumerate() {
             let track_id = TrackId::new(i as u32);
@@ -430,7 +545,10 @@ impl SessionManager {
             let use_process_loopback = is_loopback && app_audio_only;
             let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
                     Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!("failed to build highlight audio capture runtime: {e}");
@@ -441,17 +559,73 @@ impl SessionManager {
                 local.block_on(&rt, async move {
                     let result = if use_process_loopback {
                         run_process_loopback_capture(
-                            target_pid, true, track_id, audio_clock, audio_pause, audio_stop, audio_tx, gain,
+                            target_pid,
+                            true,
+                            track_id,
+                            audio_clock,
+                            audio_pause,
+                            audio_stop,
+                            audio_tx,
+                            gain,
                         )
                         .await
                     } else {
                         run_audio_capture(
-                            dev_id, track_id, is_loopback, audio_clock, audio_pause, audio_stop, audio_tx, gain,
+                            dev_id,
+                            track_id,
+                            is_loopback,
+                            audio_clock,
+                            audio_pause,
+                            audio_stop,
+                            audio_tx,
+                            gain,
                         )
                         .await
                     };
                     if let Err(e) = result {
                         tracing::error!("Highlight AudioCapture[{track_id:?}] error: {e}");
+                    }
+                });
+            });
+            let pump_handle = spawn_audio_pump(audio_rx, highlight_tx.clone());
+            capture_handles.push(capture_handle);
+            pump_handles.push(pump_handle);
+        }
+
+        for (i, app_source) in app_audio_sources.into_iter().enumerate() {
+            let track_id = TrackId::new((device_track_count + i) as u32);
+            let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
+            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+            let audio_clock = Arc::clone(&clock);
+            let audio_pause = Arc::clone(&pause_flag);
+            let audio_stop = Arc::clone(&stop_flag);
+            let target_pid = app_source.process_id;
+            let capture_handle = tokio::task::spawn_blocking(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("failed to build highlight app audio capture runtime: {e}");
+                        return;
+                    }
+                };
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    if let Err(e) = run_process_loopback_capture(
+                        target_pid,
+                        true,
+                        track_id,
+                        audio_clock,
+                        audio_pause,
+                        audio_stop,
+                        audio_tx,
+                        gain,
+                    )
+                    .await
+                    {
+                        tracing::error!("Highlight AppAudioCapture[{track_id:?}] error: {e}");
                     }
                 });
             });
@@ -540,9 +714,9 @@ impl SessionManager {
             save_now_tx
                 .send(reply_tx)
                 .map_err(|_| AppError::Encode("highlight actor is not running".into()))?;
-            reply_rx
-                .await
-                .map_err(|_| AppError::Encode("highlight actor stopped before confirming save".into()))?;
+            reply_rx.await.map_err(|_| {
+                AppError::Encode("highlight actor stopped before confirming save".into())
+            })?;
 
             let snapshot: Vec<SegmentInfo> = {
                 // Recover rather than propagate a second panic -- poisoning only
@@ -550,7 +724,9 @@ impl SessionManager {
                 // every operation under this lock (here and in highlight/mod.rs)
                 // is infallible Vec/Deque bookkeeping, so the data itself can't
                 // be left in a torn state.
-                let guard = segments_arc.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let guard = segments_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.iter().cloned().collect()
             };
 
@@ -600,14 +776,21 @@ impl Default for SessionManager {
 /// if the exe name is empty or sanitizes away to nothing. `pub(crate)` so the
 /// dashboard can reuse the exact same sanitization for Highlight save filenames.
 pub(crate) fn app_name_from_exe(exe_name: &str) -> String {
-    let trimmed = if exe_name.len() >= 4 && exe_name[exe_name.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &exe_name[..exe_name.len() - 4]
-    } else {
-        exe_name
-    };
+    let trimmed =
+        if exe_name.len() >= 4 && exe_name[exe_name.len() - 4..].eq_ignore_ascii_case(".exe") {
+            &exe_name[..exe_name.len() - 4]
+        } else {
+            exe_name
+        };
     let sanitized: String = trimmed
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if sanitized.is_empty() {
         "recording".to_string()
@@ -640,7 +823,10 @@ fn highlight_saved_dir(output_dir: &Path) -> PathBuf {
 fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathBuf, PathBuf) {
     let polyrec_dir = base_dir.join("polyrec");
     if let Err(e) = std::fs::create_dir_all(&polyrec_dir) {
-        tracing::warn!("Failed to create output directory {}: {e}", polyrec_dir.display());
+        tracing::warn!(
+            "Failed to create output directory {}: {e}",
+            polyrec_dir.display()
+        );
     }
     let start_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -672,7 +858,10 @@ fn resolve_capture_and_output_dimensions(
     let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
         Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
         Err(e) => {
-            tracing::warn!("query_capture_size failed for hwnd {:x}: {e}; using 1920x1080", hwnd_val);
+            tracing::warn!(
+                "query_capture_size failed for hwnd {:x}: {e}; using 1920x1080",
+                hwnd_val
+            );
             (1920u32, 1080u32)
         }
     };
@@ -680,20 +869,32 @@ fn resolve_capture_and_output_dimensions(
         match query_display_size(real_hwnd) {
             Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
             Err(e) => {
-                tracing::warn!("query_display_size failed for hwnd {:x}: {e}; using capture size", hwnd_val);
+                tracing::warn!(
+                    "query_display_size failed for hwnd {:x}: {e}; using capture size",
+                    hwnd_val
+                );
                 None
             }
         }
     } else {
         None
     };
-    let (output_width, output_height) =
-        resolve_output_size(&encode.resolution_mode, (capture_width, capture_height), display_size);
+    let (output_width, output_height) = resolve_output_size(
+        &encode.resolution_mode,
+        (capture_width, capture_height),
+        display_size,
+    );
     let bitrate_bps = match encode.bitrate_mode {
         BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
         BitrateMode::Manual(bps) => bps,
     };
-    (capture_width, capture_height, output_width, output_height, bitrate_bps)
+    (
+        capture_width,
+        capture_height,
+        output_width,
+        output_height,
+        bitrate_bps,
+    )
 }
 
 /// Pure resolution-mode resolution — no I/O, so it's directly unit-testable without
@@ -771,21 +972,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (temp_path, polyrec_dir) = prepare_recording_paths(dir.path(), "vivaldi");
         assert_eq!(polyrec_dir, dir.path().join("polyrec"));
-        assert!(polyrec_dir.is_dir(), "polyrec subdirectory should be created");
+        assert!(
+            polyrec_dir.is_dir(),
+            "polyrec subdirectory should be created"
+        );
         assert_eq!(temp_path.parent(), Some(polyrec_dir.as_path()));
         assert_eq!(temp_path.extension().and_then(|e| e.to_str()), Some("mp4"));
-        assert!(temp_path.file_name().unwrap().to_str().unwrap().starts_with("vivaldi_"));
+        assert!(
+            temp_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("vivaldi_")
+        );
     }
 
     #[test]
     fn resolve_output_size_native_uses_capture_size() {
-        let size = resolve_output_size(&crate::config::ResolutionMode::Native, (1280, 720), Some((2560, 1440)));
+        let size = resolve_output_size(
+            &crate::config::ResolutionMode::Native,
+            (1280, 720),
+            Some((2560, 1440)),
+        );
         assert_eq!(size, (1280, 720));
     }
 
     #[test]
     fn resolve_output_size_display_uses_display_size_when_available() {
-        let size = resolve_output_size(&crate::config::ResolutionMode::Display, (1280, 720), Some((2560, 1440)));
+        let size = resolve_output_size(
+            &crate::config::ResolutionMode::Display,
+            (1280, 720),
+            Some((2560, 1440)),
+        );
         assert_eq!(size, (2560, 1440));
     }
 
@@ -797,7 +1016,11 @@ mod tests {
 
     #[test]
     fn resolve_output_size_custom_uses_explicit_values() {
-        let size = resolve_output_size(&crate::config::ResolutionMode::Custom(1920, 1080), (1280, 720), Some((2560, 1440)));
+        let size = resolve_output_size(
+            &crate::config::ResolutionMode::Custom(1920, 1080),
+            (1280, 720),
+            Some((2560, 1440)),
+        );
         assert_eq!(size, (1920, 1080));
     }
 
@@ -807,8 +1030,14 @@ mod tests {
         let config_default = crate::config::Config::default().encode;
         assert_eq!(settings.fps, config_default.fps);
         assert_eq!(settings.codec, config_default.codec);
-        assert!(matches!(settings.resolution_mode, crate::config::ResolutionMode::Native));
-        assert!(matches!(settings.bitrate_mode, crate::config::BitrateMode::Auto));
+        assert!(matches!(
+            settings.resolution_mode,
+            crate::config::ResolutionMode::Native
+        ));
+        assert!(matches!(
+            settings.bitrate_mode,
+            crate::config::BitrateMode::Auto
+        ));
     }
 
     /// Verifies the recorded video's actual encoded resolution matches the captured
@@ -821,10 +1050,13 @@ mod tests {
         use crate::capture::audio::enumerate_audio_devices;
         use crate::capture::video::query_capture_size;
         use crate::sources::enumerate_sources;
-        use windows::Win32::Media::MediaFoundation::{MFCreateSourceReaderFromURL, MF_MT_FRAME_SIZE};
+        use windows::Win32::Media::MediaFoundation::{
+            MF_MT_FRAME_SIZE, MFCreateSourceReaderFromURL,
+        };
 
         let sources = enumerate_sources();
-        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
         let (expected_w, expected_h) = query_capture_size(hwnd).expect("query_capture_size failed");
 
@@ -832,19 +1064,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, vec![], false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
-            .expect("start_capture failed");
+        sm.start_capture(
+            source,
+            audio_devices,
+            vec![],
+            vec![],
+            vec![],
+            false,
+            Arc::clone(&frame_count),
+            dir.path(),
+            EncodeSettings::default(),
+        )
+        .expect("start_capture failed");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture returned None");
-        let finalized_path = handle.await.expect("recorder task panicked").expect("finalize failed");
+        let handle =
+            tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture returned None");
+        let finalized_path = handle
+            .await
+            .expect("recorder task panicked")
+            .expect("finalize failed");
 
         unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
             let _ = windows::Win32::Media::MediaFoundation::MFStartup(
                 windows::Win32::Media::MediaFoundation::MF_VERSION,
                 windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
             );
-            use windows::Win32::Media::MediaFoundation::{MFMediaType_Video, MF_MT_MAJOR_TYPE};
+            use windows::Win32::Media::MediaFoundation::{MF_MT_MAJOR_TYPE, MFMediaType_Video};
             let url = windows::core::HSTRING::from(finalized_path.to_str().unwrap());
             let reader: windows::Win32::Media::MediaFoundation::IMFSourceReader =
                 MFCreateSourceReaderFromURL(&url, None).expect("MFCreateSourceReaderFromURL");
@@ -859,7 +1108,9 @@ mod tests {
                 }
             }
             let video_type = video_type.expect("no video stream found");
-            let packed = video_type.GetUINT64(&MF_MT_FRAME_SIZE).expect("GetUINT64 frame_size");
+            let packed = video_type
+                .GetUINT64(&MF_MT_FRAME_SIZE)
+                .expect("GetUINT64 frame_size");
             let actual_w = (packed >> 32) as u32;
             let actual_h = (packed & 0xFFFF_FFFF) as u32;
             println!("window: {expected_w}x{expected_h}, encoded: {actual_w}x{actual_h}");
@@ -878,13 +1129,25 @@ mod tests {
         use crate::sources::enumerate_sources;
 
         let sources = enumerate_sources();
-        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let temp_path = sm.start_capture(source, audio_devices, vec![], false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+        let temp_path = sm
+            .start_capture(
+                source,
+                audio_devices,
+                vec![],
+                vec![],
+                vec![],
+                false,
+                Arc::clone(&frame_count),
+                dir.path(),
+                EncodeSettings::default(),
+            )
             .expect("start_capture failed");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -897,10 +1160,20 @@ mod tests {
         // The temp path start_capture returned gets renamed to its finish-timestamped
         // final name inside polyrec/ once the recording completes — they're not equal.
         assert_ne!(finalized_path, temp_path);
-        assert!(!temp_path.exists(), "temp recording file should have been renamed away");
-        assert_eq!(finalized_path.parent(), Some(dir.path().join("polyrec")).as_deref());
+        assert!(
+            !temp_path.exists(),
+            "temp recording file should have been renamed away"
+        );
+        assert_eq!(
+            finalized_path.parent(),
+            Some(dir.path().join("polyrec")).as_deref()
+        );
         let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
-        assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
+        assert!(
+            metadata.len() > 0,
+            "output file is empty: {}",
+            finalized_path.display()
+        );
         println!("frames captured: {}", frame_count.load(Ordering::Relaxed));
         println!("output size: {} bytes", metadata.len());
 
@@ -926,12 +1199,13 @@ mod tests {
         use crate::capture::audio::enumerate_audio_devices;
         use crate::sources::enumerate_sources;
         use windows::Win32::Media::MediaFoundation::{
-            MFAudioFormat_PCM, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
             MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+            MFAudioFormat_PCM, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
         };
 
         let sources = enumerate_sources();
-        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let audio_devices: Vec<_> = enumerate_audio_devices()
             .unwrap_or_default()
             .into_iter()
@@ -942,15 +1216,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(source, audio_devices, vec![], false, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
-            .expect("start_capture failed");
+        sm.start_capture(
+            source,
+            audio_devices,
+            vec![],
+            vec![],
+            vec![],
+            false,
+            Arc::clone(&frame_count),
+            dir.path(),
+            EncodeSettings::default(),
+        )
+        .expect("start_capture failed");
 
         // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
         // process until the sound finishes, but we want it playing concurrently
         // with the recording below, not blocking this thread until done.
         #[allow(clippy::zombie_processes)]
         std::process::Command::new("powershell")
-            .args(["-c", "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()"])
+            .args([
+                "-c",
+                "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()",
+            ])
             .spawn()
             .expect("failed to spawn powershell sound player");
 
@@ -963,20 +1250,32 @@ mod tests {
         println!("output: {}", finalized_path.display());
 
         unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
             let _ = windows::Win32::Media::MediaFoundation::MFStartup(
                 windows::Win32::Media::MediaFoundation::MF_VERSION,
                 windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
             );
             let url = windows::core::HSTRING::from(finalized_path.to_str().unwrap());
-            let reader = MFCreateSourceReaderFromURL(&url, None).expect("MFCreateSourceReaderFromURL");
+            let reader =
+                MFCreateSourceReaderFromURL(&url, None).expect("MFCreateSourceReaderFromURL");
 
             // Force decode to PCM so we can inspect raw samples.
             let pcm_type = MFCreateMediaType().unwrap();
-            pcm_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).unwrap();
-            pcm_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).unwrap();
+            pcm_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                .unwrap();
+            pcm_type
+                .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+                .unwrap();
             reader
-                .SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, None, &pcm_type)
+                .SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
+                    None,
+                    &pcm_type,
+                )
                 .expect("SetCurrentMediaType PCM failed — no audio stream in file?");
 
             let mut peak = 0i32;
@@ -1002,7 +1301,9 @@ mod tests {
                     break;
                 }
                 let Some(sample) = sample else { continue };
-                let buffer = sample.ConvertToContiguousBuffer().expect("ConvertToContiguousBuffer");
+                let buffer = sample
+                    .ConvertToContiguousBuffer()
+                    .expect("ConvertToContiguousBuffer");
                 let mut data: *mut u8 = std::ptr::null_mut();
                 let mut len = 0u32;
                 buffer.Lock(&mut data, None, Some(&mut len)).expect("Lock");
@@ -1019,7 +1320,10 @@ mod tests {
 
             println!("DIAG: total_audio_bytes={total_bytes} peak_pcm16={peak}");
             assert!(total_bytes > 0, "audio track had zero bytes decoded");
-            assert!(peak > 300, "peak PCM16 sample {peak} looks like silence in the recorded file");
+            assert!(
+                peak > 300,
+                "peak PCM16 sample {peak} looks like silence in the recorded file"
+            );
         }
     }
 
@@ -1035,7 +1339,8 @@ mod tests {
         use crate::sources::enumerate_sources;
 
         let sources = enumerate_sources();
-        let mut source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let mut source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         source.process_id = std::process::id();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         assert!(
@@ -1046,7 +1351,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
         let frame_count = Arc::new(AtomicU64::new(0));
-        let temp_path = sm.start_capture(source, audio_devices, vec![], true, Arc::clone(&frame_count), dir.path(), EncodeSettings::default())
+        let temp_path = sm
+            .start_capture(
+                source,
+                audio_devices,
+                vec![],
+                vec![],
+                vec![],
+                true,
+                Arc::clone(&frame_count),
+                dir.path(),
+                EncodeSettings::default(),
+            )
             .expect("start_capture failed");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1057,9 +1373,16 @@ mod tests {
         let finalized_path = result.expect("finalize() returned an error");
 
         assert_ne!(finalized_path, temp_path);
-        assert_eq!(finalized_path.parent(), Some(dir.path().join("polyrec")).as_deref());
+        assert_eq!(
+            finalized_path.parent(),
+            Some(dir.path().join("polyrec")).as_deref()
+        );
         let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
-        assert!(metadata.len() > 0, "output file is empty: {}", finalized_path.display());
+        assert!(
+            metadata.len() > 0,
+            "output file is empty: {}",
+            finalized_path.display()
+        );
         println!("output size: {} bytes", metadata.len());
     }
 
@@ -1079,13 +1402,24 @@ mod tests {
         use crate::sources::enumerate_sources;
 
         let sources = enumerate_sources();
-        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
-        sm.start_highlight_buffering(&source, audio_devices, vec![], false, dir.path(), EncodeSettings::default(), 30)
-            .expect("start_highlight_buffering failed");
+        sm.start_highlight_buffering(
+            &source,
+            audio_devices,
+            vec![],
+            vec![],
+            vec![],
+            false,
+            dir.path(),
+            EncodeSettings::default(),
+            30,
+        )
+        .expect("start_highlight_buffering failed");
         assert!(sm.is_highlighting());
         assert_eq!(sm.highlight_hwnd(), Some(source.hwnd));
 
@@ -1096,14 +1430,30 @@ mod tests {
         let segments_before_save = std::fs::read_dir(&segment_dir)
             .expect("segment directory should exist by now")
             .count();
-        assert!(segments_before_save > 0, "expected at least one rotated segment file on disk");
+        assert!(
+            segments_before_save > 0,
+            "expected at least one rotated segment file on disk"
+        );
 
-        let handle = sm.save_highlight(dir.path(), "e2e_highlight_test").expect("save_highlight failed");
-        let saved_path = handle.await.expect("save_highlight task panicked").expect("concat_and_trim failed");
+        let handle = sm
+            .save_highlight(dir.path(), "e2e_highlight_test")
+            .expect("save_highlight failed");
+        let saved_path = handle
+            .await
+            .expect("save_highlight task panicked")
+            .expect("concat_and_trim failed");
 
         let metadata = std::fs::metadata(&saved_path).expect("saved highlight file missing");
-        assert!(metadata.len() > 0, "saved highlight file is empty: {}", saved_path.display());
-        println!("highlight saved: {} ({} bytes)", saved_path.display(), metadata.len());
+        assert!(
+            metadata.len() > 0,
+            "saved highlight file is empty: {}",
+            saved_path.display()
+        );
+        println!(
+            "highlight saved: {} ({} bytes)",
+            saved_path.display(),
+            metadata.len()
+        );
 
         // Confirms the file is a real, readable container (not just non-empty
         // bytes) -- same verification remux.rs's own tests rely on.
@@ -1134,18 +1484,32 @@ mod tests {
         use crate::sources::enumerate_sources;
 
         let sources = enumerate_sources();
-        let source = pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();
         let segment_dir = dir.path().join("polyrec").join("_highlight_buffer");
         let mut sm = SessionManager::new();
 
-        sm.start_highlight_buffering(&source, audio_devices.clone(), vec![], false, dir.path(), EncodeSettings::default(), 30)
-            .expect("first start_highlight_buffering failed");
+        sm.start_highlight_buffering(
+            &source,
+            audio_devices.clone(),
+            vec![],
+            vec![],
+            vec![],
+            false,
+            dir.path(),
+            EncodeSettings::default(),
+            30,
+        )
+        .expect("first start_highlight_buffering failed");
         tokio::time::sleep(std::time::Duration::from_secs(12)).await;
         let files_before_pause = std::fs::read_dir(&segment_dir).unwrap().count();
-        assert!(files_before_pause > 0, "expected at least one segment file before pausing");
+        assert!(
+            files_before_pause > 0,
+            "expected at least one segment file before pausing"
+        );
 
         // Pause (discard: false) -- as `refresh_highlight_buffering` does
         // right before a manual recording starts.
@@ -1159,8 +1523,18 @@ mod tests {
 
         // Resume -- as `refresh_highlight_buffering` does right after a
         // manual recording stops.
-        sm.start_highlight_buffering(&source, audio_devices, vec![], false, dir.path(), EncodeSettings::default(), 30)
-            .expect("resumed start_highlight_buffering failed");
+        sm.start_highlight_buffering(
+            &source,
+            audio_devices,
+            vec![],
+            vec![],
+            vec![],
+            false,
+            dir.path(),
+            EncodeSettings::default(),
+            30,
+        )
+        .expect("resumed start_highlight_buffering failed");
 
         // The pre-pause files must be gone immediately on resume, not just
         // eventually -- they're never tracked by the new session's deque, so
