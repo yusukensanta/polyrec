@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.15] - 2026-07-11
+
 ### Fixed
 
 - Closing the window being recorded mid-recording used to spin the video capture loop forever (retrying ~1000 times/sec with no logging) instead of stopping -- audio kept recording fine, but video silently died. Now detected via Windows.Graphics.Capture's own "item closed" signal and stops that capture cleanly with a single warning log.
