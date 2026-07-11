@@ -617,23 +617,29 @@ impl App {
                                         )
                                         .suffix("%"),
                                     );
-                                    // Update the in-memory value on every change (so
-                                    // pressing REC mid-drag already uses it), but only
-                                    // write config.toml once the drag actually ends --
-                                    // saving on every changed() frame would mean a
-                                    // full file rewrite dozens of times per second
-                                    // while dragging.
+                                    // Originally gated the save on drag_stopped() alone
+                                    // (to avoid rewriting config.toml on every frame
+                                    // during a drag) -- found via a live restart-and-check
+                                    // that drag_stopped() only fires for an actual
+                                    // pointer-drag release, so a keyboard-driven change
+                                    // (arrow keys after focusing the slider, or any other
+                                    // non-pointer path, e.g. assistive tech via UI
+                                    // Automation's RangeValuePattern) updated the live
+                                    // value but silently never persisted. changed() only
+                                    // fires on an actual value change (bounded by the
+                                    // slider's ~200 discrete steps, not once per frame),
+                                    // so saving on every change is negligible cost for a
+                                    // small local settings file -- not worth the
+                                    // correctness gap to avoid it.
                                     if response.changed() {
                                         self.config
                                             .audio_device_gain
                                             .insert(dev_id.clone(), gain_percent as f32 / 100.0);
-                                    }
-                                    if response.drag_stopped()
-                                        && let Err(e) = self.config.save()
-                                    {
-                                        tracing::error!("failed to save config: {e}");
-                                        self.error_message =
-                                            Some(format!("{}{e}", s.config_save_failed_prefix));
+                                        if let Err(e) = self.config.save() {
+                                            tracing::error!("failed to save config: {e}");
+                                            self.error_message =
+                                                Some(format!("{}{e}", s.config_save_failed_prefix));
+                                        }
                                     }
                                 });
                             }
