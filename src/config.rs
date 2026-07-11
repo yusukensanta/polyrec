@@ -34,6 +34,16 @@ pub struct Config {
     /// failing.
     #[serde(default)]
     pub audio_device_gain: std::collections::HashMap<String, f32>,
+    /// Top-left corner of the window, in screen coordinates, at the last
+    /// clean exit (including the exit triggered by a self-update) -- restored
+    /// on next launch via `ViewportBuilder::with_position` so the window
+    /// reopens where it was left instead of the OS's default placement.
+    /// `None` (the default) leaves placement to the OS, same as before this
+    /// setting existed -- covers both a `config.toml` saved before this field
+    /// existed and the first-ever launch. See `Config::sane_window_position`
+    /// for why this isn't restored unconditionally.
+    #[serde(default)]
+    pub window_position: Option<(f32, f32)>,
 }
 
 fn default_true() -> bool {
@@ -205,6 +215,7 @@ impl Default for Config {
             highlight: HighlightConfig::default(),
             default_app_audio_only: true,
             audio_device_gain: std::collections::HashMap::new(),
+            window_position: None,
         }
     }
 }
@@ -223,6 +234,27 @@ impl Config {
     /// this setting existed).
     pub fn audio_gain(&self, device_id: &str) -> f32 {
         self.audio_device_gain.get(device_id).copied().unwrap_or(1.0)
+    }
+
+    /// `window_position` if it's still worth restoring, `None` otherwise.
+    ///
+    /// This is a loose sanity floor, not real multi-monitor validation --
+    /// eframe/winit don't expose the connected-monitor list before a window
+    /// exists to create one, so there's no reliable way to check "is this
+    /// position still on a screen we actually have" ahead of
+    /// `ViewportBuilder::with_position`. This only catches obviously-invalid
+    /// values (corrupted config.toml, or a coordinate system change) --
+    /// restoring a position from a monitor that's since been unplugged is an
+    /// accepted, undetected edge case; Windows' own window-placement
+    /// recovery (right-click taskbar icon -> Move, or Win+Shift+Arrow) is the
+    /// fallback for it, same as for any other app.
+    pub fn sane_window_position(&self) -> Option<(f32, f32)> {
+        // Symmetric and generous in both directions -- a monitor placed to
+        // the left of (or above) the primary is common and puts the window
+        // at a meaningfully negative x (or y), not just slightly negative
+        // (e.g. a 4K monitor to the left alone accounts for -3840).
+        self.window_position
+            .filter(|&(x, y)| (-20_000.0..20_000.0).contains(&x) && (-20_000.0..20_000.0).contains(&y))
     }
 
     pub fn config_path() -> PathBuf {
@@ -327,6 +359,68 @@ mod tests {
         // A device that was never explicitly set still defaults to 1.0 after
         // the round trip, not 0.0 or missing-key panic.
         assert_eq!(parsed.audio_gain("speakers-456"), 1.0);
+    }
+
+    #[test]
+    fn window_position_defaults_to_none() {
+        assert_eq!(Config::default().window_position, None);
+    }
+
+    #[test]
+    fn window_position_round_trips_toml() {
+        let original = Config { window_position: Some((123.0, -45.0)), ..Config::default() };
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.window_position, Some((123.0, -45.0)));
+    }
+
+    #[test]
+    fn window_position_missing_from_toml_falls_back_to_none() {
+        // Simulates a config.toml saved before this setting existed.
+        let text = r#"
+            output_dir = "."
+            language = "en"
+            [hotkeys]
+            start_stop = "F9"
+            pause = "F8"
+            toggle_overlay = "F7"
+            [overlay]
+            enabled = false
+            opacity = 0.85
+            [encode]
+            codec = "h265"
+            fps = 60
+            resolution_mode = "native"
+            custom_width = 1920
+            custom_height = 1080
+            bitrate_mode = "auto"
+            manual_bitrate_mbps = 12
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert_eq!(parsed.window_position, None);
+        assert_eq!(parsed.sane_window_position(), None);
+    }
+
+    #[test]
+    fn sane_window_position_accepts_typical_multi_monitor_coordinates() {
+        // Negative x is normal for a monitor placed to the left of the
+        // primary in Windows' virtual desktop coordinate space.
+        let c = Config { window_position: Some((-1200.0, 300.0)), ..Config::default() };
+        assert_eq!(c.sane_window_position(), Some((-1200.0, 300.0)));
+    }
+
+    #[test]
+    fn sane_window_position_rejects_wildly_out_of_range_values() {
+        let c = Config { window_position: Some((-99999.0, 50.0)), ..Config::default() };
+        assert_eq!(c.sane_window_position(), None);
+
+        let c = Config { window_position: Some((50.0, 99999.0)), ..Config::default() };
+        assert_eq!(c.sane_window_position(), None);
+    }
+
+    #[test]
+    fn sane_window_position_is_none_when_unset() {
+        assert_eq!(Config::default().sane_window_position(), None);
     }
 
     #[test]
