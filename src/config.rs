@@ -24,6 +24,16 @@ pub struct Config {
     /// saved before this field existed still loads instead of failing.
     #[serde(default = "default_true")]
     pub default_app_audio_only: bool,
+    /// Per-device recording volume, keyed by the device's stable WASAPI
+    /// endpoint id (`AudioDevice::id`) -- a linear multiplier applied to that
+    /// device's captured samples before encoding (see
+    /// `capture::audio::apply_gain`), independent of the device's actual
+    /// system volume. A device with no entry here records at 1.0 (100%,
+    /// unboosted) -- see `Config::audio_gain`. `#[serde(default)]` so a
+    /// `config.toml` saved before this field existed still loads instead of
+    /// failing.
+    #[serde(default)]
+    pub audio_device_gain: std::collections::HashMap<String, f32>,
 }
 
 fn default_true() -> bool {
@@ -160,6 +170,13 @@ impl EncodeConfig {
     }
 }
 
+/// UI-enforced range for `Config::audio_device_gain` values -- 0% (muted) to
+/// 200% (2x boost). Boosting is allowed (the common "my mic is too quiet"
+/// case) but risks reducing headroom; `capture::audio::apply_gain` clamps the
+/// resulting samples to prevent hard digital clipping regardless.
+pub const AUDIO_GAIN_MIN_PERCENT: i32 = 0;
+pub const AUDIO_GAIN_MAX_PERCENT: i32 = 200;
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -187,6 +204,7 @@ impl Default for Config {
             language: "en".into(),
             highlight: HighlightConfig::default(),
             default_app_audio_only: true,
+            audio_device_gain: std::collections::HashMap::new(),
         }
     }
 }
@@ -197,6 +215,14 @@ impl Config {
             "ja" => crate::i18n::Lang::Ja,
             _ => crate::i18n::Lang::En,
         }
+    }
+
+    /// Recording volume for `device_id` as a linear multiplier -- 1.0 (100%)
+    /// if the device has no entry in `audio_device_gain` yet, which is every
+    /// device the first time it's seen (and any `config.toml` saved before
+    /// this setting existed).
+    pub fn audio_gain(&self, device_id: &str) -> f32 {
+        self.audio_device_gain.get(device_id).copied().unwrap_or(1.0)
     }
 
     pub fn config_path() -> PathBuf {
@@ -282,6 +308,25 @@ mod tests {
         assert!(!parsed.highlight.enabled);
         assert_eq!(parsed.highlight.buffer_seconds, 120);
         assert_eq!(parsed.hotkeys.save_highlight, "F10");
+        assert_eq!(parsed.audio_gain("any-device-id"), 1.0);
+    }
+
+    #[test]
+    fn audio_gain_defaults_to_full_volume_for_a_device_with_no_entry() {
+        let c = Config::default();
+        assert_eq!(c.audio_gain("some-device-id"), 1.0);
+    }
+
+    #[test]
+    fn audio_device_gain_round_trips_toml_with_a_non_default_value() {
+        let mut original = Config::default();
+        original.audio_device_gain.insert("mic-123".into(), 1.5);
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.audio_gain("mic-123"), 1.5);
+        // A device that was never explicitly set still defaults to 1.0 after
+        // the round trip, not 0.0 or missing-key panic.
+        assert_eq!(parsed.audio_gain("speakers-456"), 1.0);
     }
 
     #[test]

@@ -45,6 +45,20 @@ fn to_stereo(input: &[f32], channels: u16) -> Vec<f32> {
     }
 }
 
+/// Scales `samples` in place by `gain` (a linear multiplier -- 1.0 = unchanged,
+/// from `Config::audio_gain`'s 0.0-2.0 range), clamping the result to
+/// [-1.0, 1.0]. Boosting above 1.0 is allowed (the common "my mic is too
+/// quiet" case) but reduces headroom, so the clamp prevents that from
+/// becoming hard digital clipping/distortion in the encoded track. A no-op
+/// loop at gain == 1.0 rather than skipping it entirely -- values already
+/// within range are unaffected by clamping, so there's no behavioral
+/// difference worth a branch for it.
+fn apply_gain(samples: &mut [f32], gain: f32) {
+    for s in samples.iter_mut() {
+        *s = (*s * gain).clamp(-1.0, 1.0);
+    }
+}
+
 /// Stateful linear-interpolation resampler. Carries fractional position and the
 /// last input frame across calls so buffer boundaries (WASAPI delivers ~10ms
 /// chunks continuously) don't introduce discontinuities.
@@ -181,6 +195,7 @@ fn get_device_friendly_name(
 /// `device_id` — empty string selects the system default endpoint.
 /// `is_loopback` — when true the stream uses `AUDCLNT_STREAMFLAGS_LOOPBACK`
 ///                 (system audio mix) on the render endpoint.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_audio_capture(
     device_id: String,
     track_id: TrackId,
@@ -189,6 +204,7 @@ pub async fn run_audio_capture(
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
+    gain: f32,
 ) -> Result<(), AppError> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -242,13 +258,14 @@ pub async fn run_audio_capture(
         }
         let bytes_per_frame = (*mix_format).nBlockAlign as usize;
 
-        run_capture_loop(audio_client, sample_rate, channels, bytes_per_frame, track_id, clock, pause_flag, stop_flag, tx).await
+        run_capture_loop(audio_client, sample_rate, channels, bytes_per_frame, track_id, clock, pause_flag, stop_flag, tx, gain).await
     }
 }
 
 /// Capture only the audio produced by `target_pid` (and, if `include_tree`, its child
 /// processes) via the Windows 10 2004+ Process Loopback Capture API, instead of the
 /// full desktop audio mix. Forwards PCM f32 samples to `tx`, same as `run_audio_capture`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_process_loopback_capture(
     target_pid: u32,
     include_tree: bool,
@@ -257,6 +274,7 @@ pub async fn run_process_loopback_capture(
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
+    gain: f32,
 ) -> Result<(), AppError> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -300,6 +318,7 @@ pub async fn run_process_loopback_capture(
             pause_flag,
             stop_flag,
             tx,
+            gain,
         )
         .await
     }
@@ -324,6 +343,7 @@ async unsafe fn run_capture_loop(
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
+    gain: f32,
 ) -> Result<(), AppError> { unsafe {
     let capture_client: IAudioCaptureClient = audio_client
         .GetService()
@@ -373,7 +393,8 @@ async unsafe fn run_capture_loop(
 
                 let pts = clock.elapsed();
                 let stereo = to_stereo(&samples, channels);
-                let resampled = resampler.process(&stereo);
+                let mut resampled = resampler.process(&stereo);
+                apply_gain(&mut resampled, gain);
                 let audio = AudioSamples {
                     track_id,
                     pts,
@@ -541,7 +562,7 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ = run_process_loopback_capture(
-                    pid, true, TrackId::new(0), clock, pause_flag, stop_flag, tx,
+                    pid, true, TrackId::new(0), clock, pause_flag, stop_flag, tx, 1.0,
                 )
                 .await;
             });
@@ -578,7 +599,7 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ = run_audio_capture(
-                    String::new(), TrackId::new(0), true, clock, pause_flag, stop_flag, tx,
+                    String::new(), TrackId::new(0), true, clock, pause_flag, stop_flag, tx, 1.0,
                 )
                 .await;
             });
@@ -662,6 +683,34 @@ mod tests {
         // 4 channels, one frame: [FL, FR, C, LFE] -> keep FL/FR, drop the rest
         let out = to_stereo(&[1.0, 2.0, 3.0, 4.0], 4);
         assert_eq!(out, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn apply_gain_at_1_0_is_a_no_op_for_in_range_samples() {
+        let mut samples = vec![0.1, -0.2, 0.5, -0.9];
+        apply_gain(&mut samples, 1.0);
+        assert_eq!(samples, vec![0.1, -0.2, 0.5, -0.9]);
+    }
+
+    #[test]
+    fn apply_gain_below_1_0_attenuates() {
+        let mut samples = vec![0.4, -0.4];
+        apply_gain(&mut samples, 0.5);
+        assert_eq!(samples, vec![0.2, -0.2]);
+    }
+
+    #[test]
+    fn apply_gain_above_1_0_boosts_and_clamps_to_prevent_clipping() {
+        let mut samples = vec![0.3, -0.3, 0.05];
+        apply_gain(&mut samples, 2.0);
+        // 0.3*2=0.6 and 0.05*2=0.1 stay in range; -0.3*2=-0.6 likewise --
+        // none of these clip, so this proves boosting itself works.
+        assert_eq!(samples, vec![0.6, -0.6, 0.1]);
+
+        let mut loud = vec![0.9, -0.9];
+        apply_gain(&mut loud, 2.0);
+        // 0.9*2=1.8 and -0.9*2=-1.8 would clip without the clamp.
+        assert_eq!(loud, vec![1.0, -1.0]);
     }
 
     #[test]

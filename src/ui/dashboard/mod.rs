@@ -600,6 +600,43 @@ impl App {
                                 &mut self.selected_audio[i],
                                 format!("{} {}", audio_device_icon(dev), dev.name),
                             );
+                            // Only meaningful (and shown) once the device is
+                            // actually recording -- an unchecked device's
+                            // volume has nothing to apply to.
+                            if self.selected_audio[i] {
+                                let dev_id = dev.id.clone();
+                                let mut gain_percent =
+                                    (self.config.audio_gain(&dev_id) * 100.0).round() as i32;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0);
+                                    let response = ui.add(
+                                        egui::Slider::new(
+                                            &mut gain_percent,
+                                            crate::config::AUDIO_GAIN_MIN_PERCENT
+                                                ..=crate::config::AUDIO_GAIN_MAX_PERCENT,
+                                        )
+                                        .suffix("%"),
+                                    );
+                                    // Update the in-memory value on every change (so
+                                    // pressing REC mid-drag already uses it), but only
+                                    // write config.toml once the drag actually ends --
+                                    // saving on every changed() frame would mean a
+                                    // full file rewrite dozens of times per second
+                                    // while dragging.
+                                    if response.changed() {
+                                        self.config
+                                            .audio_device_gain
+                                            .insert(dev_id.clone(), gain_percent as f32 / 100.0);
+                                    }
+                                    if response.drag_stopped()
+                                        && let Err(e) = self.config.save()
+                                    {
+                                        tracing::error!("failed to save config: {e}");
+                                        self.error_message =
+                                            Some(format!("{}{e}", s.config_save_failed_prefix));
+                                    }
+                                });
+                            }
                         }
                     });
 
@@ -1751,6 +1788,8 @@ impl App {
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
+        let selected_gains: Vec<f32> =
+            selected_devices.iter().map(|dev| self.config.audio_gain(&dev.id)).collect();
         let track_count = selected_devices.len();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
@@ -1765,6 +1804,7 @@ impl App {
         match self.session.start_capture(
             source,
             selected_devices,
+            selected_gains,
             self.app_audio_only,
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
@@ -1865,6 +1905,8 @@ impl App {
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
+        let selected_gains: Vec<f32> =
+            selected_devices.iter().map(|dev| self.config.audio_gain(&dev.id)).collect();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps,
@@ -1879,6 +1921,7 @@ impl App {
         if let Err(e) = self.session.start_highlight_buffering(
             &source,
             selected_devices,
+            selected_gains,
             self.app_audio_only,
             &self.config.output_dir,
             encode,

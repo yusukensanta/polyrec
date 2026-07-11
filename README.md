@@ -43,7 +43,7 @@ Releases are also immutable once published — assets can't be silently replaced
 ## Features
 
 - **Window capture** via Windows.Graphics.Capture — pick any visible window. Recording defaults to that window's own native resolution; "Match display" and "Custom" are opt-in alternatives in **⚙ Quality**.
-- **Multi-track audio** — record system loopback (Speakers) and microphone as independent tracks. Loopback is selected by default so the common case is one clean, unambiguous track; check Microphone to add a second.
+- **Multi-track audio** — record system loopback (Speakers) and microphone as independent tracks. Loopback is selected by default so the common case is one clean, unambiguous track; check Microphone to add a second. Each checked device gets its own volume slider (0–200%, default 100%) that only affects the recording, not what you actually hear.
 - **App audio only** — scope loopback capture to just the selected app's process via the Windows Process Loopback Capture API, instead of the full desktop mix.
 - **Pause / resume** without cutting the recording.
 - **Global hotkeys** — start/stop, pause, toggle the on-screen overlay, and save a Highlight clip from anywhere, rebindable from the in-app **⌨ Hotkeys** popup (F9 / F8 / F7 / F10 by default). Pressing start/stop while some other window has focus records *that* window, not whatever's selected in the list.
