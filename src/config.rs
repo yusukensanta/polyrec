@@ -184,11 +184,10 @@ impl EncodeConfig {
 }
 
 /// UI-enforced range for `Config::audio_device_gain` values -- 0% (muted) to
-/// 200% (2x boost). Boosting is allowed (the common "my mic is too quiet"
-/// case) but risks reducing headroom; `capture::audio::apply_gain` clamps the
-/// resulting samples to prevent hard digital clipping regardless.
+/// 100% (unboosted). This is a recorder, not a mixing console: no gain
+/// boost above the source's own level, only attenuation.
 pub const AUDIO_GAIN_MIN_PERCENT: i32 = 0;
-pub const AUDIO_GAIN_MAX_PERCENT: i32 = 200;
+pub const AUDIO_GAIN_MAX_PERCENT: i32 = 100;
 
 impl Default for Config {
     fn default() -> Self {

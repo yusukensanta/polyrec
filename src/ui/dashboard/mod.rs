@@ -517,65 +517,60 @@ impl App {
             .default_size(260.0)
             .size_range(200.0..=380.0)
             .show(ui, |ui| {
-                // The whole panel body lives in a single ScrollArea rather
-                // than each section (source list / audio devices / per-app
-                // audio) having its own -- nesting scroll areas means the
-                // mouse wheel always goes to whichever one the cursor is
-                // over, so with per-section scrolling there was no way to
-                // reach a section pushed past the window's bottom edge (the
-                // wheel just kept scrolling the section under the cursor,
-                // never the outer container). One scroll area for the whole
-                // panel means the wheel always does the right thing, and
-                // there's no per-section max-height to keep re-tuning as
-                // content grows (this session already went through that
-                // twice: 140->180px, and main.rs's 600->680->720 window
-                // height, both chasing sections that had their own caps).
+                section_header(ui, s.capture_source_header);
+
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.source_filter)
+                        .hint_text(s.source_filter_placeholder)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+
+                if self.sources.is_empty() {
+                    ui.label(
+                        egui::RichText::new(s.no_windows_found)
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                }
+
+                // Filters by index rather than cloning matches -- source_icon_textures
+                // and selected_source are both keyed by index into self.sources, so
+                // the real (unfiltered) indices need to survive filtering.
+                let filter = self.source_filter.to_lowercase();
+                let filtered_indices: Vec<usize> = self
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, src)| {
+                        filter.is_empty()
+                            || src.window_title.to_lowercase().contains(&filter)
+                            || src.exe_name.to_lowercase().contains(&filter)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if !self.sources.is_empty() && filtered_indices.is_empty() {
+                    ui.label(
+                        egui::RichText::new(s.no_matching_windows)
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                }
+
+                // Each section scrolls independently (own ScrollArea, own
+                // fixed max_height) rather than the whole panel sharing one
+                // scroll area -- keeps every section header reachable at a
+                // glance instead of having to scroll past a long source
+                // list to reach AUDIO/APPLICATIONS. auto_shrink(false)
+                // makes the reservation exact regardless of item count, so a
+                // section's actual content size can never drift from what
+                // the panel reserved for it -- fixed height in, fixed
+                // height out, no per-frame remeasurement to get wrong.
                 egui::ScrollArea::vertical()
+                    .max_height(220.0)
                     .auto_shrink([false, false])
-                    .id_salt("source_panel_scroll")
+                    .id_salt("source_list_scroll")
                     .show(ui, |ui| {
-                        section_header(ui, s.capture_source_header);
-
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.source_filter)
-                                .hint_text(s.source_filter_placeholder)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.add_space(4.0);
-
-                        if self.sources.is_empty() {
-                            ui.label(
-                                egui::RichText::new(s.no_windows_found)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_MUTED),
-                            );
-                        }
-
-                        // Filters by index rather than cloning matches -- source_icon_textures
-                        // and selected_source are both keyed by index into self.sources, so
-                        // the real (unfiltered) indices need to survive filtering.
-                        let filter = self.source_filter.to_lowercase();
-                        let filtered_indices: Vec<usize> = self
-                            .sources
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, src)| {
-                                filter.is_empty()
-                                    || src.window_title.to_lowercase().contains(&filter)
-                                    || src.exe_name.to_lowercase().contains(&filter)
-                            })
-                            .map(|(i, _)| i)
-                            .collect();
-                        if !self.sources.is_empty() && filtered_indices.is_empty() {
-                            ui.label(
-                                egui::RichText::new(s.no_matching_windows)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_MUTED),
-                            );
-                        }
-
-                        // No per-section cap or ScrollArea here -- see the
-                        // comment on the outer ScrollArea above for why.
                         for &i in &filtered_indices {
                             let source = &self.sources[i];
                             let selected = self.selected_source == Some(i);
@@ -660,21 +655,48 @@ impl App {
                             }
                             ui.add_space(4.0);
                         }
+                    });
 
-                        ui.add_space(12.0);
-                        section_header(ui, s.audio_header);
-                        if self.audio_devices.is_empty() {
-                            ui.label(
-                                egui::RichText::new(s.no_audio_devices)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_MUTED),
-                            );
-                        }
-                        // No per-section cap or ScrollArea here -- see the
-                        // comment on the outer ScrollArea above for why.
+                ui.add_space(12.0);
+                // AUDIO is the parent heading for the two subsections below
+                // it -- SYSTEM (physical devices) and APPLICATIONS (per-app
+                // sources) are both audio *inputs* in the same sense, just
+                // scoped differently, so they read as siblings under one
+                // "AUDIO" umbrella rather than as two unrelated top-level
+                // sections.
+                section_header(ui, s.audio_header);
+
+                subsection_header(ui, s.system_audio_header);
+                if self.audio_devices.is_empty() {
+                    ui.label(
+                        egui::RichText::new(s.no_audio_devices)
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                }
+                // Unlike the source list and APPLICATIONS below (whose item
+                // counts change constantly as windows/apps open and close),
+                // the set of system audio devices is effectively fixed for
+                // the life of the process -- so rather than an arbitrary
+                // cap that can end up scroll-hiding a device, size this
+                // section to fit every device at once, worst case (both
+                // checked, both showing a slider). Still a real ScrollArea
+                // (not an unbounded list) so a machine with unusually many
+                // devices (virtual cables, multiple interfaces) degrades to
+                // scrolling instead of pushing APPLICATIONS off-panel.
+                // Measured empirically (UI Automation bounding rects) on a
+                // checked device showing its slider: checkbox row 32px +
+                // 8px spacing + slider row 32px + 8px trailing spacing = 80.
+                let system_row_height = 80.0;
+                egui::ScrollArea::vertical()
+                    .max_height((self.audio_devices.len().max(1) as f32) * system_row_height)
+                    .auto_shrink([false, false])
+                    .id_salt("audio_device_scroll")
+                    .show(ui, |ui| {
                         for (i, dev) in self.audio_devices.iter().enumerate() {
                             checkbox_with_volume_slider(
                                 ui,
+                                None,
                                 &mut self.config,
                                 &mut self.error_message,
                                 s.config_save_failed_prefix,
@@ -683,18 +705,22 @@ impl App {
                                 dev.id.clone(),
                             );
                         }
+                    });
 
-                        ui.add_space(12.0);
-                        section_header(ui, s.applications_header);
-                        if self.app_audio_sources.is_empty() {
-                            ui.label(
-                                egui::RichText::new(s.no_app_audio_sources)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_MUTED),
-                            );
-                        }
-                        // No per-section cap or ScrollArea here -- see the
-                        // comment on the outer ScrollArea above for why.
+                ui.add_space(8.0);
+                subsection_header(ui, s.applications_header);
+                if self.app_audio_sources.is_empty() {
+                    ui.label(
+                        egui::RichText::new(s.no_app_audio_sources)
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .auto_shrink([false, false])
+                    .id_salt("app_audio_scroll")
+                    .show(ui, |ui| {
                         for (i, src) in self.app_audio_sources.iter().enumerate() {
                             if let std::collections::hash_map::Entry::Vacant(entry) =
                                 self.app_audio_icon_textures.entry(i)
@@ -711,55 +737,51 @@ impl App {
                                 );
                                 entry.insert(tex);
                             }
-                            ui.horizontal(|ui| {
-                                if let Some(tex) = self.app_audio_icon_textures.get(&i) {
-                                    ui.image((tex.id(), egui::vec2(16.0, 16.0)));
-                                }
-                                checkbox_with_volume_slider(
-                                    ui,
-                                    &mut self.config,
-                                    &mut self.error_message,
-                                    s.config_save_failed_prefix,
-                                    &mut self.selected_app_audio[i],
-                                    src.display_name.clone(),
-                                    Config::app_audio_gain_key(&src.exe_name),
-                                );
-                            });
+                            checkbox_with_volume_slider(
+                                ui,
+                                self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
+                                &mut self.config,
+                                &mut self.error_message,
+                                s.config_save_failed_prefix,
+                                &mut self.selected_app_audio[i],
+                                src.display_name.clone(),
+                                Config::app_audio_gain_key(&src.exe_name),
+                            );
                         }
-
-                        let loopback_selected = self
-                            .audio_devices
-                            .iter()
-                            .zip(self.selected_audio.iter())
-                            .any(|(dev, &sel)| dev.is_loopback && sel);
-                        let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
-                        let has_source = self.selected_source.is_some();
-                        ui.add_enabled_ui(loopback_selected && has_source, |ui| {
-                            let response = ui
-                                .checkbox(
-                                    &mut self.app_audio_only,
-                                    egui::RichText::new(s.app_audio_only_label)
-                                        .color(ACCENT_SECONDARY),
-                                )
-                                .on_hover_text(if !has_loopback_device {
-                                    s.tooltip_no_loopback_device
-                                } else if !loopback_selected {
-                                    s.tooltip_check_loopback_first
-                                } else {
-                                    s.tooltip_app_audio_only
-                                });
-                            // Persisted as the default for next launch (and thus what a
-                            // hotkey-started recording uses) -- same pattern as overlay_enabled.
-                            if response.changed() {
-                                self.config.default_app_audio_only = self.app_audio_only;
-                                if let Err(e) = self.config.save() {
-                                    tracing::error!("failed to save config: {e}");
-                                    self.error_message =
-                                        Some(format!("{}{e}", s.config_save_failed_prefix));
-                                }
-                            }
-                        });
                     });
+
+                ui.add_space(8.0);
+                let loopback_selected = self
+                    .audio_devices
+                    .iter()
+                    .zip(self.selected_audio.iter())
+                    .any(|(dev, &sel)| dev.is_loopback && sel);
+                let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
+                let has_source = self.selected_source.is_some();
+                ui.add_enabled_ui(loopback_selected && has_source, |ui| {
+                    let response = ui
+                        .checkbox(
+                            &mut self.app_audio_only,
+                            egui::RichText::new(s.app_audio_only_label)
+                                .color(ACCENT_SECONDARY),
+                        )
+                        .on_hover_text(if !has_loopback_device {
+                            s.tooltip_no_loopback_device
+                        } else if !loopback_selected {
+                            s.tooltip_check_loopback_first
+                        } else {
+                            s.tooltip_app_audio_only
+                        });
+                    // Persisted as the default for next launch (and thus what a
+                    // hotkey-started recording uses) -- same pattern as overlay_enabled.
+                    if response.changed() {
+                        self.config.default_app_audio_only = self.app_audio_only;
+                        if let Err(e) = self.config.save() {
+                            tracing::error!("failed to save config: {e}");
+                            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
+                        }
+                    }
+                });
             });
     }
 
@@ -1742,19 +1764,47 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
+/// A smaller heading for a subsection nested under a `section_header` --
+/// e.g. SYSTEM and APPLICATIONS both under AUDIO. Caption-sized (same as
+/// `TEXT_CAPTION` body text) rather than `section_header`'s 14pt, and no
+/// separator line, so it reads as a label grouping the rows under it rather
+/// than a peer of the section it's nested in.
+fn subsection_header(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(TEXT_CAPTION)
+            .color(TEXT_MUTED)
+            .strong(),
+    );
+    ui.add_space(2.0);
+}
+
 /// Icon for an audio-device checkbox label — used both in the source panel's
 /// device list and the export dialog's per-track selection.
 fn audio_device_icon(dev: &AudioDevice) -> &'static str {
     if dev.is_loopback { "🔊" } else { "🎙" }
 }
 
-/// Renders one checkbox + (if checked) an inline 0-200% volume slider row,
-/// reading/writing `Config::audio_device_gain` via `gain_key`. Shared by the
-/// AUDIO device list and the APPLICATIONS list -- same interaction and
-/// persistence pattern, different backing data (a WASAPI endpoint's stable
-/// id vs. `Config::app_audio_gain_key`'s `"app:"`-prefixed exe name).
+/// Renders an (optional icon +) checkbox row, then -- if checked -- an
+/// indented 0-100% volume slider on the row underneath, reading/writing
+/// `Config::audio_device_gain` via `gain_key`. Shared by the AUDIO/SYSTEM
+/// device list (no icon) and the APPLICATIONS list (app icon) -- same
+/// interaction and persistence pattern, different backing data (a WASAPI
+/// endpoint's stable id vs. `Config::app_audio_gain_key`'s `"app:"`-prefixed
+/// exe name).
+///
+/// This function owns both rows itself (icon+checkbox, then slider)
+/// rather than a caller wrapping it in `ui.horizontal` -- that would make a
+/// checked row wider instead of taller, which doesn't fit well next to a
+/// device/app name in a 200-380px panel. Toggling a checkbox does change
+/// this section's content height (one row vs. two), but the section's own
+/// ScrollArea reserves a fixed height regardless (see render_source_panel),
+/// so that never resizes the surrounding panel -- it just means less/more
+/// of the section's own scroll room is used.
+#[allow(clippy::too_many_arguments)] // icon + the config-save trio + the per-row identity trio are each independent, not a natural single struct
 fn checkbox_with_volume_slider(
     ui: &mut egui::Ui,
+    icon: Option<egui::TextureId>,
     config: &mut Config,
     error_message: &mut Option<String>,
     config_save_failed_prefix: &str,
@@ -1762,7 +1812,12 @@ fn checkbox_with_volume_slider(
     label: String,
     gain_key: String,
 ) {
-    ui.checkbox(checked, label);
+    ui.horizontal(|ui| {
+        if let Some(tex_id) = icon {
+            ui.image((tex_id, egui::vec2(16.0, 16.0)));
+        }
+        ui.checkbox(checked, label);
+    });
     // Only meaningful (and shown) once checked -- an unselected source's
     // volume has nothing to apply to.
     if *checked {
@@ -1783,9 +1838,9 @@ fn checkbox_with_volume_slider(
             // slider) or assistive tech (UI Automation's RangeValuePattern)
             // updated the live value but silently never persisted.
             // changed() only fires on an actual value change (bounded by
-            // the slider's ~200 discrete steps, not once per frame), so
-            // this isn't the write-heavy cost gating on drag_stopped() was
-            // meant to avoid.
+            // the slider's discrete steps, not once per frame), so this
+            // isn't the write-heavy cost gating on drag_stopped() was meant
+            // to avoid.
             if response.changed() {
                 config
                     .audio_device_gain

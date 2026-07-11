@@ -85,11 +85,15 @@ pub struct Strings {
     /// Shown when the search box's filter matches nothing, distinct from
     /// `no_windows_found` (no capturable windows exist at all).
     pub no_matching_windows: &'static str,
+    /// Parent heading for the two subsections below it (SYSTEM / APPLICATIONS).
     pub audio_header: &'static str,
+    /// Sub-header for the physical-device list (Speakers/Microphone), a
+    /// smaller-font child of `audio_header` alongside `applications_header`.
+    pub system_audio_header: &'static str,
     pub no_audio_devices: &'static str,
-    /// Header for the per-app audio source list (Discord, Spotify, etc.) --
-    /// distinct from `audio_header`'s physical-device list. See
-    /// `types::AppAudioSource`.
+    /// Sub-header for the per-app audio source list (Discord, Spotify,
+    /// etc.) -- same font size as `system_audio_header`, both children of
+    /// `audio_header`. See `types::AppAudioSource`.
     pub applications_header: &'static str,
     pub no_app_audio_sources: &'static str,
     pub app_audio_only_label: &'static str,
@@ -222,6 +226,7 @@ pub static EN: Strings = Strings {
     source_filter_placeholder: "Search windows or apps...",
     no_matching_windows: "No windows match your search.",
     audio_header: "AUDIO",
+    system_audio_header: "SYSTEM",
     no_audio_devices: "No audio devices found.",
     applications_header: "APPLICATIONS",
     no_app_audio_sources: "No apps with sound found.",
@@ -341,6 +346,7 @@ pub static JA: Strings = Strings {
     source_filter_placeholder: "ウィンドウやアプリを検索...",
     no_matching_windows: "検索に一致するウィンドウがありません。",
     audio_header: "オーディオ",
+    system_audio_header: "システム",
     no_audio_devices: "オーディオデバイスが見つかりません。",
     applications_header: "アプリケーション",
     no_app_audio_sources: "音声を再生しているアプリが見つかりません。",
