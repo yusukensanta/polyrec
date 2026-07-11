@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.12] - 2026-07-11
+
 ### Fixed
 
 - The Stop/Pause buttons shown while recording were left-aligned instead of sharing the REC button's centered position, and the extra "State: Idle" hint line (shown only when idle) shifted the whole action row up or down relative to Recording/Paused -- both now sit at the same centered position regardless of state.
