@@ -9,7 +9,7 @@ use windows::Win32::Media::Audio::{
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
     IMMDeviceEnumerator, MMDeviceEnumerator, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, WAVEFORMATEX,
     PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -390,6 +390,15 @@ async unsafe fn run_capture_loop(
             Ok(()) => {
                 // No data yet; yield to the async runtime
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            Err(e) if e.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
+                // The endpoint was unplugged/disabled mid-capture -- retrying
+                // GetBuffer on it forever just spins and spams the warning
+                // below every 10ms, since the device is never coming back on
+                // this handle. Log once at error level and stop the track
+                // cleanly (other tracks/video are unaffected) instead.
+                tracing::error!("audio device invalidated (unplugged/disabled), stopping this track: {e}");
+                break;
             }
             Err(e) => {
                 tracing::warn!("GetBuffer error: {e}");

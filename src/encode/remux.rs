@@ -38,6 +38,49 @@ pub(crate) unsafe fn discover_stream_layout(reader: &IMFSourceReader) -> Result<
     Ok(StreamLayout { video, audio })
 }}
 
+/// Builds an `IMFSinkWriter` for `output_url`, adds `video_type` as one stream
+/// and each of `audio_types` as a subsequent stream (compressed passthrough --
+/// same media type in and out, no transcoding), then calls `BeginWriting`.
+/// Shared by `remux` and `highlight_export::concat_and_trim`, which otherwise
+/// use the returned sink stream ids differently: `remux` maps them back to
+/// source stream indices for its interleaved copy loop, `concat_and_trim`
+/// just needs them in the same order as `audio_types` to write each segment's
+/// samples in turn.
+pub(crate) unsafe fn build_passthrough_sink_writer(
+    output_url: &HSTRING,
+    video_type: &IMFMediaType,
+    audio_types: &[IMFMediaType],
+) -> Result<(IMFSinkWriter, u32, Vec<u32>), AppError> {
+    unsafe {
+        let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(output_url, None, None)
+            .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+
+        let video_sink = writer
+            .AddStream(video_type)
+            .map_err(|e| AppError::Encode(format!("AddStream(video): {e}")))?;
+        writer
+            .SetInputMediaType(video_sink, video_type, None)
+            .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
+
+        let mut audio_sinks = Vec::with_capacity(audio_types.len());
+        for (i, audio_type) in audio_types.iter().enumerate() {
+            let asink = writer
+                .AddStream(audio_type)
+                .map_err(|e| AppError::Encode(format!("AddStream(audio[{i}]): {e}")))?;
+            writer
+                .SetInputMediaType(asink, audio_type, None)
+                .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio[{i}]): {e}")))?;
+            audio_sinks.push(asink);
+        }
+
+        writer
+            .BeginWriting()
+            .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))?;
+
+        Ok((writer, video_sink, audio_sinks))
+    }
+}
+
 // 0xFFFFFFFE = MF_SOURCE_READER_ANY_STREAM
 const MF_SOURCE_READER_ANY_STREAM: u32 = 0xFFFF_FFFE;
 // 0xFFFFFFFE = MF_SOURCE_READER_ALL_STREAMS (same value)
@@ -150,33 +193,16 @@ unsafe fn do_remux(
     }
 
     // ── Sink writer ──────────────────────────────────────────────────────────
-    let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, None)
-        .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+    let audio_sink_types: Vec<IMFMediaType> = audio_types.iter().map(|(_, t)| t.clone()).collect();
+    let (writer, vsink, audio_sinks) =
+        build_passthrough_sink_writer(&output_url, &video_type, &audio_sink_types)?;
 
     // source stream index → sink stream index
     let mut source_to_sink: HashMap<u32, u32> = HashMap::new();
-
-    let vsink = writer
-        .AddStream(&video_type)
-        .map_err(|e| AppError::Encode(format!("AddStream(video): {e}")))?;
-    writer
-        .SetInputMediaType(vsink, &video_type, None)
-        .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
     source_to_sink.insert(layout.video, vsink);
-
-    for (src_idx, audio_type) in &audio_types {
-        let asink = writer
-            .AddStream(audio_type)
-            .map_err(|e| AppError::Encode(format!("AddStream(audio {src_idx}): {e}")))?;
-        writer
-            .SetInputMediaType(asink, audio_type, None)
-            .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio {src_idx}): {e}")))?;
-        source_to_sink.insert(*src_idx, asink);
+    for ((src_idx, _), asink) in audio_types.iter().zip(audio_sinks.iter()) {
+        source_to_sink.insert(*src_idx, *asink);
     }
-
-    writer
-        .BeginWriting()
-        .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))?;
 
     // ── Read / write loop ────────────────────────────────────────────────────
     let total_enabled = 1 + audio_track_indices.len();

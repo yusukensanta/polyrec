@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows::core::{GUID, HSTRING};
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateSinkWriterFromURL,
+    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
     MFCreateSourceReaderFromURL, MFShutdown, MFStartup, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
     MFSTARTUP_FULL,
 };
@@ -155,27 +155,8 @@ unsafe fn do_concat_and_trim(
             .map_err(|e| AppError::Encode(format!("SetCurrentPosition({skip_hns}): {e}")))?;
     }
 
-    let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, None)
-        .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
-    let video_sink = writer
-        .AddStream(&video_type)
-        .map_err(|e| AppError::Encode(format!("AddStream(video): {e}")))?;
-    writer
-        .SetInputMediaType(video_sink, &video_type, None)
-        .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
-    let mut audio_sinks = Vec::new();
-    for t in &audio_types {
-        let asink = writer
-            .AddStream(t)
-            .map_err(|e| AppError::Encode(format!("AddStream(audio): {e}")))?;
-        writer
-            .SetInputMediaType(asink, t, None)
-            .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio): {e}")))?;
-        audio_sinks.push(asink);
-    }
-    writer
-        .BeginWriting()
-        .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))?;
+    let (writer, video_sink, audio_sinks) =
+        crate::encode::remux::build_passthrough_sink_writer(&output_url, &video_type, &audio_types)?;
 
     // ── Copy each contributing segment in order, re-basing timestamps so ──
     // the output is one continuously increasing timeline across the seams.
