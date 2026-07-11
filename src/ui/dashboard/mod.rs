@@ -901,59 +901,53 @@ impl App {
                 ui.label(egui::RichText::new(state_line).size(TEXT_CAPTION).color(TEXT_MUTED));
 
                 if is_paused {
-                    let btn = egui::Button::new(
-                        egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
-                    )
-                    .fill(BG_BTN_IDLE)
-                    .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(130.0, 52.0));
-                    if ui.add(btn).clicked() {
-                        self.handle_pause_button();
-                    }
+                    centered_action_row(ui, 130.0, 52.0, |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
+                        )
+                        .fill(BG_BTN_IDLE)
+                        .corner_radius(ROUNDING_PRIMARY_BTN)
+                        .min_size(egui::Vec2::new(130.0, 52.0));
+                        if ui.add(btn).clicked() {
+                            self.handle_pause_button();
+                        }
+                    });
                 } else if is_recording {
-                    // `ui.horizontal` claims this Ui's full remaining width for
-                    // its own rect rather than shrinking to its children's
-                    // combined size, so the outer bottom_up(Align::Center)
-                    // centers that already-full-width rect (a no-op) instead of
-                    // centering the buttons within it -- they were left-aligned
-                    // to the panel's left edge instead of sharing REC's centered
-                    // position. `with_main_align(Center)` centers the row's
-                    // actual content within the available width instead.
-                    ui.with_layout(
-                        egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
-                        |ui| {
-                            let stop_btn = egui::Button::new(
-                                egui::RichText::new(s.stop_button)
-                                    .color(ACCENT_REC)
-                                    .size(TEXT_BUTTON),
-                            )
-                            .fill(BG_BTN_STOP)
-                            .corner_radius(ROUNDING_PRIMARY_BTN)
-                            .min_size(egui::Vec2::new(90.0, 52.0));
-                            if ui.add(stop_btn).clicked() {
-                                self.handle_rec_button(is_recording);
-                            }
+                    let content_width = 90.0 + ui.spacing().item_spacing.x + 44.0;
+                    centered_action_row(ui, content_width, 52.0, |ui| {
+                        let stop_btn = egui::Button::new(
+                            egui::RichText::new(s.stop_button)
+                                .color(ACCENT_REC)
+                                .size(TEXT_BUTTON),
+                        )
+                        .fill(BG_BTN_STOP)
+                        .corner_radius(ROUNDING_PRIMARY_BTN)
+                        .min_size(egui::Vec2::new(90.0, 52.0));
+                        if ui.add(stop_btn).clicked() {
+                            self.handle_rec_button(is_recording);
+                        }
 
-                            let pause_btn = egui::Button::new(
-                                egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
-                            )
-                            .fill(egui::Color32::from_rgb(30, 30, 46))
-                            .min_size(egui::Vec2::new(44.0, 52.0));
-                            if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
-                                self.handle_pause_button();
-                            }
-                        },
-                    );
+                        let pause_btn = egui::Button::new(
+                            egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
+                        )
+                        .fill(egui::Color32::from_rgb(30, 30, 46))
+                        .min_size(egui::Vec2::new(44.0, 52.0));
+                        if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
+                            self.handle_pause_button();
+                        }
+                    });
                 } else {
-                    let btn = egui::Button::new(
-                        egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
-                    )
-                    .fill(BG_BTN_IDLE)
-                    .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(130.0, 52.0));
-                    if ui.add(btn).clicked() {
-                        self.handle_rec_button(is_recording);
-                    }
+                    centered_action_row(ui, 130.0, 52.0, |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
+                        )
+                        .fill(BG_BTN_IDLE)
+                        .corner_radius(ROUNDING_PRIMARY_BTN)
+                        .min_size(egui::Vec2::new(130.0, 52.0));
+                        if ui.add(btn).clicked() {
+                            self.handle_rec_button(is_recording);
+                        }
+                    });
                 }
             });
         });
@@ -1433,6 +1427,49 @@ impl App {
 /// not a deliberate "this one's less important."
 fn accent_button(text: &str, color: egui::Color32) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.to_string()).color(color))
+}
+
+/// Renders `add_contents` in a `row_height`-tall, `left_to_right` row
+/// explicitly centered within `ui`'s full available width. Used for the
+/// REC/Resume/Stop+Pause action row so all three states land at the same X
+/// *and* Y.
+///
+/// Plain `ui.horizontal` + the panel's outer `Layout::bottom_up(Align::Center)`
+/// does NOT center a multi-widget group despite appearances: `ui.horizontal`
+/// claims the full available width for its own rect rather than shrinking to
+/// its children's combined size, so the outer layout centering that
+/// already-full-width rect is a no-op, and the children default to
+/// left-aligned within it.
+///
+/// Must use `allocate_ui_with_layout` (which reserves an exact-sized slot
+/// from the *current* layout, respecting `bottom_up` stacking) rather than
+/// `ui.scope_builder` without an explicit `max_rect` -- that defaults to
+/// `available_rect_before_wrap()`, which in a `bottom_up` layout is the
+/// entire remaining (tall) region above the cursor, not just this row's
+/// height, so `Align::Center`'s cross-axis (vertical, here) centering
+/// re-centers the row within that whole region instead of stacking it
+/// snugly against the previous item -- moved the row (and thus REC, not
+/// just Stop+Pause) up from where it used to sit.
+///
+/// `content_width` is the caller's precomputed total width of what it's
+/// about to add, so this doesn't need to run `add_contents` twice just to
+/// measure it.
+fn centered_action_row(
+    ui: &mut egui::Ui,
+    content_width: f32,
+    row_height: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let available_width = ui.available_width();
+    let left_pad = ((available_width - content_width) / 2.0).max(0.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(available_width, row_height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add_space(left_pad);
+            add_contents(ui);
+        },
+    );
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str) {
