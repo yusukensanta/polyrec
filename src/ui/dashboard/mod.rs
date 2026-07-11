@@ -1,19 +1,19 @@
 mod hotkeys_popup;
 
-use crate::capture::audio::enumerate_audio_devices;
+use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::encode::remux::remux;
 use crate::hotkeys::{HotkeyEvent, HotkeyListener};
 use crate::i18n::Strings;
-use crate::session::{state::SessionAction, EncodeSettings, SessionManager};
+use crate::session::{EncodeSettings, SessionManager, state::SessionAction};
 use crate::sources::enumerate_sources;
-use crate::types::{AudioDevice, CaptureSource, SessionState};
+use crate::types::{AppAudioSource, AudioDevice, CaptureSource, SessionState};
 use eframe::egui;
 use hotkeys_popup::HotkeySlot;
 use rfd::FileDialog;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -110,6 +110,17 @@ pub struct App {
     source_filter: String,
     audio_devices: Vec<AudioDevice>,
     selected_audio: Vec<bool>,
+    /// Running apps with an active WASAPI audio session -- see
+    /// `AppAudioSource`'s doc comment. Unlike `audio_devices` (which always
+    /// has loopback pre-selected), these default to unchecked -- there's no
+    /// natural "pick this one for me" default among an arbitrary, changing
+    /// set of running apps.
+    app_audio_sources: Vec<AppAudioSource>,
+    selected_app_audio: Vec<bool>,
+    /// Keyed by index into `app_audio_sources` -- same convention and same
+    /// "clear on any list change, rebuild lazily" lifecycle as
+    /// `source_icon_textures`.
+    app_audio_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     app_audio_only: bool,
     overlay_enabled: bool,
     show_quality_popup: bool,
@@ -185,6 +196,8 @@ impl App {
         // the loopback device by default keeps the common case to a single,
         // deterministically audible track; mic capture remains an opt-in checkbox.
         let selected_audio: Vec<bool> = audio_devices.iter().map(|d| d.is_loopback).collect();
+        let app_audio_sources = enumerate_app_audio_sessions().unwrap_or_default();
+        let selected_app_audio = vec![false; app_audio_sources.len()];
         let export_track_selection = vec![true; n];
         let wake_ctx = cc.egui_ctx.clone();
         let hotkey_listener = HotkeyListener::spawn(
@@ -212,6 +225,9 @@ impl App {
             source_filter: String::new(),
             audio_devices,
             selected_audio,
+            app_audio_sources,
+            selected_app_audio,
+            app_audio_icon_textures: std::collections::HashMap::new(),
             app_audio_only,
             overlay_enabled,
             show_quality_popup: false,
@@ -323,7 +339,10 @@ impl App {
         }
 
         // Poll export result channel
-        let export_result = self.export_result_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        let export_result = self
+            .export_result_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
         if let Some(result) = export_result {
             self.export_state = match result {
                 Ok(path) => ExportState::Done(path),
@@ -367,7 +386,11 @@ impl App {
 
         // Show export controls (inline in the status panel) once recorder has
         // finished writing the file
-        if self.finalizing_handle.as_ref().is_some_and(|h| h.is_finished()) {
+        if self
+            .finalizing_handle
+            .as_ref()
+            .is_some_and(|h| h.is_finished())
+        {
             let handle = self.finalizing_handle.take().unwrap();
             self.finalizing_path = None;
             let disk_full = self
@@ -380,7 +403,11 @@ impl App {
                     // pre-recording device selection -- see field doc on
                     // export_available_tracks.
                     self.export_available_tracks = crate::encode::remux::count_audio_tracks(&path)
-                        .inspect_err(|e| tracing::warn!("count_audio_tracks failed, export controls will stay hidden: {e}"))
+                        .inspect_err(|e| {
+                            tracing::warn!(
+                                "count_audio_tracks failed, export controls will stay hidden: {e}"
+                            )
+                        })
                         .unwrap_or(0);
                     tracing::info!(
                         "recording finalized: {} ({} audio track(s))",
@@ -401,7 +428,8 @@ impl App {
                 }
                 Err(e) => {
                     tracing::error!("recorder task did not complete cleanly: {e}");
-                    self.error_message = Some(format!("{}{e}", s.recording_ended_unexpectedly_prefix));
+                    self.error_message =
+                        Some(format!("{}{e}", s.recording_ended_unexpectedly_prefix));
                 }
             }
         }
@@ -428,22 +456,38 @@ impl App {
                 );
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.overlay_enabled { s.overlay_on } else { s.overlay_off };
-                    if ui.add(accent_button(label, ACCENT_SECONDARY)).on_hover_text(s.overlay_toggle_tooltip).clicked() {
+                    let label = if self.overlay_enabled {
+                        s.overlay_on
+                    } else {
+                        s.overlay_off
+                    };
+                    if ui
+                        .add(accent_button(label, ACCENT_SECONDARY))
+                        .on_hover_text(s.overlay_toggle_tooltip)
+                        .clicked()
+                    {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
                     }
                     let lang = self.config.lang();
-                    if ui.add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY)).on_hover_text(s.language_toggle_tooltip).clicked() {
+                    if ui
+                        .add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY))
+                        .on_hover_text(s.language_toggle_tooltip)
+                        .clicked()
+                    {
                         self.config.language = lang.toggle().config_value().to_string();
                         if let Err(e) = self.config.save() {
                             tracing::error!("failed to save config: {e}");
-                            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
+                            self.error_message =
+                                Some(format!("{}{e}", s.config_save_failed_prefix));
                         }
                     }
                     if let Some(update) = self.update_available.clone() {
                         let clicked = ui
-                            .add(accent_button(&format!("⬆ {} {}", update.version, s.update_available_suffix), ACCENT_PAUSE))
+                            .add(accent_button(
+                                &format!("⬆ {} {}", update.version, s.update_available_suffix),
+                                ACCENT_PAUSE,
+                            ))
                             .on_hover_text(s.update_tooltip)
                             .clicked();
                         if clicked {
@@ -452,8 +496,12 @@ impl App {
                             // confirm dialog from even opening in that case,
                             // same "explain why, don't just silently ignore the
                             // click" approach as the other blocked-action paths.
-                            if self.session.is_recording() || self.session.is_paused() || self.session.is_highlighting() {
-                                self.error_message = Some(s.update_blocked_while_recording.to_string());
+                            if self.session.is_recording()
+                                || self.session.is_paused()
+                                || self.session.is_highlighting()
+                            {
+                                self.error_message =
+                                    Some(s.update_blocked_while_recording.to_string());
                             } else {
                                 self.self_update_state = SelfUpdateState::Confirming(update);
                             }
@@ -469,57 +517,65 @@ impl App {
             .default_size(260.0)
             .size_range(200.0..=380.0)
             .show(ui, |ui| {
-                section_header(ui, s.capture_source_header);
-
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.source_filter)
-                        .hint_text(s.source_filter_placeholder)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(4.0);
-
-                if self.sources.is_empty() {
-                    ui.label(
-                        egui::RichText::new(s.no_windows_found)
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                }
-
-                // Filters by index rather than cloning matches -- source_icon_textures
-                // and selected_source are both keyed by index into self.sources, so
-                // the real (unfiltered) indices need to survive filtering.
-                let filter = self.source_filter.to_lowercase();
-                let filtered_indices: Vec<usize> = self
-                    .sources
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, src)| {
-                        filter.is_empty()
-                            || src.window_title.to_lowercase().contains(&filter)
-                            || src.exe_name.to_lowercase().contains(&filter)
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
-                if !self.sources.is_empty() && filtered_indices.is_empty() {
-                    ui.label(
-                        egui::RichText::new(s.no_matching_windows)
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                }
-
-                // Fixed cap (not "all remaining panel height") -- the Audio
-                // device section below is rendered after this ScrollArea in
-                // the same non-scrolling panel layout, so claiming every
-                // last pixel of available height here left it pushed below
-                // the panel's visible area (reads as the source list
-                // "overlapping" the audio section) whenever there were
-                // enough source cards to fill it.
+                // The whole panel body lives in a single ScrollArea rather
+                // than each section (source list / audio devices / per-app
+                // audio) having its own -- nesting scroll areas means the
+                // mouse wheel always goes to whichever one the cursor is
+                // over, so with per-section scrolling there was no way to
+                // reach a section pushed past the window's bottom edge (the
+                // wheel just kept scrolling the section under the cursor,
+                // never the outer container). One scroll area for the whole
+                // panel means the wheel always does the right thing, and
+                // there's no per-section max-height to keep re-tuning as
+                // content grows (this session already went through that
+                // twice: 140->180px, and main.rs's 600->680->720 window
+                // height, both chasing sections that had their own caps).
                 egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .id_salt("source_list_scroll")
+                    .auto_shrink([false, false])
+                    .id_salt("source_panel_scroll")
                     .show(ui, |ui| {
+                        section_header(ui, s.capture_source_header);
+
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.source_filter)
+                                .hint_text(s.source_filter_placeholder)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(4.0);
+
+                        if self.sources.is_empty() {
+                            ui.label(
+                                egui::RichText::new(s.no_windows_found)
+                                    .size(TEXT_CAPTION)
+                                    .color(TEXT_MUTED),
+                            );
+                        }
+
+                        // Filters by index rather than cloning matches -- source_icon_textures
+                        // and selected_source are both keyed by index into self.sources, so
+                        // the real (unfiltered) indices need to survive filtering.
+                        let filter = self.source_filter.to_lowercase();
+                        let filtered_indices: Vec<usize> = self
+                            .sources
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, src)| {
+                                filter.is_empty()
+                                    || src.window_title.to_lowercase().contains(&filter)
+                                    || src.exe_name.to_lowercase().contains(&filter)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        if !self.sources.is_empty() && filtered_indices.is_empty() {
+                            ui.label(
+                                egui::RichText::new(s.no_matching_windows)
+                                    .size(TEXT_CAPTION)
+                                    .color(TEXT_MUTED),
+                            );
+                        }
+
+                        // No per-section cap or ScrollArea here -- see the
+                        // comment on the outer ScrollArea above for why.
                         for &i in &filtered_indices {
                             let source = &self.sources[i];
                             let selected = self.selected_source == Some(i);
@@ -532,7 +588,8 @@ impl App {
                             // dynamically-sized composite widget; the one-frame lag is
                             // imperceptible at normal repaint rates.
                             let hover_id = ui.id().with(("source_card_hovered", i));
-                            let was_hovered = ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
+                            let was_hovered =
+                                ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
                             let fill = if selected {
                                 BG_SELECTED
                             } else if was_hovered {
@@ -552,7 +609,10 @@ impl App {
                                 self.source_icon_textures.entry(i)
                                 && let Some((rgba, w, h)) = &source.icon_rgba
                             {
-                                let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+                                let image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [*w as usize, *h as usize],
+                                    rgba,
+                                );
                                 let tex = ui.ctx().load_texture(
                                     format!("source_icon_{i}"),
                                     image,
@@ -600,118 +660,106 @@ impl App {
                             }
                             ui.add_space(4.0);
                         }
-                    });
 
-                ui.add_space(12.0);
-                section_header(ui, s.audio_header);
-                if self.audio_devices.is_empty() {
-                    ui.label(
-                        egui::RichText::new(s.no_audio_devices)
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                }
-                // Bounded like the source list above -- a machine with many
-                // audio devices (virtual cables, multiple interfaces) could
-                // otherwise reintroduce the same "pushes the rest of the
-                // panel out of view" problem the source list had.
-                //
-                // 180, not the original 140: each checked device's volume
-                // slider added a second row (checkbox ~32 + slider row ~32 +
-                // spacing) per device, so two checked devices need ~160px,
-                // not the ~64px two checkbox-only rows used to. At the old
-                // 140 cap, a second checked device's slider was clipped by
-                // this scroll area's own boundary while its checkbox label
-                // stayed visible above the cut -- reported as "the slider is
-                // cut off by another audio source name". Paired with the
-                // main.rs window-height bump below, so "App audio only"
-                // doesn't lose the margin this reclaims.
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .id_salt("audio_device_scroll")
-                    .show(ui, |ui| {
+                        ui.add_space(12.0);
+                        section_header(ui, s.audio_header);
+                        if self.audio_devices.is_empty() {
+                            ui.label(
+                                egui::RichText::new(s.no_audio_devices)
+                                    .size(TEXT_CAPTION)
+                                    .color(TEXT_MUTED),
+                            );
+                        }
+                        // No per-section cap or ScrollArea here -- see the
+                        // comment on the outer ScrollArea above for why.
                         for (i, dev) in self.audio_devices.iter().enumerate() {
-                            ui.checkbox(
+                            checkbox_with_volume_slider(
+                                ui,
+                                &mut self.config,
+                                &mut self.error_message,
+                                s.config_save_failed_prefix,
                                 &mut self.selected_audio[i],
                                 format!("{} {}", audio_device_icon(dev), dev.name),
+                                dev.id.clone(),
                             );
-                            // Only meaningful (and shown) once the device is
-                            // actually recording -- an unchecked device's
-                            // volume has nothing to apply to.
-                            if self.selected_audio[i] {
-                                let dev_id = dev.id.clone();
-                                let mut gain_percent =
-                                    (self.config.audio_gain(&dev_id) * 100.0).round() as i32;
-                                ui.horizontal(|ui| {
-                                    ui.add_space(20.0);
-                                    let response = ui.add(
-                                        egui::Slider::new(
-                                            &mut gain_percent,
-                                            crate::config::AUDIO_GAIN_MIN_PERCENT
-                                                ..=crate::config::AUDIO_GAIN_MAX_PERCENT,
-                                        )
-                                        .suffix("%"),
-                                    );
-                                    // Originally gated the save on drag_stopped() alone
-                                    // (to avoid rewriting config.toml on every frame
-                                    // during a drag) -- found via a live restart-and-check
-                                    // that drag_stopped() only fires for an actual
-                                    // pointer-drag release, so a keyboard-driven change
-                                    // (arrow keys after focusing the slider, or any other
-                                    // non-pointer path, e.g. assistive tech via UI
-                                    // Automation's RangeValuePattern) updated the live
-                                    // value but silently never persisted. changed() only
-                                    // fires on an actual value change (bounded by the
-                                    // slider's ~200 discrete steps, not once per frame),
-                                    // so saving on every change is negligible cost for a
-                                    // small local settings file -- not worth the
-                                    // correctness gap to avoid it.
-                                    if response.changed() {
-                                        self.config
-                                            .audio_device_gain
-                                            .insert(dev_id.clone(), gain_percent as f32 / 100.0);
-                                        if let Err(e) = self.config.save() {
-                                            tracing::error!("failed to save config: {e}");
-                                            self.error_message =
-                                                Some(format!("{}{e}", s.config_save_failed_prefix));
-                                        }
-                                    }
-                                });
-                            }
                         }
-                    });
 
-                let loopback_selected = self
-                    .audio_devices
-                    .iter()
-                    .zip(self.selected_audio.iter())
-                    .any(|(dev, &sel)| dev.is_loopback && sel);
-                let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
-                let has_source = self.selected_source.is_some();
-                ui.add_enabled_ui(loopback_selected && has_source, |ui| {
-                    let response = ui
-                        .checkbox(
-                            &mut self.app_audio_only,
-                            egui::RichText::new(s.app_audio_only_label)
-                                .color(ACCENT_SECONDARY),
-                        )
-                        .on_hover_text(if !has_loopback_device {
-                            s.tooltip_no_loopback_device
-                        } else if !loopback_selected {
-                            s.tooltip_check_loopback_first
-                        } else {
-                            s.tooltip_app_audio_only
-                        });
-                    // Persisted as the default for next launch (and thus what a
-                    // hotkey-started recording uses) -- same pattern as overlay_enabled.
-                    if response.changed() {
-                        self.config.default_app_audio_only = self.app_audio_only;
-                        if let Err(e) = self.config.save() {
-                            tracing::error!("failed to save config: {e}");
-                            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
+                        ui.add_space(12.0);
+                        section_header(ui, s.applications_header);
+                        if self.app_audio_sources.is_empty() {
+                            ui.label(
+                                egui::RichText::new(s.no_app_audio_sources)
+                                    .size(TEXT_CAPTION)
+                                    .color(TEXT_MUTED),
+                            );
                         }
-                    }
-                });
+                        // No per-section cap or ScrollArea here -- see the
+                        // comment on the outer ScrollArea above for why.
+                        for (i, src) in self.app_audio_sources.iter().enumerate() {
+                            if let std::collections::hash_map::Entry::Vacant(entry) =
+                                self.app_audio_icon_textures.entry(i)
+                                && let Some((rgba, w, h)) = &src.icon_rgba
+                            {
+                                let image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [*w as usize, *h as usize],
+                                    rgba,
+                                );
+                                let tex = ui.ctx().load_texture(
+                                    format!("app_audio_icon_{i}"),
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                entry.insert(tex);
+                            }
+                            ui.horizontal(|ui| {
+                                if let Some(tex) = self.app_audio_icon_textures.get(&i) {
+                                    ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                                }
+                                checkbox_with_volume_slider(
+                                    ui,
+                                    &mut self.config,
+                                    &mut self.error_message,
+                                    s.config_save_failed_prefix,
+                                    &mut self.selected_app_audio[i],
+                                    src.display_name.clone(),
+                                    Config::app_audio_gain_key(&src.exe_name),
+                                );
+                            });
+                        }
+
+                        let loopback_selected = self
+                            .audio_devices
+                            .iter()
+                            .zip(self.selected_audio.iter())
+                            .any(|(dev, &sel)| dev.is_loopback && sel);
+                        let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
+                        let has_source = self.selected_source.is_some();
+                        ui.add_enabled_ui(loopback_selected && has_source, |ui| {
+                            let response = ui
+                                .checkbox(
+                                    &mut self.app_audio_only,
+                                    egui::RichText::new(s.app_audio_only_label)
+                                        .color(ACCENT_SECONDARY),
+                                )
+                                .on_hover_text(if !has_loopback_device {
+                                    s.tooltip_no_loopback_device
+                                } else if !loopback_selected {
+                                    s.tooltip_check_loopback_first
+                                } else {
+                                    s.tooltip_app_audio_only
+                                });
+                            // Persisted as the default for next launch (and thus what a
+                            // hotkey-started recording uses) -- same pattern as overlay_enabled.
+                            if response.changed() {
+                                self.config.default_app_audio_only = self.app_audio_only;
+                                if let Err(e) = self.config.save() {
+                                    tracing::error!("failed to save config: {e}");
+                                    self.error_message =
+                                        Some(format!("{}{e}", s.config_save_failed_prefix));
+                                }
+                            }
+                        });
+                    });
             });
     }
 
@@ -743,15 +791,20 @@ impl App {
                 let t = ui.ctx().input(|i| i.time) as f32;
                 let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
                 let dot_col = egui::Color32::from_rgba_unmultiplied(
-                    ACCENT_REC.r(), ACCENT_REC.g(), ACCENT_REC.b(), (alpha * 255.0) as u8,
+                    ACCENT_REC.r(),
+                    ACCENT_REC.g(),
+                    ACCENT_REC.b(),
+                    (alpha * 255.0) as u8,
                 );
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(14.0, 14.0),
-                        egui::Sense::hover(),
-                    );
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                     ui.painter().circle_filled(rect.center(), 5.0, dot_col);
-                    let state_label = if is_paused { s.state_paused } else { s.state_recording };
+                    let state_label = if is_paused {
+                        s.state_paused
+                    } else {
+                        s.state_recording
+                    };
                     // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
                     // which previously computed to 4.18:1 contrast on BG_BASE (fails
                     // WCAG AA's 4.5:1 minimum for normal text). ACCENT_REC is 5.54:1.
@@ -788,7 +841,11 @@ impl App {
                             .size(TEXT_CAPTION)
                             .color(TEXT_MUTED),
                     );
-                    ui.label(egui::RichText::new("  ·  ").size(TEXT_CAPTION).color(TEXT_MUTED));
+                    ui.label(
+                        egui::RichText::new("  ·  ")
+                            .size(TEXT_CAPTION)
+                            .color(TEXT_MUTED),
+                    );
                     ui.label(
                         egui::RichText::new(format!("{frames} {}", s.frames_word))
                             .size(TEXT_CAPTION)
@@ -863,7 +920,9 @@ impl App {
                         self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
                     }
                 }
-                if ui.add(accent_button(s.browse_button, ACCENT_SECONDARY)).clicked()
+                if ui
+                    .add(accent_button(s.browse_button, ACCENT_SECONDARY))
+                    .clicked()
                     && let Some(path) = FileDialog::new()
                         .set_directory(&self.config.output_dir)
                         .pick_folder()
@@ -879,7 +938,8 @@ impl App {
 
             let show_free_space = self.free_space_bytes.is_some();
             let show_highlight_active = self.session.is_highlighting();
-            let show_highlight_save = !matches!(self.highlight_save_state, HighlightSaveState::Idle);
+            let show_highlight_save =
+                !matches!(self.highlight_save_state, HighlightSaveState::Idle);
             // Grouped into one visually distinct region (rather than a flat
             // pile of same-size lines distinguished only by color) so it
             // reads as "the status area" separate from the output-dir
@@ -904,9 +964,13 @@ impl App {
                             let low = free < crate::disk_space::MIN_FREE_BYTES;
                             let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
                             ui.label(
-                                egui::RichText::new(format!("{}{}", s.free_space_prefix, format_bytes_free(free)))
-                                    .size(TEXT_CAPTION)
-                                    .color(color),
+                                egui::RichText::new(format!(
+                                    "{}{}",
+                                    s.free_space_prefix,
+                                    format_bytes_free(free)
+                                ))
+                                .size(TEXT_CAPTION)
+                                .color(color),
                             );
                             first = false;
                         }
@@ -929,14 +993,20 @@ impl App {
                         match &self.highlight_save_state {
                             HighlightSaveState::Idle => {}
                             HighlightSaveState::Saving => {
-                                ui.label(egui::RichText::new(s.highlight_saving_label).size(TEXT_CAPTION).color(TEXT_MUTED));
+                                ui.label(
+                                    egui::RichText::new(s.highlight_saving_label)
+                                        .size(TEXT_CAPTION)
+                                        .color(TEXT_MUTED),
+                                );
                             }
                             HighlightSaveState::Done(path) => {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "{}{}",
                                         s.highlight_saved_prefix,
-                                        path.file_name().and_then(|n| n.to_str()).unwrap_or("highlight.mp4")
+                                        path.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("highlight.mp4")
                                     ))
                                     .size(TEXT_CAPTION)
                                     .color(ACCENT_IDLE),
@@ -944,9 +1014,12 @@ impl App {
                             }
                             HighlightSaveState::Failed(msg) => {
                                 ui.label(
-                                    egui::RichText::new(format!("{}{msg}", s.highlight_save_failed_prefix))
-                                        .size(TEXT_CAPTION)
-                                        .color(ACCENT_REC),
+                                    egui::RichText::new(format!(
+                                        "{}{msg}",
+                                        s.highlight_save_failed_prefix
+                                    ))
+                                    .size(TEXT_CAPTION)
+                                    .color(ACCENT_REC),
                                 );
                             }
                         }
@@ -976,12 +1049,18 @@ impl App {
                 } else {
                     String::new()
                 };
-                ui.label(egui::RichText::new(state_line).size(TEXT_CAPTION).color(TEXT_MUTED));
+                ui.label(
+                    egui::RichText::new(state_line)
+                        .size(TEXT_CAPTION)
+                        .color(TEXT_MUTED),
+                );
 
                 if is_paused {
                     centered_action_row(ui, 130.0, 52.0, |ui| {
                         let btn = egui::Button::new(
-                            egui::RichText::new(s.resume_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
+                            egui::RichText::new(s.resume_button)
+                                .color(ACCENT_IDLE)
+                                .size(TEXT_BUTTON),
                         )
                         .fill(BG_BTN_IDLE)
                         .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -1017,7 +1096,9 @@ impl App {
                 } else {
                     centered_action_row(ui, 130.0, 52.0, |ui| {
                         let btn = egui::Button::new(
-                            egui::RichText::new(s.rec_button).color(ACCENT_IDLE).size(TEXT_BUTTON),
+                            egui::RichText::new(s.rec_button)
+                                .color(ACCENT_IDLE)
+                                .size(TEXT_BUTTON),
                         )
                         .fill(BG_BTN_IDLE)
                         .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -1146,70 +1227,123 @@ impl App {
                 // Caps the popup's height below a typical app window's, so a
                 // short window (or more settings added later) scrolls instead
                 // of forcing the popup taller than its parent.
-                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
-                section_header(ui, s.fps_header);
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.config.encode.fps, 30, "30");
-                    ui.selectable_value(&mut self.config.encode.fps, 60, "60");
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        section_header(ui, s.fps_header);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.config.encode.fps, 30, "30");
+                            ui.selectable_value(&mut self.config.encode.fps, 60, "60");
+                        });
 
-                section_header(ui, s.codec_header);
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.config.encode.codec, "h264".into(), "H264");
-                    ui.selectable_value(&mut self.config.encode.codec, "h265".into(), "H265");
-                });
+                        section_header(ui, s.codec_header);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.config.encode.codec,
+                                "h264".into(),
+                                "H264",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.encode.codec,
+                                "h265".into(),
+                                "H265",
+                            );
+                        });
 
-                section_header(ui, s.encoder_mode_header);
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.config.encode.encoder_mode, "hardware".into(), s.encoder_mode_hardware)
-                        .on_hover_text(s.encoder_mode_hardware_tooltip);
-                    ui.selectable_value(&mut self.config.encode.encoder_mode, "software".into(), s.encoder_mode_software)
-                        .on_hover_text(s.encoder_mode_software_tooltip);
-                });
+                        section_header(ui, s.encoder_mode_header);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.config.encode.encoder_mode,
+                                "hardware".into(),
+                                s.encoder_mode_hardware,
+                            )
+                            .on_hover_text(s.encoder_mode_hardware_tooltip);
+                            ui.selectable_value(
+                                &mut self.config.encode.encoder_mode,
+                                "software".into(),
+                                s.encoder_mode_software,
+                            )
+                            .on_hover_text(s.encoder_mode_software_tooltip);
+                        });
 
-                section_header(ui, s.resolution_header);
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.config.encode.resolution_mode, "native".into(), s.resolution_native);
-                    ui.selectable_value(&mut self.config.encode.resolution_mode, "display".into(), s.resolution_display);
-                    ui.selectable_value(&mut self.config.encode.resolution_mode, "custom".into(), s.resolution_custom);
-                });
-                if self.config.encode.resolution_mode == "custom" {
-                    ui.horizontal(|ui| {
-                        ui.label(s.width_label);
-                        ui.add(egui::DragValue::new(&mut self.config.encode.custom_width).range(2..=7680));
-                        ui.label(s.height_label);
-                        ui.add(egui::DragValue::new(&mut self.config.encode.custom_height).range(2..=4320));
-                    });
-                }
+                        section_header(ui, s.resolution_header);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.config.encode.resolution_mode,
+                                "native".into(),
+                                s.resolution_native,
+                            );
+                            ui.selectable_value(
+                                &mut self.config.encode.resolution_mode,
+                                "display".into(),
+                                s.resolution_display,
+                            );
+                            ui.selectable_value(
+                                &mut self.config.encode.resolution_mode,
+                                "custom".into(),
+                                s.resolution_custom,
+                            );
+                        });
+                        if self.config.encode.resolution_mode == "custom" {
+                            ui.horizontal(|ui| {
+                                ui.label(s.width_label);
+                                ui.add(
+                                    egui::DragValue::new(&mut self.config.encode.custom_width)
+                                        .range(2..=7680),
+                                );
+                                ui.label(s.height_label);
+                                ui.add(
+                                    egui::DragValue::new(&mut self.config.encode.custom_height)
+                                        .range(2..=4320),
+                                );
+                            });
+                        }
 
-                section_header(ui, s.bitrate_header);
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.config.encode.bitrate_mode, "auto".into(), s.bitrate_auto);
-                    ui.selectable_value(&mut self.config.encode.bitrate_mode, "manual".into(), s.bitrate_manual);
-                });
-                if self.config.encode.bitrate_mode == "manual" {
-                    ui.horizontal(|ui| {
-                        ui.label(s.mbps_label);
-                        ui.add(egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps).range(1..=100));
-                    });
-                }
+                        section_header(ui, s.bitrate_header);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.config.encode.bitrate_mode,
+                                "auto".into(),
+                                s.bitrate_auto,
+                            );
+                            ui.selectable_value(
+                                &mut self.config.encode.bitrate_mode,
+                                "manual".into(),
+                                s.bitrate_manual,
+                            );
+                        });
+                        if self.config.encode.bitrate_mode == "manual" {
+                            ui.horizontal(|ui| {
+                                ui.label(s.mbps_label);
+                                ui.add(
+                                    egui::DragValue::new(
+                                        &mut self.config.encode.manual_bitrate_mbps,
+                                    )
+                                    .range(1..=100),
+                                );
+                            });
+                        }
 
-                ui.add_space(4.0);
-                section_header(ui, s.highlight_header);
-                ui.checkbox(&mut self.config.highlight.enabled, s.highlight_enabled_label)
-                    .on_hover_text(s.tooltip_highlight_enabled);
-                if self.config.highlight.enabled {
-                    ui.horizontal(|ui| {
-                        ui.label(s.highlight_buffer_seconds_label);
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.highlight.buffer_seconds).range(
-                                crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN
-                                    ..=crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
-                            ),
-                        );
-                    });
-                }
-                }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
+                        ui.add_space(4.0);
+                        section_header(ui, s.highlight_header);
+                        ui.checkbox(
+                            &mut self.config.highlight.enabled,
+                            s.highlight_enabled_label,
+                        )
+                        .on_hover_text(s.tooltip_highlight_enabled);
+                        if self.config.highlight.enabled {
+                            ui.horizontal(|ui| {
+                                ui.label(s.highlight_buffer_seconds_label);
+                                ui.add(
+                                    egui::DragValue::new(&mut self.config.highlight.buffer_seconds)
+                                        .range(
+                                            crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN
+                                                ..=crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
+                                        ),
+                                );
+                            });
+                        }
+                    }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
                 if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
@@ -1267,13 +1401,23 @@ impl App {
                             .color(TEXT_PRIMARY),
                         );
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new(s.update_confirm_uac_note).size(TEXT_CAPTION).color(TEXT_MUTED));
+                        ui.label(
+                            egui::RichText::new(s.update_confirm_uac_note)
+                                .size(TEXT_CAPTION)
+                                .color(TEXT_MUTED),
+                        );
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.add(accent_button(s.update_now_button, ACCENT_PAUSE)).clicked() {
+                            if ui
+                                .add(accent_button(s.update_now_button, ACCENT_PAUSE))
+                                .clicked()
+                            {
                                 action = Some("now");
                             }
-                            if ui.add(accent_button(s.update_not_now_button, TEXT_MUTED)).clicked() {
+                            if ui
+                                .add(accent_button(s.update_not_now_button, TEXT_MUTED))
+                                .clicked()
+                            {
                                 action = Some("not_now");
                             }
                         });
@@ -1291,8 +1435,9 @@ impl App {
                 match action {
                     Some("now") => {
                         let version = update.version.clone();
-                        self.self_update_handle =
-                            Some(tokio::spawn(crate::self_update::perform_self_update(version)));
+                        self.self_update_handle = Some(tokio::spawn(
+                            crate::self_update::perform_self_update(version),
+                        ));
                         self.self_update_state = SelfUpdateState::Working;
                     }
                     Some("not_now") => self.self_update_state = SelfUpdateState::Idle,
@@ -1305,7 +1450,11 @@ impl App {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(s.update_working_message).size(TEXT_BODY).color(TEXT_PRIMARY));
+                        ui.label(
+                            egui::RichText::new(s.update_working_message)
+                                .size(TEXT_BODY)
+                                .color(TEXT_PRIMARY),
+                        );
                     });
             }
             SelfUpdateState::Failed(msg) => {
@@ -1341,7 +1490,11 @@ impl App {
     /// until we do; the installed path also wants this process's file lock
     /// on polyrec.exe released as soon as possible for the installer).
     fn poll_self_update_result(&mut self, ctx: &egui::Context) {
-        if !self.self_update_handle.as_ref().is_some_and(|h| h.is_finished()) {
+        if !self
+            .self_update_handle
+            .as_ref()
+            .is_some_and(|h| h.is_finished())
+        {
             return;
         }
         let handle = self.self_update_handle.take().unwrap();
@@ -1360,8 +1513,17 @@ impl App {
     /// reachable; starting a new recording just replaces this whole section
     /// with the live recording status, same as it already did before any
     /// export UI existed.
-    fn render_export_controls(&mut self, ui: &mut egui::Ui, s: &'static Strings, path: &std::path::Path) {
-        ui.label(egui::RichText::new(s.recording_saved_label).size(TEXT_CAPTION).color(TEXT_MUTED));
+    fn render_export_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &'static Strings,
+        path: &std::path::Path,
+    ) {
+        ui.label(
+            egui::RichText::new(s.recording_saved_label)
+                .size(TEXT_CAPTION)
+                .color(TEXT_MUTED),
+        );
         ui.add_space(2.0);
         ui.label(
             egui::RichText::new(path.to_string_lossy().as_ref())
@@ -1375,7 +1537,11 @@ impl App {
         // that could be exported, so the export button/track list would just
         // be a confusing no-op. Still offer Open Folder either way.
         if self.export_available_tracks < 2 {
-            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).on_hover_text(s.open_folder_tooltip).clicked() {
+            if ui
+                .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
+                .on_hover_text(s.open_folder_tooltip)
+                .clicked()
+            {
                 open_folder(path);
             }
             return;
@@ -1408,7 +1574,10 @@ impl App {
 
         if is_idle {
             ui.horizontal(|ui| {
-                if ui.add(accent_button(s.export_button, ACCENT_IDLE)).on_hover_text(s.export_tooltip).clicked()
+                if ui
+                    .add(accent_button(s.export_button, ACCENT_IDLE))
+                    .on_hover_text(s.export_tooltip)
+                    .clicked()
                     && let Some(dest) = rfd::FileDialog::new()
                         .add_filter("MP4 video", &["mp4"])
                         .set_file_name("export.mp4")
@@ -1424,14 +1593,17 @@ impl App {
                         .collect();
                     let (tx, rx) = mpsc::channel();
                     std::thread::spawn(move || {
-                        let result = remux(&src, &dest, &indices)
-                            .map_err(|e| e.to_string());
+                        let result = remux(&src, &dest, &indices).map_err(|e| e.to_string());
                         let _ = tx.send(result);
                     });
                     self.export_result_rx = Some(rx);
                     self.export_state = ExportState::Running;
                 }
-                if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).on_hover_text(s.open_folder_tooltip).clicked() {
+                if ui
+                    .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
+                    .on_hover_text(s.open_folder_tooltip)
+                    .clicked()
+                {
                     open_folder(path);
                 }
             });
@@ -1450,7 +1622,11 @@ impl App {
                     .color(TEXT_PRIMARY),
             );
             ui.add_space(4.0);
-            if ui.add(accent_button(s.open_folder_button, ACCENT_SECONDARY)).on_hover_text(s.open_folder_tooltip).clicked() {
+            if ui
+                .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
+                .on_hover_text(s.open_folder_tooltip)
+                .clicked()
+            {
                 open_folder(&export_path);
             }
         } else if let Some(msg) = failed_msg {
@@ -1555,7 +1731,12 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     // still clearly below the "PolyRec" heading's default 18pt so it reads as
     // a subordinate label, not competing with it.
     ui.add_space(4.0);
-    ui.label(egui::RichText::new(title).size(TEXT_SUBTITLE).color(TEXT_MUTED).strong());
+    ui.label(
+        egui::RichText::new(title)
+            .size(TEXT_SUBTITLE)
+            .color(TEXT_MUTED)
+            .strong(),
+    );
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(4.0);
@@ -1565,6 +1746,57 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
 /// device list and the export dialog's per-track selection.
 fn audio_device_icon(dev: &AudioDevice) -> &'static str {
     if dev.is_loopback { "🔊" } else { "🎙" }
+}
+
+/// Renders one checkbox + (if checked) an inline 0-200% volume slider row,
+/// reading/writing `Config::audio_device_gain` via `gain_key`. Shared by the
+/// AUDIO device list and the APPLICATIONS list -- same interaction and
+/// persistence pattern, different backing data (a WASAPI endpoint's stable
+/// id vs. `Config::app_audio_gain_key`'s `"app:"`-prefixed exe name).
+fn checkbox_with_volume_slider(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    error_message: &mut Option<String>,
+    config_save_failed_prefix: &str,
+    checked: &mut bool,
+    label: String,
+    gain_key: String,
+) {
+    ui.checkbox(checked, label);
+    // Only meaningful (and shown) once checked -- an unselected source's
+    // volume has nothing to apply to.
+    if *checked {
+        let mut gain_percent = (config.audio_gain(&gain_key) * 100.0).round() as i32;
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            let response = ui.add(
+                egui::Slider::new(
+                    &mut gain_percent,
+                    crate::config::AUDIO_GAIN_MIN_PERCENT..=crate::config::AUDIO_GAIN_MAX_PERCENT,
+                )
+                .suffix("%"),
+            );
+            // Saves on every changed() frame rather than gating on
+            // drag_stopped() -- found via a live restart-and-check that
+            // drag_stopped() only fires for an actual pointer-drag release,
+            // so a keyboard-driven change (arrow keys after focusing the
+            // slider) or assistive tech (UI Automation's RangeValuePattern)
+            // updated the live value but silently never persisted.
+            // changed() only fires on an actual value change (bounded by
+            // the slider's ~200 discrete steps, not once per frame), so
+            // this isn't the write-heavy cost gating on drag_stopped() was
+            // meant to avoid.
+            if response.changed() {
+                config
+                    .audio_device_gain
+                    .insert(gain_key.clone(), gain_percent as f32 / 100.0);
+                if let Err(e) = config.save() {
+                    tracing::error!("failed to save config: {e}");
+                    *error_message = Some(format!("{config_save_failed_prefix}{e}"));
+                }
+            }
+        });
+    }
 }
 
 /// Formats a byte count as a human-readable GB/MB string for the free-space
@@ -1624,10 +1856,10 @@ fn setup_theme(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
 
     // Background layers
-    v.panel_fill         = BG_BASE;
-    v.window_fill        = BG_WINDOW;
-    v.extreme_bg_color   = BG_DEEP;
-    v.faint_bg_color     = BG_FAINT;
+    v.panel_fill = BG_BASE;
+    v.window_fill = BG_WINDOW;
+    v.extreme_bg_color = BG_DEEP;
+    v.faint_bg_color = BG_FAINT;
     v.override_text_color = Some(TEXT_PRIMARY);
 
     // Window chrome
@@ -1636,15 +1868,15 @@ fn setup_theme(ctx: &egui::Context) {
     // Widget rounding — consistent across all interaction states
     let r = egui::CornerRadius::same(5);
     v.widgets.noninteractive.corner_radius = r;
-    v.widgets.inactive.corner_radius       = r;
-    v.widgets.hovered.corner_radius        = r;
-    v.widgets.active.corner_radius         = r;
-    v.widgets.open.corner_radius           = r;
+    v.widgets.inactive.corner_radius = r;
+    v.widgets.hovered.corner_radius = r;
+    v.widgets.active.corner_radius = r;
+    v.widgets.open.corner_radius = r;
 
     // Subtle hover/active bg fills for checkboxes, buttons, etc.
     v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(28, 28, 44);
-    v.widgets.hovered.weak_bg_fill  = egui::Color32::from_rgb(38, 38, 58);
-    v.widgets.active.weak_bg_fill   = egui::Color32::from_rgb(48, 48, 72);
+    v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(38, 38, 58);
+    v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(48, 48, 72);
 
     ctx.set_visuals(v);
 
@@ -1653,11 +1885,11 @@ fn setup_theme(ctx: &egui::Context) {
     // 36-40dp desktop minimum control height — every button in the app (Refresh,
     // Browse, Quality, Close, etc.) was inheriting that undersized floor. 32.0 is
     // the Fluent minimum and lands on the 8px spacing grid used everywhere else here.
-    s.spacing.interact_size  = egui::Vec2::new(40.0, 32.0);
-    s.spacing.item_spacing   = egui::Vec2::new(8.0, 8.0);
+    s.spacing.interact_size = egui::Vec2::new(40.0, 32.0);
+    s.spacing.item_spacing = egui::Vec2::new(8.0, 8.0);
     s.spacing.button_padding = egui::Vec2::new(14.0, 8.0);
-    s.spacing.window_margin  = egui::Margin::same(16);
-    s.spacing.indent         = 16.0;
+    s.spacing.window_margin = egui::Margin::same(16);
+    s.spacing.indent = 16.0;
     ctx.set_global_style(s);
 }
 
@@ -1733,8 +1965,11 @@ impl App {
     fn refresh_free_space(&mut self) {
         const FREE_SPACE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
-        let dir_changed = self.free_space_checked_dir.as_deref() != Some(self.config.output_dir.as_path());
-        let due = self.free_space_checked_at.is_none_or(|t| t.elapsed() >= FREE_SPACE_CHECK_INTERVAL);
+        let dir_changed =
+            self.free_space_checked_dir.as_deref() != Some(self.config.output_dir.as_path());
+        let due = self
+            .free_space_checked_at
+            .is_none_or(|t| t.elapsed() >= FREE_SPACE_CHECK_INTERVAL);
         if !dir_changed && !due {
             return;
         }
@@ -1764,17 +1999,24 @@ impl App {
     /// button did.
     fn refresh_sources_and_audio_if_due(&mut self) {
         const SOURCES_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-        if self.sources_checked_at.is_some_and(|t| t.elapsed() < SOURCES_CHECK_INTERVAL) {
+        if self
+            .sources_checked_at
+            .is_some_and(|t| t.elapsed() < SOURCES_CHECK_INTERVAL)
+        {
             return;
         }
         self.sources_checked_at = Some(Instant::now());
 
         let new_sources = enumerate_sources();
-        let current_hwnds: std::collections::HashSet<usize> = self.sources.iter().map(|s| s.hwnd).collect();
-        let new_hwnds: std::collections::HashSet<usize> = new_sources.iter().map(|s| s.hwnd).collect();
+        let current_hwnds: std::collections::HashSet<usize> =
+            self.sources.iter().map(|s| s.hwnd).collect();
+        let new_hwnds: std::collections::HashSet<usize> =
+            new_sources.iter().map(|s| s.hwnd).collect();
         if new_hwnds != current_hwnds {
-            let previously_selected_hwnd =
-                self.selected_source.and_then(|i| self.sources.get(i)).map(|src| src.hwnd);
+            let previously_selected_hwnd = self
+                .selected_source
+                .and_then(|i| self.sources.get(i))
+                .map(|src| src.hwnd);
             self.sources = new_sources;
             self.source_icon_textures.clear();
             self.selected_source = previously_selected_hwnd
@@ -1784,7 +2026,8 @@ impl App {
         let new_audio_devices = enumerate_audio_devices().unwrap_or_default();
         let current_ids: std::collections::HashSet<&str> =
             self.audio_devices.iter().map(|d| d.id.as_str()).collect();
-        let new_ids: std::collections::HashSet<&str> = new_audio_devices.iter().map(|d| d.id.as_str()).collect();
+        let new_ids: std::collections::HashSet<&str> =
+            new_audio_devices.iter().map(|d| d.id.as_str()).collect();
         if new_ids != current_ids {
             self.selected_audio = new_audio_devices.iter().map(|d| d.is_loopback).collect();
             self.audio_devices = new_audio_devices;
@@ -1792,14 +2035,41 @@ impl App {
             // old Refresh button: it's tied to the last finished recording's
             // actually-probed track count, not the live device list.
         }
+
+        let new_app_audio_sources = enumerate_app_audio_sessions().unwrap_or_default();
+        let current_exe_names: std::collections::HashSet<&str> = self
+            .app_audio_sources
+            .iter()
+            .map(|s| s.exe_name.as_str())
+            .collect();
+        let new_exe_names: std::collections::HashSet<&str> = new_app_audio_sources
+            .iter()
+            .map(|s| s.exe_name.as_str())
+            .collect();
+        if new_exe_names != current_exe_names {
+            // Preserved by exe name, not list index or process id -- a
+            // refresh can legitimately re-enumerate the same still-running
+            // app at the same PID (no change needed), but also survives the
+            // app having been closed and reopened (new PID) between
+            // refreshes without silently unchecking it.
+            let previously_checked: std::collections::HashSet<String> = self
+                .app_audio_sources
+                .iter()
+                .zip(self.selected_app_audio.iter())
+                .filter(|&(_, &sel)| sel)
+                .map(|(s, _)| s.exe_name.clone())
+                .collect();
+            self.selected_app_audio = new_app_audio_sources
+                .iter()
+                .map(|s| previously_checked.contains(&s.exe_name))
+                .collect();
+            self.app_audio_sources = new_app_audio_sources;
+            self.app_audio_icon_textures.clear();
+        }
     }
 
     fn stop_recording(&mut self) {
-        let path = self
-            .session
-            .active
-            .as_ref()
-            .map(|a| a.output_path.clone());
+        let path = self.session.active.as_ref().map(|a| a.output_path.clone());
         if let Some(p) = &path {
             tracing::info!("recording stop requested, finalizing: {}", p.display());
         }
@@ -1829,9 +2099,22 @@ impl App {
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
-        let selected_gains: Vec<f32> =
-            selected_devices.iter().map(|dev| self.config.audio_gain(&dev.id)).collect();
-        let track_count = selected_devices.len();
+        let selected_gains: Vec<f32> = selected_devices
+            .iter()
+            .map(|dev| self.config.audio_gain(&dev.id))
+            .collect();
+        let selected_app_sources: Vec<_> = self
+            .app_audio_sources
+            .iter()
+            .zip(self.selected_app_audio.iter())
+            .filter(|&(_, &sel)| sel)
+            .map(|(src, _)| src.clone())
+            .collect();
+        let selected_app_gains: Vec<f32> = selected_app_sources
+            .iter()
+            .map(|src| self.config.app_audio_gain(&src.exe_name))
+            .collect();
+        let track_count = selected_devices.len() + selected_app_sources.len();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps,
@@ -1846,6 +2129,8 @@ impl App {
             source,
             selected_devices,
             selected_gains,
+            selected_app_sources,
+            selected_app_gains,
             self.app_audio_only,
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
@@ -1920,8 +2205,10 @@ impl App {
             return;
         };
 
-        let following_different_window =
-            self.session.highlight_hwnd().is_some_and(|hwnd| hwnd != source.hwnd);
+        let following_different_window = self
+            .session
+            .highlight_hwnd()
+            .is_some_and(|hwnd| hwnd != source.hwnd);
         if following_different_window {
             // Different app/resolution -- can't concatenate across the
             // switch (see encode::highlight_export), so start over.
@@ -1932,7 +2219,9 @@ impl App {
         // lines earlier in poll_background_work) instead of a fresh syscall
         // every frame -- also naturally rate-limits retrying after a
         // disk-full stop to that same ~3s cadence instead of every frame.
-        let has_room = self.free_space_bytes.is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
+        let has_room = self
+            .free_space_bytes
+            .is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
         if !self.session.is_highlighting() && has_room {
             self.start_highlight_buffering_for(source);
         }
@@ -1946,8 +2235,21 @@ impl App {
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
-        let selected_gains: Vec<f32> =
-            selected_devices.iter().map(|dev| self.config.audio_gain(&dev.id)).collect();
+        let selected_gains: Vec<f32> = selected_devices
+            .iter()
+            .map(|dev| self.config.audio_gain(&dev.id))
+            .collect();
+        let selected_app_sources: Vec<_> = self
+            .app_audio_sources
+            .iter()
+            .zip(self.selected_app_audio.iter())
+            .filter(|&(_, &sel)| sel)
+            .map(|(src, _)| src.clone())
+            .collect();
+        let selected_app_gains: Vec<f32> = selected_app_sources
+            .iter()
+            .map(|src| self.config.app_audio_gain(&src.exe_name))
+            .collect();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps,
@@ -1963,6 +2265,8 @@ impl App {
             &source,
             selected_devices,
             selected_gains,
+            selected_app_sources,
+            selected_app_gains,
             self.app_audio_only,
             &self.config.output_dir,
             encode,
@@ -1986,7 +2290,10 @@ impl App {
         let real_hwnd = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
         let source = crate::sources::capture_source_for_hwnd(real_hwnd);
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
-        match self.session.save_highlight(&self.config.output_dir, &app_name) {
+        match self
+            .session
+            .save_highlight(&self.config.output_dir, &app_name)
+        {
             Ok(handle) => {
                 self.highlight_save_state = HighlightSaveState::Saving;
                 self.highlight_save_handle = Some(handle);
@@ -1998,7 +2305,11 @@ impl App {
     }
 
     fn poll_highlight_save_result(&mut self) {
-        if !self.highlight_save_handle.as_ref().is_some_and(|h| h.is_finished()) {
+        if !self
+            .highlight_save_handle
+            .as_ref()
+            .is_some_and(|h| h.is_finished())
+        {
             return;
         }
         let handle = self.highlight_save_handle.take().unwrap();
@@ -2028,11 +2339,13 @@ impl App {
 /// posts the request instead of sending it, avoiding the reentrant call.
 fn reassert_overlay_topmost() {
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     };
     unsafe {
-        let Ok(hwnd) = windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("PolyRec Overlay"))
-        else {
+        let Ok(hwnd) = windows::Win32::UI::WindowsAndMessaging::FindWindowW(
+            None,
+            windows::core::w!("PolyRec Overlay"),
+        ) else {
             return;
         };
         let _ = SetWindowPos(

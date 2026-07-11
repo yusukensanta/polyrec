@@ -84,7 +84,10 @@ pub struct HighlightConfig {
 
 impl Default for HighlightConfig {
     fn default() -> Self {
-        Self { enabled: false, buffer_seconds: 120 }
+        Self {
+            enabled: false,
+            buffer_seconds: 120,
+        }
     }
 }
 
@@ -233,7 +236,26 @@ impl Config {
     /// device the first time it's seen (and any `config.toml` saved before
     /// this setting existed).
     pub fn audio_gain(&self, device_id: &str) -> f32 {
-        self.audio_device_gain.get(device_id).copied().unwrap_or(1.0)
+        self.audio_device_gain
+            .get(device_id)
+            .copied()
+            .unwrap_or(1.0)
+    }
+
+    /// Recording volume for a per-app audio source (`AppAudioSource::exe_name`),
+    /// same semantics as `audio_gain` -- 1.0 (100%) if not yet set. Shares
+    /// `audio_device_gain`'s map rather than a separate field, distinguished
+    /// by an `"app:"` key prefix so an app's exe name can never collide with
+    /// a WASAPI endpoint id (which `audio_gain` keys on directly).
+    pub fn app_audio_gain(&self, exe_name: &str) -> f32 {
+        self.audio_gain(&Self::app_audio_gain_key(exe_name))
+    }
+
+    /// The `audio_device_gain` key `app_audio_gain` reads from and the
+    /// per-app volume slider UI writes to -- kept as one function so the
+    /// `"app:"` prefix convention lives in exactly one place.
+    pub fn app_audio_gain_key(exe_name: &str) -> String {
+        format!("app:{exe_name}")
     }
 
     /// `window_position` if it's still worth restoring, `None` otherwise.
@@ -253,8 +275,9 @@ impl Config {
         // the left of (or above) the primary is common and puts the window
         // at a meaningfully negative x (or y), not just slightly negative
         // (e.g. a 4K monitor to the left alone accounts for -3840).
-        self.window_position
-            .filter(|&(x, y)| (-20_000.0..20_000.0).contains(&x) && (-20_000.0..20_000.0).contains(&y))
+        self.window_position.filter(|&(x, y)| {
+            (-20_000.0..20_000.0).contains(&x) && (-20_000.0..20_000.0).contains(&y)
+        })
     }
 
     pub fn config_path() -> PathBuf {
@@ -304,7 +327,10 @@ mod tests {
     #[test]
     fn highlight_settings_round_trip_toml_with_non_default_values() {
         let original = Config {
-            highlight: HighlightConfig { enabled: true, buffer_seconds: 90 },
+            highlight: HighlightConfig {
+                enabled: true,
+                buffer_seconds: 90,
+            },
             ..Config::default()
         };
         let text = toml::to_string_pretty(&original).unwrap();
@@ -362,13 +388,41 @@ mod tests {
     }
 
     #[test]
+    fn app_audio_gain_defaults_to_full_volume_for_an_app_with_no_entry() {
+        assert_eq!(Config::default().app_audio_gain("Discord.exe"), 1.0);
+    }
+
+    #[test]
+    fn app_audio_gain_reads_back_a_value_set_via_its_own_key_convention() {
+        let mut c = Config::default();
+        c.audio_device_gain
+            .insert(Config::app_audio_gain_key("Discord.exe"), 1.25);
+        assert_eq!(c.app_audio_gain("Discord.exe"), 1.25);
+    }
+
+    #[test]
+    fn app_audio_gain_key_cannot_collide_with_a_device_id_of_the_same_exe_name() {
+        // A device id happening to equal a bare exe name (unlikely in
+        // practice -- WASAPI endpoint ids look like
+        // "{0.0.0.00000000}.{guid}" -- but not impossible) must not leak
+        // into app_audio_gain's answer for that same string, and vice versa.
+        let mut c = Config::default();
+        c.audio_device_gain.insert("Discord.exe".into(), 2.0);
+        assert_eq!(c.audio_gain("Discord.exe"), 2.0);
+        assert_eq!(c.app_audio_gain("Discord.exe"), 1.0);
+    }
+
+    #[test]
     fn window_position_defaults_to_none() {
         assert_eq!(Config::default().window_position, None);
     }
 
     #[test]
     fn window_position_round_trips_toml() {
-        let original = Config { window_position: Some((123.0, -45.0)), ..Config::default() };
+        let original = Config {
+            window_position: Some((123.0, -45.0)),
+            ..Config::default()
+        };
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.window_position, Some((123.0, -45.0)));
@@ -405,16 +459,25 @@ mod tests {
     fn sane_window_position_accepts_typical_multi_monitor_coordinates() {
         // Negative x is normal for a monitor placed to the left of the
         // primary in Windows' virtual desktop coordinate space.
-        let c = Config { window_position: Some((-1200.0, 300.0)), ..Config::default() };
+        let c = Config {
+            window_position: Some((-1200.0, 300.0)),
+            ..Config::default()
+        };
         assert_eq!(c.sane_window_position(), Some((-1200.0, 300.0)));
     }
 
     #[test]
     fn sane_window_position_rejects_wildly_out_of_range_values() {
-        let c = Config { window_position: Some((-99999.0, 50.0)), ..Config::default() };
+        let c = Config {
+            window_position: Some((-99999.0, 50.0)),
+            ..Config::default()
+        };
         assert_eq!(c.sane_window_position(), None);
 
-        let c = Config { window_position: Some((50.0, 99999.0)), ..Config::default() };
+        let c = Config {
+            window_position: Some((50.0, 99999.0)),
+            ..Config::default()
+        };
         assert_eq!(c.sane_window_position(), None);
     }
 
@@ -466,11 +529,17 @@ mod tests {
         c.encode.resolution_mode = "native".into();
         assert!(matches!(c.encode.resolution_mode(), ResolutionMode::Native));
         c.encode.resolution_mode = "display".into();
-        assert!(matches!(c.encode.resolution_mode(), ResolutionMode::Display));
+        assert!(matches!(
+            c.encode.resolution_mode(),
+            ResolutionMode::Display
+        ));
         c.encode.resolution_mode = "custom".into();
         c.encode.custom_width = 2560;
         c.encode.custom_height = 1440;
-        assert!(matches!(c.encode.resolution_mode(), ResolutionMode::Custom(2560, 1440)));
+        assert!(matches!(
+            c.encode.resolution_mode(),
+            ResolutionMode::Custom(2560, 1440)
+        ));
     }
 
     #[test]
@@ -504,7 +573,10 @@ mod tests {
         assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Auto));
         c.encode.bitrate_mode = "manual".into();
         c.encode.manual_bitrate_mbps = 20;
-        assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(20_000_000)));
+        assert!(matches!(
+            c.encode.bitrate_mode(),
+            BitrateMode::Manual(20_000_000)
+        ));
     }
 
     #[test]
@@ -519,9 +591,15 @@ mod tests {
         let mut c = Config::default();
         c.encode.bitrate_mode = "manual".into();
         c.encode.manual_bitrate_mbps = 0;
-        assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(1_000_000)));
+        assert!(matches!(
+            c.encode.bitrate_mode(),
+            BitrateMode::Manual(1_000_000)
+        ));
         c.encode.manual_bitrate_mbps = 500;
-        assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Manual(100_000_000)));
+        assert!(matches!(
+            c.encode.bitrate_mode(),
+            BitrateMode::Manual(100_000_000)
+        ));
     }
 
     #[test]
@@ -571,7 +649,10 @@ mod tests {
         assert!(parsed.default_app_audio_only);
         // Also confirms encoder_mode -- likewise absent from this pre-existing
         // TOML -- falls back to "hardware" instead of failing to parse.
-        assert!(matches!(parsed.encode.encoder_mode(), EncoderMode::Hardware));
+        assert!(matches!(
+            parsed.encode.encoder_mode(),
+            EncoderMode::Hardware
+        ));
     }
 
     #[test]

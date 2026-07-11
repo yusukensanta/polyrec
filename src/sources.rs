@@ -1,18 +1,18 @@
 use crate::types::CaptureSource;
-use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::Graphics::Gdi::{
-    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DIB_RGB_COLORS,
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
+    GetObjectW, ReleaseDC,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON};
+use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGetFileInfoW};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, EnumWindows, GetIconInfo, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, ICONINFO,
+    GetWindowThreadProcessId, ICONINFO, IsWindowVisible,
 };
+use windows::core::BOOL;
 use windows::core::PCWSTR;
 
 pub fn enumerate_sources() -> Vec<CaptureSource> {
@@ -26,21 +26,23 @@ pub fn enumerate_sources() -> Vec<CaptureSource> {
     sources
 }
 
-unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL { unsafe {
-    let sources = &mut *(lparam.0 as *mut Vec<CaptureSource>);
+unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    unsafe {
+        let sources = &mut *(lparam.0 as *mut Vec<CaptureSource>);
 
-    if !IsWindowVisible(hwnd).as_bool() {
-        return BOOL(1);
+        if !IsWindowVisible(hwnd).as_bool() {
+            return BOOL(1);
+        }
+
+        if GetWindowTextLengthW(hwnd) == 0 {
+            return BOOL(1);
+        }
+
+        sources.push(capture_source_for_hwnd(hwnd));
+
+        BOOL(1)
     }
-
-    if GetWindowTextLengthW(hwnd) == 0 {
-        return BOOL(1);
-    }
-
-    sources.push(capture_source_for_hwnd(hwnd));
-
-    BOOL(1)
-}}
+}
 
 /// Builds a `CaptureSource` for an arbitrary window handle — used both by the
 /// enumeration above (for windows that already passed its visible/titled filter)
@@ -80,7 +82,11 @@ pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
     }
 }
 
-fn get_exe_path(pid: u32) -> Option<String> {
+/// `pub(crate)` (not just used within this module) -- also used by
+/// `capture::audio::enumerate_app_audio_sessions` to resolve a per-app audio
+/// session's exe name/icon from its process id, the same way a capture
+/// source's exe name/icon are resolved from its window's process id here.
+pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
         let mut buf = vec![0u16; 260];
@@ -96,7 +102,8 @@ fn get_exe_path(pid: u32) -> Option<String> {
 /// Extracts the exe's small shell icon as straight-alpha, top-down RGBA bytes.
 /// Best-effort: returns `None` on any failure rather than propagating an error —
 /// a missing icon just means the source list row shows no icon, not a broken list.
-fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
+/// `pub(crate)` -- see `get_exe_path`'s doc comment.
+pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
         let wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
         let mut info = SHFILEINFOW::default();
@@ -121,7 +128,12 @@ fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
 
         let mut bmp = BITMAP::default();
         let bmp_size = std::mem::size_of::<BITMAP>() as i32;
-        if GetObjectW(icon_info.hbmColor.into(), bmp_size, Some(&mut bmp as *mut _ as *mut _)) == 0 {
+        if GetObjectW(
+            icon_info.hbmColor.into(),
+            bmp_size,
+            Some(&mut bmp as *mut _ as *mut _),
+        ) == 0
+        {
             let _ = DeleteObject(icon_info.hbmColor.into());
             let _ = DestroyIcon(hicon);
             return None;
@@ -213,7 +225,11 @@ mod tests {
         let sources = enumerate_sources();
         assert!(!sources.is_empty());
         for s in &sources {
-            assert_ne!(s.hwnd, 0usize, "HWND should not be null for '{}'", s.window_title);
+            assert_ne!(
+                s.hwnd, 0usize,
+                "HWND should not be null for '{}'",
+                s.window_title
+            );
         }
     }
 
@@ -236,11 +252,16 @@ mod tests {
         // so a title tick (e.g. a browser tab) between the two calls is a real,
         // possible outcome, not a bug in either path.
         let sources = enumerate_sources();
-        let sample = sources.first().expect("expected at least one visible window");
+        let sample = sources
+            .first()
+            .expect("expected at least one visible window");
         let hwnd = windows::Win32::Foundation::HWND(sample.hwnd as *mut core::ffi::c_void);
         let rebuilt = capture_source_for_hwnd(hwnd);
         assert_eq!(rebuilt.hwnd, sample.hwnd);
-        assert_eq!(rebuilt.process_id, sample.process_id, "process identity must be stable even if the title changed");
+        assert_eq!(
+            rebuilt.process_id, sample.process_id,
+            "process identity must be stable even if the title changed"
+        );
     }
 
     #[test]
@@ -248,7 +269,11 @@ mod tests {
         let sources = enumerate_sources();
         for s in &sources {
             if let Some((rgba, w, h)) = &s.icon_rgba {
-                assert_eq!(rgba.len(), (*w * *h * 4) as usize, "RGBA buffer length must be width*height*4");
+                assert_eq!(
+                    rgba.len(),
+                    (*w * *h * 4) as usize,
+                    "RGBA buffer length must be width*height*4"
+                );
             }
         }
     }

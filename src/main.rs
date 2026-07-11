@@ -4,10 +4,10 @@ mod capture;
 mod config;
 mod disk_space;
 mod encode;
+mod error;
 mod highlight;
 mod hotkeys;
 mod i18n;
-mod error;
 mod self_update;
 mod session;
 mod sources;
@@ -28,9 +28,8 @@ fn main() -> eframe::Result<()> {
     let _rt_guard = rt.enter();
 
     unsafe {
-        use windows::Win32::Media::MediaFoundation::{MFStartup, MF_VERSION, MFSTARTUP_FULL};
-        MFStartup(MF_VERSION, MFSTARTUP_FULL)
-            .expect("MFStartup failed — requires Windows 7+");
+        use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFStartup};
+        MFStartup(MF_VERSION, MFSTARTUP_FULL).expect("MFStartup failed — requires Windows 7+");
     }
 
     let config = config::Config::load().unwrap_or_else(|e| {
@@ -49,21 +48,11 @@ fn main() -> eframe::Result<()> {
         // button) tops out around 420-450px; 760 keeps the resizable
         // 200-380px source-list panel comfortable without the excess.
         //
-        // Height bumped 600 -> 680 -> 720: each checked audio device's
-        // volume slider adds a row to the left panel's AUDIO section, and
-        // that section's own internal scroll area reserves its full capped
-        // height once content exceeds it (rather than shrinking to fit) —
-        // with just the default-checked device, this already pushed
-        // "App audio only" a few pixels below the window's bottom edge at
-        // 600 (measured empirically via UI Automation bounding rects: 9px
-        // past the edge). 680 fixed that, but the AUDIO section's own
-        // scroll cap was still only 140px (render_source_panel), too small
-        // for two checked devices' sliders (~160px) -- the second device's
-        // slider was itself clipped by that inner scroll boundary. Bumping
-        // the cap to 180 to fit both fixes that, but reclaims some of the
-        // margin 680 gave "App audio only"; bumped again to 720 to restore
-        // it (verified empirically, see render_source_panel's comment on
-        // the 180 cap).
+        // 720 is just a comfortable starting height, not a hard requirement
+        // -- the source panel is one scroll area top to bottom (see
+        // render_source_panel), so however many devices/apps a given
+        // machine has, content past the bottom edge is always reachable by
+        // scrolling rather than clipped or overlapping whatever follows it.
         .with_inner_size([760.0, 720.0])
         .with_min_inner_size([620.0, 450.0])
         .with_icon(icon);
