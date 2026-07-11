@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.16] - 2026-07-11
+
 ### Added
 
 - Per-audio-device recording volume (0-200%, default 100%) -- a slider next to each checked device in the source panel. Applied to that device's captured samples before encoding, independent of the device's actual system volume, so it doesn't change what you hear live, only what's recorded. Persisted per device across restarts. Set before pressing REC, like Quality/Hotkeys; not adjustable live mid-recording.
