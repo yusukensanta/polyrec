@@ -1,4 +1,8 @@
-use super::{accent_button, section_header, App, ACCENT_PAUSE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY};
+use super::App;
+use super::theme::{
+    ACCENT_PAUSE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
+};
+use super::widgets::{accent_button, section_header};
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -28,7 +32,14 @@ impl App {
         if let Some(slot) = self.recording_hotkey {
             ctx.input(|i| {
                 for event in &i.events {
-                    if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } = event
+                    {
                         if *key == egui::Key::Escape {
                             self.recording_hotkey = None;
                             return;
@@ -57,10 +68,16 @@ impl App {
                         };
                         if crate::hotkeys::try_register(vk, mods) {
                             match slot {
-                                HotkeySlot::StartStop => self.config.hotkeys.start_stop = combo.clone(),
+                                HotkeySlot::StartStop => {
+                                    self.config.hotkeys.start_stop = combo.clone()
+                                }
                                 HotkeySlot::Pause => self.config.hotkeys.pause = combo.clone(),
-                                HotkeySlot::ToggleOverlay => self.config.hotkeys.toggle_overlay = combo.clone(),
-                                HotkeySlot::SaveHighlight => self.config.hotkeys.save_highlight = combo.clone(),
+                                HotkeySlot::ToggleOverlay => {
+                                    self.config.hotkeys.toggle_overlay = combo.clone()
+                                }
+                                HotkeySlot::SaveHighlight => {
+                                    self.config.hotkeys.save_highlight = combo.clone()
+                                }
                             }
                             self.hotkey_capture_warning = None;
                         } else {
@@ -99,46 +116,72 @@ impl App {
                 // Caps the popup's height below a typical app window's, so a
                 // short window (or a future 5th/6th hotkey row) scrolls
                 // instead of forcing the popup taller than its parent.
-                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
-                // Grid (not four independent ui.horizontal calls) so the
-                // current-binding label and Change button land in the same
-                // two columns across all four rows structurally -- previously
-                // each row's Change button drifted left/right depending on
-                // how wide that row's own binding text happened to render.
-                egui::Grid::new("hotkeys_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
                     .show(ui, |ui| {
-                        self.render_hotkey_row(ui, s, s.hotkey_start_stop_header, HotkeySlot::StartStop);
-                        self.render_hotkey_row(ui, s, s.hotkey_pause_header, HotkeySlot::Pause);
-                        self.render_hotkey_row(ui, s, s.hotkey_overlay_header, HotkeySlot::ToggleOverlay);
-                        self.render_hotkey_row(ui, s, s.hotkey_save_highlight_header, HotkeySlot::SaveHighlight);
-                    });
+                        // Grid (not four independent ui.horizontal calls) so the
+                        // current-binding label and Change button land in the same
+                        // two columns across all four rows structurally -- previously
+                        // each row's Change button drifted left/right depending on
+                        // how wide that row's own binding text happened to render.
+                        egui::Grid::new("hotkeys_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                self.render_hotkey_row(
+                                    ui,
+                                    s,
+                                    s.hotkey_start_stop_header,
+                                    HotkeySlot::StartStop,
+                                );
+                                self.render_hotkey_row(
+                                    ui,
+                                    s,
+                                    s.hotkey_pause_header,
+                                    HotkeySlot::Pause,
+                                );
+                                self.render_hotkey_row(
+                                    ui,
+                                    s,
+                                    s.hotkey_overlay_header,
+                                    HotkeySlot::ToggleOverlay,
+                                );
+                                self.render_hotkey_row(
+                                    ui,
+                                    s,
+                                    s.hotkey_save_highlight_header,
+                                    HotkeySlot::SaveHighlight,
+                                );
+                            });
 
-                let bindings = [
-                    &self.config.hotkeys.start_stop,
-                    &self.config.hotkeys.pause,
-                    &self.config.hotkeys.toggle_overlay,
-                    &self.config.hotkeys.save_highlight,
-                ];
-                let has_collision = bindings
-                    .iter()
-                    .enumerate()
-                    .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
-                if has_collision {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(s.hotkey_collision_warning)
-                            .size(TEXT_CAPTION)
-                            .color(ACCENT_PAUSE),
-                    );
-                }
+                        let bindings = [
+                            &self.config.hotkeys.start_stop,
+                            &self.config.hotkeys.pause,
+                            &self.config.hotkeys.toggle_overlay,
+                            &self.config.hotkeys.save_highlight,
+                        ];
+                        let has_collision = bindings
+                            .iter()
+                            .enumerate()
+                            .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
+                        if has_collision {
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(s.hotkey_collision_warning)
+                                    .size(TEXT_CAPTION)
+                                    .color(ACCENT_PAUSE),
+                            );
+                        }
 
-                if let Some(warning) = &self.hotkey_capture_warning {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new(warning).size(TEXT_CAPTION).color(ACCENT_PAUSE));
-                }
-                }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
+                        if let Some(warning) = &self.hotkey_capture_warning {
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(warning)
+                                    .size(TEXT_CAPTION)
+                                    .color(ACCENT_PAUSE),
+                            );
+                        }
+                    }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
                 if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
@@ -176,7 +219,13 @@ impl App {
     /// `self.recording_hotkey == Some(slot)`) in column 0 and a Change
     /// button in column 1 -- called from inside an `egui::Grid::show`
     /// closure, so every row's button lands in the same column position.
-    fn render_hotkey_row(&mut self, ui: &mut egui::Ui, s: &'static Strings, header: &str, slot: HotkeySlot) {
+    fn render_hotkey_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &'static Strings,
+        header: &str,
+        slot: HotkeySlot,
+    ) {
         section_header(ui, header);
         ui.end_row();
 
@@ -197,11 +246,19 @@ impl App {
                         .color(ACCENT_SECONDARY)
                         .strong(),
                 );
-                ui.label(egui::RichText::new(s.hotkey_press_esc_to_cancel).size(TEXT_CAPTION).color(TEXT_MUTED));
+                ui.label(
+                    egui::RichText::new(s.hotkey_press_esc_to_cancel)
+                        .size(TEXT_CAPTION)
+                        .color(TEXT_MUTED),
+                );
             });
         } else {
             ui.label(egui::RichText::new(&current).strong().color(TEXT_PRIMARY));
-            if ui.add(accent_button(s.hotkey_change_button, ACCENT_SECONDARY)).on_hover_text(s.hotkey_change_tooltip).clicked() {
+            if ui
+                .add(accent_button(s.hotkey_change_button, ACCENT_SECONDARY))
+                .on_hover_text(s.hotkey_change_tooltip)
+                .clicked()
+            {
                 self.recording_hotkey = Some(slot);
                 self.hotkey_capture_warning = None;
             }
@@ -223,21 +280,66 @@ impl App {
 fn egui_key_to_hotkey_string(key: egui::Key) -> Option<&'static str> {
     use egui::Key;
     Some(match key {
-        Key::F1 => "F1", Key::F2 => "F2", Key::F3 => "F3", Key::F4 => "F4",
-        Key::F5 => "F5", Key::F6 => "F6", Key::F7 => "F7", Key::F8 => "F8",
-        Key::F9 => "F9", Key::F10 => "F10", Key::F11 => "F11", Key::F12 => "F12",
-        Key::F13 => "F13", Key::F14 => "F14", Key::F15 => "F15", Key::F16 => "F16",
-        Key::F17 => "F17", Key::F18 => "F18", Key::F19 => "F19", Key::F20 => "F20",
-        Key::F21 => "F21", Key::F22 => "F22", Key::F23 => "F23", Key::F24 => "F24",
-        Key::A => "A", Key::B => "B", Key::C => "C", Key::D => "D", Key::E => "E",
-        Key::F => "F", Key::G => "G", Key::H => "H", Key::I => "I", Key::J => "J",
-        Key::K => "K", Key::L => "L", Key::M => "M", Key::N => "N", Key::O => "O",
-        Key::P => "P", Key::Q => "Q", Key::R => "R", Key::S => "S", Key::T => "T",
-        Key::U => "U", Key::V => "V", Key::W => "W", Key::X => "X", Key::Y => "Y",
+        Key::F1 => "F1",
+        Key::F2 => "F2",
+        Key::F3 => "F3",
+        Key::F4 => "F4",
+        Key::F5 => "F5",
+        Key::F6 => "F6",
+        Key::F7 => "F7",
+        Key::F8 => "F8",
+        Key::F9 => "F9",
+        Key::F10 => "F10",
+        Key::F11 => "F11",
+        Key::F12 => "F12",
+        Key::F13 => "F13",
+        Key::F14 => "F14",
+        Key::F15 => "F15",
+        Key::F16 => "F16",
+        Key::F17 => "F17",
+        Key::F18 => "F18",
+        Key::F19 => "F19",
+        Key::F20 => "F20",
+        Key::F21 => "F21",
+        Key::F22 => "F22",
+        Key::F23 => "F23",
+        Key::F24 => "F24",
+        Key::A => "A",
+        Key::B => "B",
+        Key::C => "C",
+        Key::D => "D",
+        Key::E => "E",
+        Key::F => "F",
+        Key::G => "G",
+        Key::H => "H",
+        Key::I => "I",
+        Key::J => "J",
+        Key::K => "K",
+        Key::L => "L",
+        Key::M => "M",
+        Key::N => "N",
+        Key::O => "O",
+        Key::P => "P",
+        Key::Q => "Q",
+        Key::R => "R",
+        Key::S => "S",
+        Key::T => "T",
+        Key::U => "U",
+        Key::V => "V",
+        Key::W => "W",
+        Key::X => "X",
+        Key::Y => "Y",
         Key::Z => "Z",
-        Key::Num0 => "0", Key::Num1 => "1", Key::Num2 => "2", Key::Num3 => "3",
-        Key::Num4 => "4", Key::Num5 => "5", Key::Num6 => "6", Key::Num7 => "7",
-        Key::Num8 => "8", Key::Num9 => "9",
+        Key::Num0 => "0",
+        Key::Num1 => "1",
+        Key::Num2 => "2",
+        Key::Num3 => "3",
+        Key::Num4 => "4",
+        Key::Num5 => "5",
+        Key::Num6 => "6",
+        Key::Num7 => "7",
+        Key::Num8 => "8",
+        Key::Num9 => "9",
         Key::Space => "SPACE",
         Key::Tab => "TAB",
         Key::Enter => "ENTER",
@@ -280,14 +382,31 @@ mod hotkey_capture_tests {
         // Every string this mapping can produce must actually be recognized by
         // hotkeys::parse_hotkey, or a captured key would silently fail to bind.
         let keys = [
-            egui::Key::F1, egui::Key::F13, egui::Key::F24, egui::Key::A, egui::Key::Z,
-            egui::Key::Num0, egui::Key::Num9, egui::Key::Space, egui::Key::Tab,
-            egui::Key::Enter, egui::Key::Backspace, egui::Key::Delete, egui::Key::Insert,
-            egui::Key::Home, egui::Key::End, egui::Key::PageUp, egui::Key::PageDown,
-            egui::Key::ArrowUp, egui::Key::ArrowDown, egui::Key::ArrowLeft, egui::Key::ArrowRight,
+            egui::Key::F1,
+            egui::Key::F13,
+            egui::Key::F24,
+            egui::Key::A,
+            egui::Key::Z,
+            egui::Key::Num0,
+            egui::Key::Num9,
+            egui::Key::Space,
+            egui::Key::Tab,
+            egui::Key::Enter,
+            egui::Key::Backspace,
+            egui::Key::Delete,
+            egui::Key::Insert,
+            egui::Key::Home,
+            egui::Key::End,
+            egui::Key::PageUp,
+            egui::Key::PageDown,
+            egui::Key::ArrowUp,
+            egui::Key::ArrowDown,
+            egui::Key::ArrowLeft,
+            egui::Key::ArrowRight,
         ];
         for key in keys {
-            let name = egui_key_to_hotkey_string(key).unwrap_or_else(|| panic!("{key:?} should map to a hotkey string"));
+            let name = egui_key_to_hotkey_string(key)
+                .unwrap_or_else(|| panic!("{key:?} should map to a hotkey string"));
             assert!(
                 crate::hotkeys::parse_hotkey(name).is_some(),
                 "hotkeys::parse_hotkey doesn't recognize \"{name}\" (produced from {key:?})"

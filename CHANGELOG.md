@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- AUDIO (SYSTEM + APPLICATIONS) is now pinned to the bottom of the source panel, always fully visible and never scrolled -- readable at a glance without hunting for it, since the set of system devices and currently audio-active apps is normally small. Only the capture-source list scrolls now, restoring a single scroll region (multiple independently-scrollable regions in one panel is a documented accessibility problem: keyboard/switch users can't reliably tell which region has scroll focus, and screen magnifier users can miss content cropped by an inner region's own boundary) while still keeping audio controls from being pushed out of view by a long source list.
+- Split the dashboard UI code out of one 2450-line `mod.rs` into focused modules (per-panel render functions, shared widgets, theme tokens, background polling, and user actions) -- no behavior change, just following the same pattern the Hotkeys popup already used.
+
 ## [v0.5.22] - 2026-07-12
 
 ### Changed
