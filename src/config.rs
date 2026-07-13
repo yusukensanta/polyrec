@@ -281,10 +281,13 @@ impl Config {
         format!("app:{exe_name}")
     }
 
-    /// Pins `exe_name` to the Applications audio list. No-op (not an error)
-    /// if it's already registered -- the "+ Add app" button has no way to
-    /// know that ahead of calling this, so silently deduping here is
-    /// simpler than the UI pre-checking.
+    /// Pins `exe_name` to the Applications audio list -- called both from
+    /// "+ Add app" (browsing to an exe directly) and from checking any live
+    /// app's checkbox (so a manually-checked app doesn't silently forget
+    /// itself and go back to unchecked on next launch). No-op (not an
+    /// error) if it's already registered -- neither call site has an easy
+    /// way to know that ahead of calling this, so silently deduping here is
+    /// simpler than each one pre-checking.
     pub fn register_app_audio(&mut self, exe_name: String, exe_path: String) {
         if self
             .registered_app_audio
