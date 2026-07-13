@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.26] - 2026-07-13
+
 ### Added
 
 - Apps can now be pinned to the Applications audio list via a new "+ Add app" button in **🔊 Audio** -- pick any `.exe`, even one that isn't running yet, and it shows greyed with its default volume until it launches, at which point it starts capturing automatically without needing to be re-checked. A small "×" on a pinned row un-pins it.
