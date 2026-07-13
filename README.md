@@ -42,7 +42,7 @@ Releases are also immutable once published — assets can't be silently replaced
 
 ## Features
 
-- **Window capture** via Windows.Graphics.Capture — pick any visible window. Recording defaults to that window's own native resolution; "Match display" and "Custom" are opt-in alternatives in **⚙ Quality**.
+- **Window or entire-screen capture** via Windows.Graphics.Capture — pick any visible window, or a specific display for a whole-screen recording (every connected monitor is listed separately). Recording defaults to the source's own native resolution; "Match display" and "Custom" are opt-in alternatives in **⚙ Quality**.
 - **Multi-track audio** (**🔊 Audio**) — record system loopback (Speakers) and microphone as independent tracks. Loopback is selected by default so the common case is one clean, unambiguous track; check Microphone to add a second. Each checked device gets its own volume slider (0–100%, default 100%) that only affects the recording, not what you actually hear.
 - **App audio only** — scope loopback capture to just the selected app's process via the Windows Process Loopback Capture API, instead of the full desktop mix.
 - **Per-app audio tracks** (also in **🔊 Audio**) — pick individual running apps with sound (Discord, Spotify, a game, etc.) as their own independent audio tracks. Each gets its own volume slider. Independent of App audio only / the video capture source — pick an app's audio here without it needing to be the window you're recording.
