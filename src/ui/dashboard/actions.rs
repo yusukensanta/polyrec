@@ -1,12 +1,60 @@
 use super::{App, HighlightSaveState};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
+use crate::config::Config;
 use crate::i18n::Strings;
 use crate::session::{EncodeSettings, state::SessionAction};
 use crate::sources::enumerate_sources;
-use crate::types::CaptureSource;
+use crate::types::{AppAudioSource, CaptureSource};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+
+/// `enumerate_app_audio_sessions()` plus a synthetic entry (`process_ids:
+/// vec![]`) for every `Config::registered_app_audio` app that isn't
+/// currently live -- so a pinned app still shows (greyed, see
+/// `render_audio_popup`) even while not producing sound, and its icon can
+/// still be shown via the path it was registered with.
+pub(super) fn merge_registered_app_audio(
+    mut sources: Vec<AppAudioSource>,
+    config: &Config,
+) -> Vec<AppAudioSource> {
+    for reg in &config.registered_app_audio {
+        if sources.iter().any(|s| s.exe_name == reg.exe_name) {
+            continue;
+        }
+        let display_name = reg
+            .exe_name
+            .strip_suffix(".exe")
+            .or_else(|| reg.exe_name.strip_suffix(".EXE"))
+            .unwrap_or(&reg.exe_name)
+            .to_string();
+        sources.push(AppAudioSource {
+            process_ids: Vec::new(),
+            exe_name: reg.exe_name.clone(),
+            display_name,
+            icon_rgba: crate::sources::extract_exe_icon_rgba(&reg.exe_path),
+        });
+    }
+    sources
+}
+
+/// Order-independent fingerprint of an app-audio list, for deciding whether
+/// `refresh_sources_and_audio_if_due` needs to rebuild anything -- comparing
+/// just the set of exe names misses a registered app transitioning from
+/// idle (`process_ids: []`) to live (real pids) or back, since its exe name
+/// doesn't change either way but its `process_ids` do.
+fn app_audio_fingerprint(sources: &[AppAudioSource]) -> Vec<(String, Vec<u32>)> {
+    let mut v: Vec<(String, Vec<u32>)> = sources
+        .iter()
+        .map(|s| {
+            let mut pids = s.process_ids.clone();
+            pids.sort_unstable();
+            (s.exe_name.clone(), pids)
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
 
 impl App {
     pub(super) fn handle_pause_button(&mut self) {
@@ -126,32 +174,44 @@ impl App {
             // actually-probed track count, not the live device list.
         }
 
-        let new_app_audio_sources = enumerate_app_audio_sessions().unwrap_or_default();
-        let current_exe_names: std::collections::HashSet<&str> = self
-            .app_audio_sources
-            .iter()
-            .map(|s| s.exe_name.as_str())
-            .collect();
-        let new_exe_names: std::collections::HashSet<&str> = new_app_audio_sources
-            .iter()
-            .map(|s| s.exe_name.as_str())
-            .collect();
-        if new_exe_names != current_exe_names {
+        let new_app_audio_sources = merge_registered_app_audio(
+            enumerate_app_audio_sessions().unwrap_or_default(),
+            &self.config,
+        );
+        if app_audio_fingerprint(&new_app_audio_sources)
+            != app_audio_fingerprint(&self.app_audio_sources)
+        {
             // Preserved by exe name, not list index or process id -- a
             // refresh can legitimately re-enumerate the same still-running
             // app at the same PID (no change needed), but also survives the
             // app having been closed and reopened (new PID) between
-            // refreshes without silently unchecking it.
-            let previously_checked: std::collections::HashSet<String> = self
+            // refreshes without silently unchecking it. An exe name that
+            // already existed keeps whatever checked state it had
+            // (including a manual uncheck, even across it going idle<->live)
+            // -- only a genuinely brand-new exe name gets a fresh default,
+            // which is true for a registered app (registering one implies
+            // "yes, record it") and false otherwise, matching the
+            // already-existing default for any newly-appearing live app.
+            let previous_checked_by_exe: std::collections::HashMap<&str, bool> = self
                 .app_audio_sources
                 .iter()
                 .zip(self.selected_app_audio.iter())
-                .filter(|&(_, &sel)| sel)
-                .map(|(s, _)| s.exe_name.clone())
+                .map(|(s, &sel)| (s.exe_name.as_str(), sel))
+                .collect();
+            let registered_exe_names: std::collections::HashSet<&str> = self
+                .config
+                .registered_app_audio
+                .iter()
+                .map(|r| r.exe_name.as_str())
                 .collect();
             self.selected_app_audio = new_app_audio_sources
                 .iter()
-                .map(|s| previously_checked.contains(&s.exe_name))
+                .map(|s| {
+                    previous_checked_by_exe
+                        .get(s.exe_name.as_str())
+                        .copied()
+                        .unwrap_or_else(|| registered_exe_names.contains(s.exe_name.as_str()))
+                })
                 .collect();
             self.app_audio_sources = new_app_audio_sources;
             self.app_audio_icon_textures.clear();

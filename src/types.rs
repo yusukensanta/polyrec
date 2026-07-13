@@ -73,19 +73,33 @@ pub struct AudioDevice {
     pub is_loopback: bool,
 }
 
-/// A running application's WASAPI audio session -- lets a specific app's
-/// audio (Discord, Spotify, a game) be selected as its own independent
-/// recording track via Process Loopback Capture, the same mechanism the
-/// "App audio only" checkbox already uses for whichever window is selected
-/// as the video capture source. This is deliberately separate from that:
-/// picking an app here doesn't require it to be the video source, and vice
-/// versa (see `capture::audio::enumerate_app_audio_sessions`).
+/// One exe's WASAPI audio session(s) -- lets a specific app's audio
+/// (Discord, Spotify, a game) be selected as its own independent recording
+/// track via Process Loopback Capture, the same mechanism the "App audio
+/// only" checkbox already uses for whichever window is selected as the
+/// video capture source. This is deliberately separate from that: picking
+/// an app here doesn't require it to be the video source, and vice versa
+/// (see `capture::audio::enumerate_app_audio_sessions`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppAudioSource {
-    pub process_id: u32,
+    /// One entry per live top-level process currently producing audio under
+    /// this exe -- grouped by `exe_name` rather than one `AppAudioSource`
+    /// per pid, so two independent instances of the same exe (not
+    /// parent/child) share one checkbox/slider instead of needing both
+    /// toggled separately. Each pid gets its own Process Loopback Capture
+    /// task at recording start, all feeding the same track (see
+    /// `session::start_capture`'s per-app spawn loop) -- capture, not this
+    /// struct, is where the "many processes, one track" merge happens.
+    ///
+    /// Empty for a `Config::registered_app_audio` entry that isn't
+    /// currently running: still shown (greyed, see `render_audio_popup`)
+    /// so its pinned volume is visible, but nothing to actually spawn a
+    /// capture task for.
+    pub process_ids: Vec<u32>,
     /// e.g. "Discord.exe" -- used as the stable key for
-    /// `Config::audio_device_gain` (prefixed `"app:"`) since `process_id`
-    /// isn't stable across the app's own restarts.
+    /// `Config::audio_device_gain` (prefixed `"app:"`) and for
+    /// `Config::registered_app_audio`, since a pid isn't stable across the
+    /// app's own restarts.
     pub exe_name: String,
     /// WASAPI's own session display name if the app set one (most don't);
     /// falls back to `exe_name` with the `.exe` suffix stripped.

@@ -101,6 +101,12 @@ pub struct Strings {
     /// source is a `CaptureKind::Monitor` entry (or none is selected) --
     /// there's no owning process to scope loopback to in that case.
     pub tooltip_app_audio_only_needs_window: &'static str,
+    /// "+ Add app" button under the Applications list -- opens a file
+    /// browser to pin an app via `Config::register_app_audio`, even one
+    /// that isn't currently running.
+    pub add_app_button: &'static str,
+    /// Hover text for the small "×" next to a registered app's row.
+    pub remove_registered_app_tooltip: &'static str,
 
     // Center panel — status
     pub status_header: &'static str,
@@ -246,6 +252,8 @@ pub static EN: Strings = Strings {
     tooltip_check_loopback_first: "Check the system audio (🔊) box above first.",
     tooltip_app_audio_only: "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working.",
     tooltip_app_audio_only_needs_window: "Select a specific window (not a monitor) as the capture source to use this — an entire-screen recording has no single app to scope audio to.",
+    add_app_button: "+ Add app",
+    remove_registered_app_tooltip: "Stop pinning this app — it'll still show while running, just no longer remembered once it closes.",
 
     status_header: "STATUS",
     state_paused: "PAUSED",
@@ -372,6 +380,8 @@ pub static JA: Strings = Strings {
     tooltip_check_loopback_first: "まず上のシステム音声（🔊）にチェックを入れてください。",
     tooltip_app_audio_only: "デスクトップ全体の音声ではなく、Windows の Process Loopback API を使って選択したウィンドウ自体の音声のみを録音します。有効な再生デバイスが必要です（ミュートしていても動作します）。",
     tooltip_app_audio_only_needs_window: "この機能を使うには、モニターではなく特定のウィンドウをキャプチャソースとして選択してください。画面全体の録画には音声を絞り込む対象のアプリがありません。",
+    add_app_button: "+ アプリを追加",
+    remove_registered_app_tooltip: "このアプリの固定登録を解除します。実行中は引き続き表示されますが、終了後は記憶されません。",
 
     status_header: "ステータス",
     state_paused: "一時停止中",

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Apps can now be pinned to the Applications audio list via a new "+ Add app" button in **🔊 Audio** -- pick any `.exe`, even one that isn't running yet, and it shows greyed with its default volume until it launches, at which point it starts capturing automatically without needing to be re-checked. A small "×" on a pinned row un-pins it.
+
+### Changed
+
+- Two independent instances of the same app (not parent/child -- e.g. two separate game or app windows) now share a single checkbox and volume slider in the Applications list instead of showing as two separate entries. Each instance is still captured as its own audio track under the hood (Windows' Process Loopback Capture only targets one process per stream), so the recording gets one track per running instance, just no longer split across separate UI rows to manage.
+
 ## [v0.5.25] - 2026-07-13
 
 ### Added

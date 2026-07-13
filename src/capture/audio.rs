@@ -183,8 +183,12 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
 /// silent -- paused music, nobody talking -- still keeps its session and
 /// should still be pickable), excludes `Expired` ones (the app's audio
 /// client was torn down, effectively closed) and the OS's own system-sounds
-/// session (not a real app). De-duplicates by process id -- one app can hold
-/// several concurrent sessions (e.g. multiple simultaneous sounds).
+/// session (not a real app). Grouped by exe name, not process id: one app
+/// can hold several concurrent sessions on the same pid (e.g. multiple
+/// simultaneous sounds), and two independent top-level processes of the
+/// same exe (not parent/child -- e.g. two separate game/app windows) are
+/// still the same app from a recording-selection standpoint, so both land
+/// in one `AppAudioSource::process_ids` rather than two separate entries.
 pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
     let mut sources = Vec::new();
     unsafe {
@@ -260,16 +264,23 @@ pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
                     .to_string()
             });
 
-            let icon_rgba = exe_path
-                .as_deref()
-                .and_then(crate::sources::extract_exe_icon_rgba);
-
-            sources.push(AppAudioSource {
-                process_id: pid,
-                exe_name,
-                display_name,
-                icon_rgba,
-            });
+            match sources
+                .iter_mut()
+                .find(|s: &&mut AppAudioSource| s.exe_name == exe_name)
+            {
+                Some(existing) => existing.process_ids.push(pid),
+                None => {
+                    let icon_rgba = exe_path
+                        .as_deref()
+                        .and_then(crate::sources::extract_exe_icon_rgba);
+                    sources.push(AppAudioSource {
+                        process_ids: vec![pid],
+                        exe_name,
+                        display_name,
+                        icon_rgba,
+                    });
+                }
+            }
         }
     }
     Ok(sources)
@@ -827,23 +838,41 @@ mod tests {
     // -- needs a real audio subsystem, which the hosted CI runner doesn't have.
     #[test]
     #[ignore]
-    fn enumerate_app_audio_sessions_succeeds_and_has_no_duplicate_pids() {
+    fn enumerate_app_audio_sessions_succeeds_and_has_no_duplicate_pids_across_groups() {
         // Not asserting non-empty -- unlike audio *devices* (always at least
         // a default endpoint), a real desktop can legitimately have zero
         // apps with an active/inactive audio session at the moment this
         // runs. Just confirms the WASAPI session-manager path itself works
-        // end to end and that de-duplication (each app appears once even if
-        // it holds multiple concurrent sessions) actually holds.
+        // end to end and that grouping doesn't lose or duplicate a pid
+        // across groups (each pid appears in exactly one exe's
+        // `process_ids`, even though a single exe can legitimately hold
+        // several).
         let sources = enumerate_app_audio_sessions().expect("enumerate_app_audio_sessions failed");
-        let mut pids: Vec<u32> = sources.iter().map(|s| s.process_id).collect();
-        pids.sort_unstable();
-        pids.dedup();
+        let mut exe_names: Vec<&str> = sources.iter().map(|s| s.exe_name.as_str()).collect();
+        exe_names.sort_unstable();
+        exe_names.dedup();
         assert_eq!(
-            pids.len(),
+            exe_names.len(),
             sources.len(),
-            "expected no duplicate process ids"
+            "expected no duplicate exe_name groups"
+        );
+        let mut pids: Vec<u32> = sources
+            .iter()
+            .flat_map(|s| s.process_ids.iter().copied())
+            .collect();
+        let mut deduped_pids = pids.clone();
+        deduped_pids.sort_unstable();
+        deduped_pids.dedup();
+        pids.sort_unstable();
+        assert_eq!(
+            pids, deduped_pids,
+            "expected no pid to appear in more than one exe's process_ids"
         );
         for s in &sources {
+            assert!(
+                !s.process_ids.is_empty(),
+                "a live-enumerated source should always have at least one pid"
+            );
             assert!(
                 !s.exe_name.is_empty(),
                 "every listed source should have a resolved exe name"

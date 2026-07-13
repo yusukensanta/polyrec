@@ -147,8 +147,23 @@ impl App {
         // the loopback device by default keeps the common case to a single,
         // deterministically audible track; mic capture remains an opt-in checkbox.
         let selected_audio: Vec<bool> = audio_devices.iter().map(|d| d.is_loopback).collect();
-        let app_audio_sources = enumerate_app_audio_sessions().unwrap_or_default();
-        let selected_app_audio = vec![false; app_audio_sources.len()];
+        let app_audio_sources = actions::merge_registered_app_audio(
+            enumerate_app_audio_sessions().unwrap_or_default(),
+            &config,
+        );
+        // Registering an app implies "yes, record it" -- same default a
+        // freshly-registered app gets when it first appears mid-session via
+        // refresh_sources_and_audio_if_due, applied here too so it doesn't
+        // need a live refresh tick after launch to take effect.
+        let registered_exe_names: std::collections::HashSet<&str> = config
+            .registered_app_audio
+            .iter()
+            .map(|r| r.exe_name.as_str())
+            .collect();
+        let selected_app_audio: Vec<bool> = app_audio_sources
+            .iter()
+            .map(|s| registered_exe_names.contains(s.exe_name.as_str()))
+            .collect();
         let export_track_selection = vec![true; n];
         let wake_ctx = cc.egui_ctx.clone();
         let hotkey_listener = HotkeyListener::spawn(
