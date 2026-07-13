@@ -4,45 +4,70 @@ use crate::session::clock::RecordingClock;
 use crate::types::VideoFrame;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem,
-};
-use windows::Graphics::SizeInt32;
 use windows::Foundation::TypedEventHandler;
+use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem};
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
+use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Resource, ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING, ID3D11Resource, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::Interface;
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-};
+
+/// A window or a monitor -- the two things Windows.Graphics.Capture can
+/// create a `GraphicsCaptureItem` for (`CreateForWindow` / `CreateForMonitor`
+/// respectively). Everything downstream of item creation (frame pool,
+/// encoding) is identical either way; this only matters at the one call site
+/// in each of `query_capture_size` and `run_video_capture` that creates the
+/// item itself.
+#[derive(Clone, Copy)]
+pub enum CaptureTarget {
+    Window(HWND),
+    Monitor(HMONITOR),
+}
+
+impl CaptureTarget {
+    unsafe fn create_item(
+        self,
+        interop: &IGraphicsCaptureItemInterop,
+    ) -> windows::core::Result<GraphicsCaptureItem> {
+        unsafe {
+            match self {
+                CaptureTarget::Window(hwnd) => interop.CreateForWindow(hwnd),
+                CaptureTarget::Monitor(hmonitor) => interop.CreateForMonitor(hmonitor),
+            }
+        }
+    }
+}
 
 /// Query the actual size Windows.Graphics.Capture will deliver frames at for this
-/// window. This is what `run_video_capture` below captures at — NOT `GetClientRect`,
+/// target. This is what `run_video_capture` below captures at — NOT `GetClientRect`,
 /// which excludes the title bar/borders and does not match WGC's window capture size.
 /// Callers must use this (not GetClientRect) to size the encoder, or captured frames
 /// will be written at the wrong stride and appear skewed/distorted.
-pub fn query_capture_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
+pub fn query_capture_size(target: CaptureTarget) -> Result<(u32, u32), AppError> {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(
             None,
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         );
         let interop: IGraphicsCaptureItemInterop =
-            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-                .map_err(|e| AppError::Capture(format!("IGraphicsCaptureItemInterop factory: {e}")))?;
-        let item: GraphicsCaptureItem = interop
-            .CreateForWindow(hwnd)
-            .map_err(|e| AppError::Capture(format!("CreateForWindow: {e}")))?;
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(
+                |e| AppError::Capture(format!("IGraphicsCaptureItemInterop factory: {e}")),
+            )?;
+        let item: GraphicsCaptureItem = target
+            .create_item(&interop)
+            .map_err(|e| AppError::Capture(format!("CreateFor{{Window,Monitor}}: {e}")))?;
         let size = item
             .Size()
             .map_err(|e| AppError::Capture(format!("item.Size: {e}")))?;
@@ -65,8 +90,15 @@ pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
 /// overlay HUD to position itself on whichever monitor the recorded window
 /// is actually on, instead of assuming the primary display.
 pub fn query_monitor_rect(hwnd: HWND) -> Result<windows::Win32::Foundation::RECT, AppError> {
+    unsafe { monitor_rect(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) }
+}
+
+/// Full bounds of `hmonitor` directly -- the `Monitor`-source counterpart to
+/// `query_monitor_rect`'s window-based lookup, used by the overlay HUD when
+/// the recording's own target already *is* a monitor (see
+/// `render_overlay_viewport`), so there's no window to resolve one from.
+pub fn monitor_rect(hmonitor: HMONITOR) -> Result<windows::Win32::Foundation::RECT, AppError> {
     unsafe {
-        let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -88,7 +120,12 @@ fn scale_bgra(src: Vec<u8>, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> V
     if src_w == dst_w && src_h == dst_h {
         return src;
     }
-    let (src_w, src_h, dst_w, dst_h) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
+    let (src_w, src_h, dst_w, dst_h) = (
+        src_w as usize,
+        src_h as usize,
+        dst_w as usize,
+        dst_h as usize,
+    );
     let mut dst = vec![0u8; dst_w * dst_h * 4];
     for y in 0..dst_h {
         let src_y = (y * src_h) / dst_h;
@@ -107,7 +144,7 @@ fn scale_bgra(src: Vec<u8>, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> V
 // would just rename this same list without adding clarity at this call boundary.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_video_capture(
-    hwnd: HWND,
+    target: CaptureTarget,
     capture_width: u32,
     capture_height: u32,
     output_width: u32,
@@ -138,15 +175,15 @@ pub async fn run_video_capture(
         .cast()
         .map_err(|e| AppError::Capture(format!("cast to IDirect3DDevice: {e}")))?;
 
-    // Obtain the IGraphicsCaptureItemInterop factory and create item from HWND.
+    // Obtain the IGraphicsCaptureItemInterop factory and create item from the target.
     let interop: IGraphicsCaptureItemInterop =
         windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
             .map_err(|e| AppError::Capture(format!("IGraphicsCaptureItemInterop factory: {e}")))?;
 
     let item: GraphicsCaptureItem = unsafe {
-        interop
-            .CreateForWindow(hwnd)
-            .map_err(|e| AppError::Capture(format!("CreateForWindow: {e}")))?
+        target
+            .create_item(&interop)
+            .map_err(|e| AppError::Capture(format!("CreateFor{{Window,Monitor}}: {e}")))?
     };
 
     // Use the caller-supplied (already-clamped-even) size for the frame pool, not
@@ -184,12 +221,11 @@ pub async fn run_video_capture(
     // this is the video-side equivalent of that gap).
     let item_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let item_closed_handler = Arc::clone(&item_closed);
-    item
-        .Closed(&TypedEventHandler::new(move |_, _| {
-            item_closed_handler.store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        }))
-        .map_err(|e| AppError::Capture(format!("GraphicsCaptureItem::Closed: {e}")))?;
+    item.Closed(&TypedEventHandler::new(move |_, _| {
+        item_closed_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }))
+    .map_err(|e| AppError::Capture(format!("GraphicsCaptureItem::Closed: {e}")))?;
 
     // Staging texture — created once here and reused every frame via CopyResource.
     // This used to be recreated inside the loop despite this comment already
@@ -229,7 +265,9 @@ pub async fn run_video_capture(
             break;
         }
         if item_closed.load(std::sync::atomic::Ordering::Relaxed) {
-            tracing::warn!("capture item closed (captured window destroyed or its display disconnected), stopping video capture");
+            tracing::warn!(
+                "capture item closed (captured window destroyed or its display disconnected), stopping video capture"
+            );
             break;
         }
 
@@ -268,9 +306,7 @@ pub async fn run_video_capture(
                 .cast()
                 .map_err(|e| AppError::Capture(format!("cast texture to ID3D11Resource: {e}")))?;
 
-            device
-                .d3d_context
-                .CopyResource(&staging_res, &src_res);
+            device.d3d_context.CopyResource(&staging_res, &src_res);
 
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             device
@@ -289,7 +325,13 @@ pub async fn run_video_capture(
             device.d3d_context.Unmap(&staging_res, 0);
 
             pts = clock.elapsed();
-            data = scale_bgra(pixel_data, capture_width, capture_height, output_width, output_height);
+            data = scale_bgra(
+                pixel_data,
+                capture_width,
+                capture_height,
+                output_width,
+                output_height,
+            );
         }
 
         let video_frame = VideoFrame { pts, data };
@@ -342,6 +384,9 @@ mod tests {
         use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
         let hwnd = unsafe { GetDesktopWindow() };
         let (w, h) = query_display_size(hwnd).expect("query_display_size failed");
-        assert!(w > 0 && h > 0, "expected positive display dimensions, got {w}x{h}");
+        assert!(
+            w > 0 && h > 0,
+            "expected positive display dimensions, got {w}x{h}"
+        );
     }
 }

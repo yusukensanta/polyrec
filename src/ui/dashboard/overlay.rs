@@ -1,6 +1,7 @@
 use super::App;
 use super::theme::TEXT_BODY;
 use crate::i18n::Strings;
+use crate::types::CaptureKind;
 use eframe::egui;
 
 impl App {
@@ -21,14 +22,21 @@ impl App {
             .map(|a| a.clock.elapsed().as_secs())
             .unwrap_or(0);
 
-        // Position on whichever monitor the recorded window is actually on --
-        // falls back to the primary display (matching query_capture_size's
-        // existing graceful-degradation convention) if the hwnd is gone or
-        // the monitor query fails.
-        let active_hwnd = self.session.active.as_ref().map(|a| a.hwnd);
-        let monitor_rect = active_hwnd.and_then(|hwnd_val| {
-            let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
-            crate::capture::video::query_monitor_rect(hwnd).ok()
+        // Position on whichever monitor the recording is actually on -- falls
+        // back to the primary display (matching query_capture_size's existing
+        // graceful-degradation convention) if the handle is gone, the monitor
+        // query fails, or (for a `Window` source) the window closed.
+        let active_target = self.session.active.as_ref().map(|a| (a.hwnd, a.kind));
+        let monitor_rect = active_target.and_then(|(hwnd_val, kind)| match kind {
+            CaptureKind::Window => {
+                let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
+                crate::capture::video::query_monitor_rect(hwnd).ok()
+            }
+            CaptureKind::Monitor => {
+                let hmonitor =
+                    windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void);
+                crate::capture::video::monitor_rect(hmonitor).ok()
+            }
         });
         let (screen_right, screen_top) = match monitor_rect {
             Some(rect) => (rect.right as f32, rect.top as f32),

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- "Entire screen" capture: every connected display now appears as its own selectable capture source (e.g. "🖥 Display 1 (Primary) (2560×1440)"), listed above windows in the source panel. Captured via `Windows.Graphics.Capture`'s per-monitor capture item, same backend as window capture.
+
+### Changed
+
+- "App audio only" is disabled (with an explanatory tooltip) when a monitor/display source is selected -- a whole-screen recording has no single owning process to scope loopback audio to, unlike a window source.
+
 ## [v0.5.24] - 2026-07-13
 
 ### Changed

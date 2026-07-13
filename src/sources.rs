@@ -1,8 +1,9 @@
-use crate::types::CaptureSource;
-use windows::Win32::Foundation::{HWND, LPARAM};
+use crate::types::{CaptureKind, CaptureSource};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
-    GetObjectW, ReleaseDC,
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject,
+    EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, HDC, HMONITOR, MONITORINFO,
+    ReleaseDC,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
@@ -10,20 +11,86 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, 
 use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGetFileInfoW};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, EnumWindows, GetIconInfo, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, ICONINFO, IsWindowVisible,
+    GetWindowThreadProcessId, ICONINFO, IsWindowVisible, MONITORINFOF_PRIMARY,
 };
 use windows::core::BOOL;
 use windows::core::PCWSTR;
 
+/// Displays first, then windows -- a monitor is the "record everything"
+/// fallback a user reaches for before narrowing down to a specific window,
+/// so it reads better leading the list than buried after however many
+/// windows happen to be open.
 pub fn enumerate_sources() -> Vec<CaptureSource> {
-    let mut sources: Vec<CaptureSource> = Vec::new();
-    let sources_ptr = &mut sources as *mut Vec<CaptureSource> as isize;
+    let mut sources = enumerate_monitors();
 
+    let windows_ptr = &mut sources as *mut Vec<CaptureSource> as isize;
     unsafe {
-        let _ = EnumWindows(Some(enum_window_callback), LPARAM(sources_ptr));
+        let _ = EnumWindows(Some(enum_window_callback), LPARAM(windows_ptr));
     }
 
     sources
+}
+
+/// One `CaptureSource` per connected display, via `EnumDisplayMonitors` --
+/// each capturable independently through Windows.Graphics.Capture's
+/// `CreateForMonitor` (see `capture::video::CaptureTarget`), since WGC has no
+/// single "all monitors combined" capture item of its own.
+fn enumerate_monitors() -> Vec<CaptureSource> {
+    let mut monitors: Vec<CaptureSource> = Vec::new();
+    let monitors_ptr = &mut monitors as *mut Vec<CaptureSource> as isize;
+
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_monitor_callback),
+            LPARAM(monitors_ptr),
+        );
+    }
+
+    monitors
+}
+
+unsafe extern "system" fn enum_monitor_callback(
+    hmonitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
+    unsafe {
+        let monitors = &mut *(lparam.0 as *mut Vec<CaptureSource>);
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmonitor, &mut info).as_bool() {
+            return BOOL(1);
+        }
+
+        let width = info.rcMonitor.right - info.rcMonitor.left;
+        let height = info.rcMonitor.bottom - info.rcMonitor.top;
+        let primary_suffix = if info.dwFlags & MONITORINFOF_PRIMARY != 0 {
+            " (Primary)"
+        } else {
+            ""
+        };
+        let window_title = format!(
+            "🖥 Display {}{primary_suffix} ({width}×{height})",
+            monitors.len() + 1
+        );
+
+        monitors.push(CaptureSource {
+            kind: CaptureKind::Monitor,
+            process_id: 0,
+            window_title,
+            exe_name: String::new(),
+            hwnd: hmonitor.0 as usize,
+            icon_rgba: None,
+        });
+
+        BOOL(1)
+    }
 }
 
 unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -73,6 +140,7 @@ pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
         let icon_rgba = exe_path.as_deref().and_then(extract_exe_icon_rgba);
 
         CaptureSource {
+            kind: CaptureKind::Window,
             process_id,
             window_title,
             exe_name,
@@ -251,9 +319,14 @@ mod tests {
         // are re-read live on a real, changing desktop a moment after enumeration,
         // so a title tick (e.g. a browser tab) between the two calls is a real,
         // possible outcome, not a bug in either path.
+        //
+        // Explicitly a `Window` entry, not just `.first()` -- monitors sort
+        // first in `enumerate_sources()`, and `capture_source_for_hwnd` treats
+        // its argument as a real HWND, which an HMONITOR value isn't.
         let sources = enumerate_sources();
         let sample = sources
-            .first()
+            .iter()
+            .find(|s| s.kind == CaptureKind::Window)
             .expect("expected at least one visible window");
         let hwnd = windows::Win32::Foundation::HWND(sample.hwnd as *mut core::ffi::c_void);
         let rebuilt = capture_source_for_hwnd(hwnd);
@@ -261,6 +334,34 @@ mod tests {
         assert_eq!(
             rebuilt.process_id, sample.process_id,
             "process identity must be stable even if the title changed"
+        );
+    }
+
+    #[test]
+    fn enumerate_monitors_returns_at_least_one_display() {
+        let monitors = enumerate_monitors();
+        assert!(!monitors.is_empty(), "expected at least one display");
+        for m in &monitors {
+            assert_eq!(m.kind, CaptureKind::Monitor);
+            assert_eq!(m.process_id, 0);
+            assert!(m.exe_name.is_empty());
+            assert!(m.icon_rgba.is_none());
+            assert_ne!(m.hwnd, 0usize, "HMONITOR should not be null");
+        }
+    }
+
+    #[test]
+    fn enumerate_sources_lists_monitors_before_windows() {
+        let sources = enumerate_sources();
+        let first_window_idx = sources
+            .iter()
+            .position(|s| s.kind == CaptureKind::Window)
+            .expect("expected at least one visible window");
+        assert!(
+            sources[..first_window_idx]
+                .iter()
+                .all(|s| s.kind == CaptureKind::Monitor),
+            "every entry before the first window should be a monitor"
         );
     }
 

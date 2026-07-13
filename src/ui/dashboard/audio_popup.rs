@@ -1,6 +1,8 @@
 use super::App;
 use super::theme::{ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
-use super::widgets::{accent_button, audio_device_icon, checkbox_with_volume_slider, section_header};
+use super::widgets::{
+    accent_button, audio_device_icon, checkbox_with_volume_slider, section_header,
+};
 use crate::config::Config;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -92,10 +94,16 @@ impl App {
                             .iter()
                             .zip(self.selected_audio.iter())
                             .any(|(dev, &sel)| dev.is_loopback && sel);
-                        let has_loopback_device =
-                            self.audio_devices.iter().any(|d| d.is_loopback);
-                        let has_source = self.selected_source.is_some();
-                        ui.add_enabled_ui(loopback_selected && has_source, |ui| {
+                        let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
+                        // A `Monitor` source has no owning process to scope
+                        // loopback to (see `session::start_capture`'s
+                        // `use_process_loopback` gate), so this only ever
+                        // does anything for a `Window` source.
+                        let selected_is_window = self
+                            .selected_source
+                            .and_then(|i| self.sources.get(i))
+                            .is_some_and(|src| src.kind == crate::types::CaptureKind::Window);
+                        ui.add_enabled_ui(loopback_selected && selected_is_window, |ui| {
                             let response = ui
                                 .checkbox(
                                     &mut self.app_audio_only,
@@ -106,6 +114,8 @@ impl App {
                                     s.tooltip_no_loopback_device
                                 } else if !loopback_selected {
                                     s.tooltip_check_loopback_first
+                                } else if !selected_is_window {
+                                    s.tooltip_app_audio_only_needs_window
                                 } else {
                                     s.tooltip_app_audio_only
                                 });

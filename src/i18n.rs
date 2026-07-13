@@ -97,6 +97,10 @@ pub struct Strings {
     pub tooltip_no_loopback_device: &'static str,
     pub tooltip_check_loopback_first: &'static str,
     pub tooltip_app_audio_only: &'static str,
+    /// Shown instead of `tooltip_app_audio_only` when the selected capture
+    /// source is a `CaptureKind::Monitor` entry (or none is selected) --
+    /// there's no owning process to scope loopback to in that case.
+    pub tooltip_app_audio_only_needs_window: &'static str,
 
     // Center panel — status
     pub status_header: &'static str,
@@ -241,6 +245,7 @@ pub static EN: Strings = Strings {
     tooltip_no_loopback_device: "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present).",
     tooltip_check_loopback_first: "Check the system audio (🔊) box above first.",
     tooltip_app_audio_only: "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working.",
+    tooltip_app_audio_only_needs_window: "Select a specific window (not a monitor) as the capture source to use this — an entire-screen recording has no single app to scope audio to.",
 
     status_header: "STATUS",
     state_paused: "PAUSED",
@@ -366,6 +371,7 @@ pub static JA: Strings = Strings {
     tooltip_no_loopback_device: "システム再生デバイスが見つかりません。ミュートは問題ありませんが、デバイス自体は存在している必要があります。",
     tooltip_check_loopback_first: "まず上のシステム音声（🔊）にチェックを入れてください。",
     tooltip_app_audio_only: "デスクトップ全体の音声ではなく、Windows の Process Loopback API を使って選択したウィンドウ自体の音声のみを録音します。有効な再生デバイスが必要です（ミュートしていても動作します）。",
+    tooltip_app_audio_only_needs_window: "この機能を使うには、モニターではなく特定のウィンドウをキャプチャソースとして選択してください。画面全体の録画には音声を絞り込む対象のアプリがありません。",
 
     status_header: "ステータス",
     state_paused: "一時停止中",

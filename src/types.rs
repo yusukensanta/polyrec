@@ -16,13 +16,34 @@ pub enum SessionState {
     Paused,
 }
 
+/// What `CaptureSource::hwnd` actually identifies -- a real HWND for `Window`,
+/// or an HMONITOR for `Monitor` (both are opaque pointer-sized Win32 handles,
+/// so the same `usize` field stores either without needing a second field).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureKind {
+    Window,
+    Monitor,
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureSource {
+    pub kind: CaptureKind,
+    /// 0 for `Monitor` -- a display isn't owned by any one process, so there's
+    /// no PID to scope Process Loopback Capture ("App audio only") to. See
+    /// the `kind == CaptureKind::Window` gate on `use_process_loopback` in
+    /// `session::start_capture`.
     pub process_id: u32,
+    /// Window title for `Window`; a display's own generated label (e.g.
+    /// "🖥 Display 1 (2560×1440)") for `Monitor`.
     pub window_title: String,
+    /// Empty for `Monitor` -- a display has no owning exe.
     pub exe_name: String,
+    /// HWND for `Window`, HMONITOR for `Monitor` -- see `CaptureKind`.
     pub hwnd: usize,
     /// (RGBA bytes, width, height) of the source exe's small icon, if extractable.
+    /// Always `None` for `Monitor` -- the 🖥 in `window_title` stands in for an
+    /// icon there instead, same convention `audio_device_icon` already uses
+    /// for Speakers/Microphone.
     pub icon_rgba: Option<(Vec<u8>, u32, u32)>,
 }
 

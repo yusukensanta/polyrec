@@ -4,7 +4,9 @@ pub mod state;
 use crate::capture::audio::{
     TARGET_CHANNELS, TARGET_SAMPLE_RATE, run_audio_capture, run_process_loopback_capture,
 };
-use crate::capture::video::{query_capture_size, query_display_size, run_video_capture};
+use crate::capture::video::{
+    CaptureTarget, query_capture_size, query_display_size, run_video_capture,
+};
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
 use crate::encode::RecordingCommand;
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
@@ -15,7 +17,9 @@ use crate::highlight::{
     HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
 use crate::session::clock::RecordingClock;
-use crate::types::{AppAudioSource, AudioDevice, CaptureSource, SessionState, TrackId};
+use crate::types::{
+    AppAudioSource, AudioDevice, CaptureKind, CaptureSource, SessionState, TrackId,
+};
 use state::{SessionAction, transition};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -72,10 +76,15 @@ pub struct ActiveCapture {
     /// point is still finalized normally, this just tells the caller *why* the
     /// recording ended without the user pressing stop, so it can be surfaced.
     pub disk_full_flag: Arc<AtomicBool>,
-    /// The window this recording is capturing -- used to position the overlay
-    /// HUD on whichever monitor that window is actually on (see
+    /// The window or monitor this recording is capturing -- used to position
+    /// the overlay HUD on whichever monitor is relevant (see
     /// `render_overlay_viewport`), instead of assuming the primary display.
     pub hwnd: usize,
+    /// Whether `hwnd` above is really an HWND or an HMONITOR -- see
+    /// `CaptureKind`. `render_overlay_viewport` needs this to know whether it
+    /// can call `MonitorFromWindow(hwnd)` (only valid for `Window`) or should
+    /// use `hwnd` directly as the monitor (`Monitor`).
+    pub kind: CaptureKind,
 }
 
 /// The rolling "Highlight" background buffer -- entirely separate from
@@ -176,9 +185,8 @@ impl SessionManager {
             )
             .collect();
 
-        let real_hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
-            resolve_capture_and_output_dimensions(real_hwnd, source.hwnd, &encode);
+            resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
 
         // Spawn RecordingActor
         let disk_full_flag = Arc::new(AtomicBool::new(false));
@@ -199,6 +207,7 @@ impl SessionManager {
         // Spawn video capture + pump
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
         let hwnd_val = source.hwnd;
+        let source_kind = source.kind;
         let video_clock = Arc::clone(&clock);
         let video_pause = Arc::clone(&pause_flag);
         let video_stop = Arc::clone(&stop_flag);
@@ -215,9 +224,16 @@ impl SessionManager {
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
+                let target = match source_kind {
+                    CaptureKind::Window => CaptureTarget::Window(windows::Win32::Foundation::HWND(
+                        hwnd_val as *mut core::ffi::c_void,
+                    )),
+                    CaptureKind::Monitor => CaptureTarget::Monitor(
+                        windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void),
+                    ),
+                };
                 if let Err(e) = run_video_capture(
-                    hwnd,
+                    target,
                     capture_width,
                     capture_height,
                     output_width,
@@ -249,7 +265,12 @@ impl SessionManager {
             let audio_stop = Arc::clone(&stop_flag);
             let dev_id = dev.id.clone();
             let is_loopback = dev.is_loopback;
-            let use_process_loopback = is_loopback && app_audio_only;
+            // A `Monitor` source has no owning process to scope loopback to
+            // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
+            // doc comment), so "App audio only" can never apply there regardless
+            // of the checkbox's own state.
+            let use_process_loopback =
+                is_loopback && app_audio_only && source.kind == CaptureKind::Window;
             let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -357,6 +378,7 @@ impl SessionManager {
             output_path: output_path.clone(),
             disk_full_flag,
             hwnd: source.hwnd,
+            kind: source.kind,
         });
 
         Ok(output_path)
@@ -465,9 +487,8 @@ impl SessionManager {
             )
             .collect();
 
-        let real_hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
-            resolve_capture_and_output_dimensions(real_hwnd, source.hwnd, &encode);
+            resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
 
         let max_segments = buffer_seconds
             .max(1)
@@ -492,6 +513,7 @@ impl SessionManager {
 
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
         let hwnd_val = source.hwnd;
+        let source_kind = source.kind;
         let video_clock = Arc::clone(&clock);
         let video_pause = Arc::clone(&pause_flag);
         let video_stop = Arc::clone(&stop_flag);
@@ -508,9 +530,16 @@ impl SessionManager {
             };
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
+                let target = match source_kind {
+                    CaptureKind::Window => CaptureTarget::Window(windows::Win32::Foundation::HWND(
+                        hwnd_val as *mut core::ffi::c_void,
+                    )),
+                    CaptureKind::Monitor => CaptureTarget::Monitor(
+                        windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void),
+                    ),
+                };
                 if let Err(e) = run_video_capture(
-                    hwnd,
+                    target,
                     capture_width,
                     capture_height,
                     output_width,
@@ -542,7 +571,12 @@ impl SessionManager {
             let audio_stop = Arc::clone(&stop_flag);
             let dev_id = dev.id.clone();
             let is_loopback = dev.is_loopback;
-            let use_process_loopback = is_loopback && app_audio_only;
+            // A `Monitor` source has no owning process to scope loopback to
+            // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
+            // doc comment), so "App audio only" can never apply there regardless
+            // of the checkbox's own state.
+            let use_process_loopback =
+                is_loopback && app_audio_only && source.kind == CaptureKind::Window;
             let target_pid = source.process_id;
             let capture_handle = tokio::task::spawn_blocking(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -850,22 +884,39 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
 /// only itself internally (frame pool vs. staging texture). The display size is
 /// only queried when the resolution mode is `Display` — the non-default mode
 /// (see the resolution-regression fix) — to avoid a wasted syscall otherwise.
+///
+/// For a `Monitor` source, "capture size" and "display size" are the same
+/// thing by construction (you're capturing the monitor itself), so
+/// `query_display_size` -- which resolves a *window*'s monitor via
+/// `MonitorFromWindow` -- is skipped entirely; the already-queried capture
+/// size is reused as the display size too.
 fn resolve_capture_and_output_dimensions(
-    real_hwnd: windows::Win32::Foundation::HWND,
+    kind: CaptureKind,
     hwnd_val: usize,
     encode: &EncodeSettings,
 ) -> (u32, u32, u32, u32, u32) {
-    let (capture_width, capture_height) = match query_capture_size(real_hwnd) {
+    let target = match kind {
+        CaptureKind::Window => CaptureTarget::Window(windows::Win32::Foundation::HWND(
+            hwnd_val as *mut core::ffi::c_void,
+        )),
+        CaptureKind::Monitor => CaptureTarget::Monitor(windows::Win32::Graphics::Gdi::HMONITOR(
+            hwnd_val as *mut core::ffi::c_void,
+        )),
+    };
+    let (capture_width, capture_height) = match query_capture_size(target) {
         Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
         Err(e) => {
             tracing::warn!(
-                "query_capture_size failed for hwnd {:x}: {e}; using 1920x1080",
+                "query_capture_size failed for handle {:x}: {e}; using 1920x1080",
                 hwnd_val
             );
             (1920u32, 1080u32)
         }
     };
-    let display_size = if matches!(encode.resolution_mode, ResolutionMode::Display) {
+    let display_size = if kind == CaptureKind::Monitor {
+        Some((capture_width, capture_height))
+    } else if matches!(encode.resolution_mode, ResolutionMode::Display) {
+        let real_hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
         match query_display_size(real_hwnd) {
             Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
             Err(e) => {
@@ -921,12 +972,18 @@ mod tests {
     /// a separate, pre-existing issue unrelated to whatever this test is actually
     /// exercising. Skip past those so tests aren't flaky based on unrelated desktop state.
     fn pick_source_with_real_client_rect(sources: Vec<CaptureSource>) -> Option<CaptureSource> {
-        sources.into_iter().find(|s| unsafe {
-            let hwnd = windows::Win32::Foundation::HWND(s.hwnd as *mut core::ffi::c_void);
-            let mut rect = windows::Win32::Foundation::RECT::default();
-            windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect).is_ok()
-                && (rect.right - rect.left) >= 100
-                && (rect.bottom - rect.top) >= 100
+        sources.into_iter().find(|s| {
+            // Monitor entries store an HMONITOR in `hwnd`, not a real window
+            // handle -- GetClientRect would just fail on one anyway, but
+            // filtering explicitly is clearer than relying on that.
+            s.kind == CaptureKind::Window
+                && unsafe {
+                    let hwnd = windows::Win32::Foundation::HWND(s.hwnd as *mut core::ffi::c_void);
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect).is_ok()
+                        && (rect.right - rect.left) >= 100
+                        && (rect.bottom - rect.top) >= 100
+                }
         })
     }
 
@@ -1058,7 +1115,9 @@ mod tests {
         let source =
             pick_source_with_real_client_rect(sources).expect("no usable capture source found");
         let hwnd = windows::Win32::Foundation::HWND(source.hwnd as *mut core::ffi::c_void);
-        let (expected_w, expected_h) = query_capture_size(hwnd).expect("query_capture_size failed");
+        let (expected_w, expected_h) =
+            query_capture_size(crate::capture::video::CaptureTarget::Window(hwnd))
+                .expect("query_capture_size failed");
 
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let dir = tempfile::tempdir().unwrap();
