@@ -44,10 +44,33 @@ pub struct Config {
     /// for why this isn't restored unconditionally.
     #[serde(default)]
     pub window_position: Option<(f32, f32)>,
+    /// Apps pinned to always appear in the Applications audio list, even
+    /// while not currently producing sound (or not running at all) --
+    /// see `AppAudioSource::process_ids`'s doc comment for how these merge
+    /// with live WASAPI sessions. `#[serde(default)]` so a `config.toml`
+    /// saved before this field existed still loads instead of failing.
+    #[serde(default)]
+    pub registered_app_audio: Vec<RegisteredApp>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// A user-pinned app for `Config::registered_app_audio` -- picked once via
+/// the Audio popup's "+ Add app" file browser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RegisteredApp {
+    /// Identity/gain key -- same convention and same field name as
+    /// `AppAudioSource::exe_name`, stable across the app's own restarts
+    /// (unlike a process id).
+    pub exe_name: String,
+    /// Full path at the time it was registered -- used only as a
+    /// best-effort source for re-extracting the app's icon while it isn't
+    /// running (see `sources::extract_exe_icon_rgba`), never as identity.
+    /// If the exe has since moved or been uninstalled, icon extraction just
+    /// fails gracefully (`None`), same as any other icon lookup here.
+    pub exe_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +241,7 @@ impl Default for Config {
             default_app_audio_only: true,
             audio_device_gain: std::collections::HashMap::new(),
             window_position: None,
+            registered_app_audio: Vec::new(),
         }
     }
 }
@@ -255,6 +279,30 @@ impl Config {
     /// `"app:"` prefix convention lives in exactly one place.
     pub fn app_audio_gain_key(exe_name: &str) -> String {
         format!("app:{exe_name}")
+    }
+
+    /// Pins `exe_name` to the Applications audio list. No-op (not an error)
+    /// if it's already registered -- the "+ Add app" button has no way to
+    /// know that ahead of calling this, so silently deduping here is
+    /// simpler than the UI pre-checking.
+    pub fn register_app_audio(&mut self, exe_name: String, exe_path: String) {
+        if self
+            .registered_app_audio
+            .iter()
+            .any(|a| a.exe_name == exe_name)
+        {
+            return;
+        }
+        self.registered_app_audio
+            .push(RegisteredApp { exe_name, exe_path });
+    }
+
+    /// Un-pins `exe_name`. If it's still actively producing audio when this
+    /// is called, it keeps showing in the Applications list as a normal
+    /// (unregistered) live entry until the process exits -- this only
+    /// affects future refreshes/sessions, not an already-running capture.
+    pub fn unregister_app_audio(&mut self, exe_name: &str) {
+        self.registered_app_audio.retain(|a| a.exe_name != exe_name);
     }
 
     /// `window_position` if it's still worth restoring, `None` otherwise.
@@ -676,6 +724,85 @@ mod tests {
             ..Config::default()
         };
         assert!(matches!(c.lang(), crate::i18n::Lang::En));
+    }
+
+    #[test]
+    fn registered_app_audio_defaults_to_empty() {
+        assert!(Config::default().registered_app_audio.is_empty());
+    }
+
+    #[test]
+    fn registered_app_audio_missing_from_toml_falls_back_to_empty() {
+        // Simulates a config.toml saved before this field existed.
+        let text = r#"
+            output_dir = "."
+            language = "en"
+            [hotkeys]
+            start_stop = "F9"
+            pause = "F8"
+            toggle_overlay = "F7"
+            [overlay]
+            enabled = false
+            opacity = 0.85
+            [encode]
+            codec = "h265"
+            fps = 60
+            resolution_mode = "native"
+            custom_width = 1920
+            custom_height = 1080
+            bitrate_mode = "auto"
+            manual_bitrate_mbps = 12
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert!(parsed.registered_app_audio.is_empty());
+    }
+
+    #[test]
+    fn register_app_audio_adds_a_new_entry() {
+        let mut c = Config::default();
+        c.register_app_audio("Discord.exe".into(), "C:/Discord/Discord.exe".into());
+        assert_eq!(c.registered_app_audio.len(), 1);
+        assert_eq!(c.registered_app_audio[0].exe_name, "Discord.exe");
+        assert_eq!(c.registered_app_audio[0].exe_path, "C:/Discord/Discord.exe");
+    }
+
+    #[test]
+    fn register_app_audio_is_a_noop_for_an_exe_name_already_registered() {
+        let mut c = Config::default();
+        c.register_app_audio("Discord.exe".into(), "C:/Discord/Discord.exe".into());
+        c.register_app_audio("Discord.exe".into(), "D:/Other/Discord.exe".into());
+        assert_eq!(c.registered_app_audio.len(), 1);
+        // First registration's path wins -- silently overwriting on a
+        // duplicate call would be surprising for what's meant to be a
+        // one-time pin.
+        assert_eq!(c.registered_app_audio[0].exe_path, "C:/Discord/Discord.exe");
+    }
+
+    #[test]
+    fn unregister_app_audio_removes_the_matching_entry() {
+        let mut c = Config::default();
+        c.register_app_audio("Discord.exe".into(), "C:/Discord/Discord.exe".into());
+        c.register_app_audio("Spotify.exe".into(), "C:/Spotify/Spotify.exe".into());
+        c.unregister_app_audio("Discord.exe");
+        assert_eq!(c.registered_app_audio.len(), 1);
+        assert_eq!(c.registered_app_audio[0].exe_name, "Spotify.exe");
+    }
+
+    #[test]
+    fn unregister_app_audio_is_a_noop_for_an_exe_name_not_registered() {
+        let mut c = Config::default();
+        c.register_app_audio("Discord.exe".into(), "C:/Discord/Discord.exe".into());
+        c.unregister_app_audio("NotRegistered.exe");
+        assert_eq!(c.registered_app_audio.len(), 1);
+    }
+
+    #[test]
+    fn registered_app_audio_round_trips_toml() {
+        let mut original = Config::default();
+        original.register_app_audio("Discord.exe".into(), "C:/Discord/Discord.exe".into());
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.registered_app_audio, original.registered_app_audio);
     }
 
     #[test]

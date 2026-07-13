@@ -174,13 +174,17 @@ impl SessionManager {
         // All captured audio is downmixed/resampled (or, for app sources,
         // already produced) at this fixed target, regardless of each
         // device's native mix format -- so a per-app source's track needs
-        // the exact same spec entry as a device's.
+        // the exact same spec entry as a device's. One entry per pid, not
+        // per app_source -- see AppAudioSource::process_ids's doc comment
+        // for why an app with multiple independent top-level processes
+        // gets one track per process rather than one shared/mixed track.
         let audio_specs: Vec<(u32, u16)> = audio_devices
             .iter()
             .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
             .chain(
                 app_audio_sources
                     .iter()
+                    .flat_map(|s| s.process_ids.iter())
                     .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS)),
             )
             .collect();
@@ -324,47 +328,59 @@ impl SessionManager {
         // and of whichever process is the video source (source.process_id
         // above); each selected app is its own explicit target, always via
         // process loopback capture since that's the only way to isolate one
-        // app's audio (see AppAudioSource's doc comment).
+        // app's audio (see AppAudioSource's doc comment). One app_source can
+        // expand to several tracks: WASAPI's process-loopback capture only
+        // targets one pid per stream, and genuinely mixing separately
+        // captured PCM streams into one track needs a real-time mixer this
+        // doesn't have -- so multiple independent top-level processes of the
+        // same exe (see AppAudioSource::process_ids) each get their own
+        // track instead. A registered-but-inactive entry (empty
+        // process_ids) contributes no tracks at all.
+        let mut next_app_track_id = device_track_count as u32;
         for (i, app_source) in app_audio_sources.into_iter().enumerate() {
-            let track_id = TrackId::new((device_track_count + i) as u32);
             let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
-            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-            let audio_clock = Arc::clone(&clock);
-            let audio_pause = Arc::clone(&pause_flag);
-            let audio_stop = Arc::clone(&stop_flag);
-            let target_pid = app_source.process_id;
-            let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("failed to build app audio capture runtime: {e}");
-                        return;
-                    }
-                };
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, async move {
-                    if let Err(e) = run_process_loopback_capture(
-                        target_pid,
-                        true,
-                        track_id,
-                        audio_clock,
-                        audio_pause,
-                        audio_stop,
-                        audio_tx,
-                        gain,
-                    )
-                    .await
+            for &target_pid in &app_source.process_ids {
+                let track_id = TrackId::new(next_app_track_id);
+                next_app_track_id += 1;
+                let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+                let audio_clock = Arc::clone(&clock);
+                let audio_pause = Arc::clone(&pause_flag);
+                let audio_stop = Arc::clone(&stop_flag);
+                let capture_handle = tokio::task::spawn_blocking(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
                     {
-                        tracing::error!("AppAudioCapture[{track_id:?}] error: {e}");
-                    }
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            tracing::error!("failed to build app audio capture runtime: {e}");
+                            return;
+                        }
+                    };
+                    let local = tokio::task::LocalSet::new();
+                    local.block_on(&rt, async move {
+                        if let Err(e) = run_process_loopback_capture(
+                            target_pid,
+                            true,
+                            track_id,
+                            audio_clock,
+                            audio_pause,
+                            audio_stop,
+                            audio_tx,
+                            gain,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                "AppAudioCapture[{track_id:?}] pid={target_pid} error: {e}"
+                            );
+                        }
+                    });
                 });
-            });
-            let pump_handle = spawn_audio_pump(audio_rx, recording_tx.clone());
-            capture_handles.push(capture_handle);
-            pump_handles.push(pump_handle);
+                let pump_handle = spawn_audio_pump(audio_rx, recording_tx.clone());
+                capture_handles.push(capture_handle);
+                pump_handles.push(pump_handle);
+            }
         }
 
         self.active = Some(ActiveCapture {
@@ -477,12 +493,17 @@ impl SessionManager {
         let pause_flag = Arc::new(AtomicBool::new(false)); // never toggled -- no pause support
         let stop_flag = Arc::new(AtomicBool::new(false));
 
+        // One entry per pid, not per app_source -- see
+        // AppAudioSource::process_ids's doc comment for why an app with
+        // multiple independent top-level processes gets one track per
+        // process rather than one shared/mixed track.
         let audio_specs: Vec<(u32, u16)> = audio_devices
             .iter()
             .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
             .chain(
                 app_audio_sources
                     .iter()
+                    .flat_map(|s| s.process_ids.iter())
                     .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS)),
             )
             .collect();
@@ -626,27 +647,35 @@ impl SessionManager {
             pump_handles.push(pump_handle);
         }
 
+        // One app_source can expand to several tracks -- see the identical
+        // comment in start_capture's per-app spawn loop for why (WASAPI
+        // process-loopback only targets one pid per stream; no real-time
+        // mixer here to merge separately captured PCM streams into one).
+        let mut next_app_track_id = device_track_count as u32;
         for (i, app_source) in app_audio_sources.into_iter().enumerate() {
-            let track_id = TrackId::new((device_track_count + i) as u32);
             let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
-            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-            let audio_clock = Arc::clone(&clock);
-            let audio_pause = Arc::clone(&pause_flag);
-            let audio_stop = Arc::clone(&stop_flag);
-            let target_pid = app_source.process_id;
-            let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("failed to build highlight app audio capture runtime: {e}");
-                        return;
-                    }
-                };
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, async move {
+            for &target_pid in &app_source.process_ids {
+                let track_id = TrackId::new(next_app_track_id);
+                next_app_track_id += 1;
+                let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+                let audio_clock = Arc::clone(&clock);
+                let audio_pause = Arc::clone(&pause_flag);
+                let audio_stop = Arc::clone(&stop_flag);
+                let capture_handle = tokio::task::spawn_blocking(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to build highlight app audio capture runtime: {e}"
+                            );
+                            return;
+                        }
+                    };
+                    let local = tokio::task::LocalSet::new();
+                    local.block_on(&rt, async move {
                     if let Err(e) = run_process_loopback_capture(
                         target_pid,
                         true,
@@ -659,13 +688,16 @@ impl SessionManager {
                     )
                     .await
                     {
-                        tracing::error!("Highlight AppAudioCapture[{track_id:?}] error: {e}");
+                        tracing::error!(
+                            "Highlight AppAudioCapture[{track_id:?}] pid={target_pid} error: {e}"
+                        );
                     }
                 });
-            });
-            let pump_handle = spawn_audio_pump(audio_rx, highlight_tx.clone());
-            capture_handles.push(capture_handle);
-            pump_handles.push(pump_handle);
+                });
+                let pump_handle = spawn_audio_pump(audio_rx, highlight_tx.clone());
+                capture_handles.push(capture_handle);
+                pump_handles.push(pump_handle);
+            }
         }
 
         self.highlight = Some(ActiveHighlight {

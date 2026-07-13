@@ -6,6 +6,7 @@ use super::widgets::{
 use crate::config::Config;
 use crate::i18n::Strings;
 use eframe::egui;
+use rfd::FileDialog;
 
 impl App {
     pub(super) fn render_audio_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
@@ -76,16 +77,67 @@ impl App {
                                 );
                                 entry.insert(tex);
                             }
-                            checkbox_with_volume_slider(
-                                ui,
-                                self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
-                                &mut self.config,
-                                &mut self.error_message,
-                                s.config_save_failed_prefix,
-                                &mut self.selected_app_audio[i],
-                                src.display_name.clone(),
-                                Config::app_audio_gain_key(&src.exe_name),
-                            );
+                            // Registered-but-not-currently-live apps (see
+                            // `actions::merge_registered_app_audio`) have no
+                            // pid to actually capture -- shown but
+                            // non-interactive, same convention as the "App
+                            // audio only" checkbox's own disabled state
+                            // below.
+                            let is_running = !src.process_ids.is_empty();
+                            let is_registered = self
+                                .config
+                                .registered_app_audio
+                                .iter()
+                                .any(|r| r.exe_name == src.exe_name);
+                            ui.horizontal(|ui| {
+                                ui.add_enabled_ui(is_running, |ui| {
+                                    checkbox_with_volume_slider(
+                                        ui,
+                                        self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
+                                        &mut self.config,
+                                        &mut self.error_message,
+                                        s.config_save_failed_prefix,
+                                        &mut self.selected_app_audio[i],
+                                        src.display_name.clone(),
+                                        Config::app_audio_gain_key(&src.exe_name),
+                                    );
+                                });
+                                // Outside the disabled scope above -- must stay
+                                // clickable even for a not-running registered
+                                // row, since that's the only way to un-pin one.
+                                if is_registered
+                                    && ui
+                                        .small_button(egui::RichText::new("×").color(TEXT_MUTED))
+                                        .on_hover_text(s.remove_registered_app_tooltip)
+                                        .clicked()
+                                {
+                                    self.config.unregister_app_audio(&src.exe_name);
+                                    if let Err(e) = self.config.save() {
+                                        tracing::error!("failed to save config: {e}");
+                                        self.error_message =
+                                            Some(format!("{}{e}", s.config_save_failed_prefix));
+                                    }
+                                }
+                            });
+                        }
+                        if ui
+                            .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
+                            .clicked()
+                            && let Some(path) = FileDialog::new()
+                                .add_filter("Executable", &["exe"])
+                                .pick_file()
+                            && let Some(exe_name) = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                        {
+                            self.config
+                                .register_app_audio(exe_name, path.to_string_lossy().into_owned());
+                            if let Err(e) = self.config.save() {
+                                tracing::error!("failed to save config: {e}");
+                                self.error_message =
+                                    Some(format!("{}{e}", s.config_save_failed_prefix));
+                            }
                         }
 
                         ui.add_space(8.0);
