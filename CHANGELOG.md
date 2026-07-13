@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.29] - 2026-07-13
+
 ### Fixed
 
 - The "+ Add app" search picker only searched apps currently holding a live WASAPI audio session -- an app that wasn't open, or was open but not actively producing sound at that moment (e.g. a voice chat app nobody's talking in yet), wouldn't show up at all. It now also searches installed apps by resolving every Start Menu shortcut to its target exe, so an app can be found and pinned without needing to launch it first just to make it discoverable. (Electron/Squirrel apps like Discord and Slack point their shortcut at an updater stub rather than the real exe -- resolved through to the actual versioned exe rather than pinning the stub, which would've silently done nothing.)
