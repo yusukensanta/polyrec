@@ -66,21 +66,6 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
-/// A smaller heading for a subsection nested under a `section_header` --
-/// e.g. SYSTEM and APPLICATIONS both under AUDIO. Caption-sized (same as
-/// `TEXT_CAPTION` body text) rather than `section_header`'s 14pt, and no
-/// separator line, so it reads as a label grouping the rows under it rather
-/// than a peer of the section it's nested in.
-pub(super) fn subsection_header(ui: &mut egui::Ui, title: &str) {
-    ui.label(
-        egui::RichText::new(title)
-            .size(TEXT_CAPTION)
-            .color(TEXT_MUTED)
-            .strong(),
-    );
-    ui.add_space(2.0);
-}
-
 /// Icon for an audio-device checkbox label — used both in the source panel's
 /// device list and the export dialog's per-track selection.
 pub(super) fn audio_device_icon(dev: &AudioDevice) -> &'static str {

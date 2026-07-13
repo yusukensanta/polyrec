@@ -85,15 +85,12 @@ pub struct Strings {
     /// Shown when the search box's filter matches nothing, distinct from
     /// `no_windows_found` (no capturable windows exist at all).
     pub no_matching_windows: &'static str,
-    /// Parent heading for the two subsections below it (SYSTEM / APPLICATIONS).
-    pub audio_header: &'static str,
-    /// Sub-header for the physical-device list (Speakers/Microphone), a
-    /// smaller-font child of `audio_header` alongside `applications_header`.
+    /// Header for the physical-device list (Speakers/Microphone) inside the
+    /// Audio popup, alongside `applications_header`.
     pub system_audio_header: &'static str,
     pub no_audio_devices: &'static str,
-    /// Sub-header for the per-app audio source list (Discord, Spotify,
-    /// etc.) -- same font size as `system_audio_header`, both children of
-    /// `audio_header`. See `types::AppAudioSource`.
+    /// Header for the per-app audio source list (Discord, Spotify, etc.)
+    /// inside the Audio popup. See `types::AppAudioSource`.
     pub applications_header: &'static str,
     pub no_app_audio_sources: &'static str,
     pub app_audio_only_label: &'static str,
@@ -120,6 +117,14 @@ pub struct Strings {
     pub quality_tooltip: &'static str,
     pub hotkeys_button: &'static str,
     pub hotkeys_tooltip: &'static str,
+    pub audio_button: &'static str,
+    pub audio_tooltip: &'static str,
+    /// Shown under the settings button row so the current audio selection
+    /// is readable without opening the popup -- otherwise moving AUDIO out
+    /// of the always-visible source panel would hide that state entirely.
+    pub no_audio_selected: &'static str,
+    /// "{n} {audio_sources_word}" -- same pattern as `tracks_word`/`frames_word`.
+    pub audio_sources_word: &'static str,
     pub browse_button: &'static str,
     /// "{free_space_prefix}{formatted bytes}" -- see format_bytes_free in dashboard.rs.
     pub free_space_prefix: &'static str,
@@ -130,6 +135,9 @@ pub struct Strings {
 
     // Overlay HUD
     pub overlay_hud_stop_word: &'static str,
+
+    // Audio popup
+    pub audio_title: &'static str,
 
     // Quality popup
     pub quality_title: &'static str,
@@ -225,7 +233,6 @@ pub static EN: Strings = Strings {
     no_windows_found: "No visible windows found.",
     source_filter_placeholder: "Search windows or apps...",
     no_matching_windows: "No windows match your search.",
-    audio_header: "AUDIO",
     system_audio_header: "SYSTEM",
     no_audio_devices: "No audio devices found.",
     applications_header: "APPLICATIONS",
@@ -250,6 +257,10 @@ pub static EN: Strings = Strings {
     quality_tooltip: "FPS, codec, resolution, and bitrate for the next recording",
     hotkeys_button: "⌨ Hotkeys",
     hotkeys_tooltip: "Rebind the start/stop, pause, and overlay-toggle shortcuts",
+    audio_button: "🔊 Audio",
+    audio_tooltip: "Which audio devices and apps to record, and whether to scope to just the selected window's own audio",
+    no_audio_selected: "No audio selected",
+    audio_sources_word: "selected",
     browse_button: "Browse…",
     free_space_prefix: "Free: ",
     resume_button: "▶ RESUME",
@@ -258,6 +269,8 @@ pub static EN: Strings = Strings {
     pause_tooltip: "Pause",
 
     overlay_hud_stop_word: "stop",
+
+    audio_title: "Audio Sources",
 
     quality_title: "Quality Settings",
     fps_header: "FPS",
@@ -345,7 +358,6 @@ pub static JA: Strings = Strings {
     no_windows_found: "表示中のウィンドウが見つかりません。",
     source_filter_placeholder: "ウィンドウやアプリを検索...",
     no_matching_windows: "検索に一致するウィンドウがありません。",
-    audio_header: "オーディオ",
     system_audio_header: "システム",
     no_audio_devices: "オーディオデバイスが見つかりません。",
     applications_header: "アプリケーション",
@@ -370,6 +382,10 @@ pub static JA: Strings = Strings {
     quality_tooltip: "次回の録画の FPS・コーデック・解像度・ビットレート",
     hotkeys_button: "⌨ ショートカット",
     hotkeys_tooltip: "開始/停止・一時停止・オーバーレイ切替のショートカットを再設定",
+    audio_button: "🔊 オーディオ",
+    audio_tooltip: "録音するオーディオデバイスとアプリ、選択したウィンドウ自体の音声のみに絞るかどうか",
+    no_audio_selected: "オーディオ未選択",
+    audio_sources_word: "選択中",
     browse_button: "参照…",
     free_space_prefix: "空き容量: ",
     resume_button: "▶ 再開",
@@ -378,6 +394,8 @@ pub static JA: Strings = Strings {
     pause_tooltip: "一時停止",
 
     overlay_hud_stop_word: "停止",
+
+    audio_title: "オーディオソース",
 
     quality_title: "画質設定",
     fps_header: "FPS",
