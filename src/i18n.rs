@@ -101,12 +101,35 @@ pub struct Strings {
     /// source is a `CaptureKind::Monitor` entry (or none is selected) --
     /// there's no owning process to scope loopback to in that case.
     pub tooltip_app_audio_only_needs_window: &'static str,
-    /// "+ Add app" button under the Applications list -- opens a file
-    /// browser to pin an app via `Config::register_app_audio`, even one
-    /// that isn't currently running.
+    /// "+ Add app" button under the Applications list -- the only way an
+    /// app gets into that list at all (it doesn't auto-populate from
+    /// what's currently making sound, see
+    /// `actions::build_app_audio_sources`'s doc comment). Opens the in-app
+    /// search picker below, not a file browser directly -- see
+    /// `add_app_search_placeholder`.
     pub add_app_button: &'static str,
-    /// Hover text for the small "×" next to a registered app's row.
+    /// Hover text on a checked Applications checkbox, explaining that
+    /// unchecking it un-registers (removes) the app -- the checkbox is the
+    /// only pin/unpin control, there's no separate remove button.
     pub remove_registered_app_tooltip: &'static str,
+    /// Placeholder text for the add-app picker's search box, which lists
+    /// currently-running not-yet-registered apps (from
+    /// `enumerate_app_audio_sessions`) -- picking one there derives its
+    /// path from the live process, no file browsing needed. Same
+    /// convention as `source_filter_placeholder`.
+    pub add_app_search_placeholder: &'static str,
+    /// Shown when the add-app search box's filter matches nothing among
+    /// currently-running apps -- distinct from "no apps producing sound at
+    /// all right now" (handled by hiding the list instead).
+    pub add_app_no_matches: &'static str,
+    /// Shown instead of the search results when nothing is currently
+    /// producing audio to search through at all.
+    pub add_app_none_running: &'static str,
+    /// Fallback button in the add-app picker for an app that isn't
+    /// currently running (so it can't be found by searching live
+    /// sessions) -- opens the native file browser instead, same as
+    /// `add_app_button` used to directly.
+    pub add_app_browse_button: &'static str,
 
     // Center panel — status
     pub status_header: &'static str,
@@ -246,14 +269,18 @@ pub static EN: Strings = Strings {
     system_audio_header: "SYSTEM",
     no_audio_devices: "No audio devices found.",
     applications_header: "APPLICATIONS",
-    no_app_audio_sources: "No apps with sound found.",
+    no_app_audio_sources: "No apps added yet — use + Add app below.",
     app_audio_only_label: "🎯 App audio only (exclude other system sounds)",
     tooltip_no_loopback_device: "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present).",
     tooltip_check_loopback_first: "Check the system audio (🔊) box above first.",
     tooltip_app_audio_only: "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working.",
     tooltip_app_audio_only_needs_window: "Select a specific window (not a monitor) as the capture source to use this — an entire-screen recording has no single app to scope audio to.",
     add_app_button: "+ Add app",
-    remove_registered_app_tooltip: "Stop pinning this app — it'll still show while running, just no longer remembered once it closes.",
+    remove_registered_app_tooltip: "Uncheck to remove this app — while it isn't running there's nothing to record yet, but it'll start automatically the moment it launches.",
+    add_app_search_placeholder: "Search running apps…",
+    add_app_no_matches: "No running apps match.",
+    add_app_none_running: "No apps currently producing sound.",
+    add_app_browse_button: "Browse for .exe instead…",
 
     status_header: "STATUS",
     state_paused: "PAUSED",
@@ -374,14 +401,18 @@ pub static JA: Strings = Strings {
     system_audio_header: "システム",
     no_audio_devices: "オーディオデバイスが見つかりません。",
     applications_header: "アプリケーション",
-    no_app_audio_sources: "音声を再生しているアプリが見つかりません。",
+    no_app_audio_sources: "アプリはまだ追加されていません。下の「+ アプリを追加」から追加してください。",
     app_audio_only_label: "🎯 このアプリの音声のみ（他のシステム音を除外）",
     tooltip_no_loopback_device: "システム再生デバイスが見つかりません。ミュートは問題ありませんが、デバイス自体は存在している必要があります。",
     tooltip_check_loopback_first: "まず上のシステム音声（🔊）にチェックを入れてください。",
     tooltip_app_audio_only: "デスクトップ全体の音声ではなく、Windows の Process Loopback API を使って選択したウィンドウ自体の音声のみを録音します。有効な再生デバイスが必要です（ミュートしていても動作します）。",
     tooltip_app_audio_only_needs_window: "この機能を使うには、モニターではなく特定のウィンドウをキャプチャソースとして選択してください。画面全体の録画には音声を絞り込む対象のアプリがありません。",
     add_app_button: "+ アプリを追加",
-    remove_registered_app_tooltip: "このアプリの固定登録を解除します。実行中は引き続き表示されますが、終了後は記憶されません。",
+    remove_registered_app_tooltip: "チェックを外すとこのアプリを削除します。実行されていない間は録音対象がありませんが、起動すると自動的に録音が始まります。",
+    add_app_search_placeholder: "実行中のアプリを検索…",
+    add_app_no_matches: "一致する実行中のアプリがありません。",
+    add_app_none_running: "現在音声を再生しているアプリはありません。",
+    add_app_browse_button: "代わりに .exe を参照…",
 
     status_header: "ステータス",
     state_paused: "一時停止中",

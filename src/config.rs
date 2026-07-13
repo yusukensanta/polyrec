@@ -281,13 +281,13 @@ impl Config {
         format!("app:{exe_name}")
     }
 
-    /// Pins `exe_name` to the Applications audio list -- called both from
-    /// "+ Add app" (browsing to an exe directly) and from checking any live
-    /// app's checkbox (so a manually-checked app doesn't silently forget
-    /// itself and go back to unchecked on next launch). No-op (not an
-    /// error) if it's already registered -- neither call site has an easy
-    /// way to know that ahead of calling this, so silently deduping here is
-    /// simpler than each one pre-checking.
+    /// Adds `exe_name` to the Applications audio list -- the only way an
+    /// app ends up there at all, via "+ Add app"'s file browser. The
+    /// Applications list itself only ever contains registered apps (see
+    /// `actions::build_app_audio_sources`'s doc comment) -- there's no
+    /// separate ephemeral "checked but not remembered" state, checking one
+    /// of these rows and registering it are the same thing. No-op (not an
+    /// error) if it's already registered.
     pub fn register_app_audio(&mut self, exe_name: String, exe_path: String) {
         if self
             .registered_app_audio
@@ -300,10 +300,12 @@ impl Config {
             .push(RegisteredApp { exe_name, exe_path });
     }
 
-    /// Un-pins `exe_name`. If it's still actively producing audio when this
-    /// is called, it keeps showing in the Applications list as a normal
-    /// (unregistered) live entry until the process exits -- this only
-    /// affects future refreshes/sessions, not an already-running capture.
+    /// Removes `exe_name` -- called when its Applications checkbox is
+    /// unchecked (the checkbox is the only pin/unpin control, no separate
+    /// remove button). If it's still actively producing audio when this is
+    /// called, that doesn't stop an already-running capture -- this only
+    /// affects future refreshes/sessions, and the row itself disappears
+    /// from the Applications list immediately either way.
     pub fn unregister_app_audio(&mut self, exe_name: &str) {
         self.registered_app_audio.retain(|a| a.exe_name != exe_name);
     }

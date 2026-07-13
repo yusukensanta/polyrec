@@ -98,12 +98,16 @@ pub(super) fn checkbox_with_volume_slider(
     checked: &mut bool,
     label: String,
     gain_key: String,
+    checkbox_tooltip: Option<&str>,
 ) {
     ui.horizontal(|ui| {
         if let Some(tex_id) = icon {
             ui.image((tex_id, egui::vec2(16.0, 16.0)));
         }
-        ui.checkbox(checked, label);
+        let response = ui.checkbox(checked, label);
+        if let Some(tooltip) = checkbox_tooltip {
+            response.on_hover_text(tooltip);
+        }
     });
     // Only meaningful (and shown) once checked -- an unselected source's
     // volume has nothing to apply to.
