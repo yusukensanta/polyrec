@@ -89,6 +89,7 @@ impl App {
                                 .registered_app_audio
                                 .iter()
                                 .any(|r| r.exe_name == src.exe_name);
+                            let was_checked = self.selected_app_audio[i];
                             ui.horizontal(|ui| {
                                 ui.add_enabled_ui(is_running, |ui| {
                                     checkbox_with_volume_slider(
@@ -102,6 +103,27 @@ impl App {
                                         Config::app_audio_gain_key(&src.exe_name),
                                     );
                                 });
+                                // Checking a live app pins it too, not just
+                                // "+ Add app" -- so it's still selected next
+                                // launch without the user needing to know the
+                                // separate browse-to-pin flow exists.
+                                // Structurally can only fire for a running
+                                // app: the checkbox above is disabled
+                                // whenever `is_running` is false, so this can
+                                // never trigger for a not-yet-launched
+                                // registered entry. Unchecking does NOT
+                                // un-pin -- only "×" does, below.
+                                if !was_checked && self.selected_app_audio[i] {
+                                    let exe_path = crate::sources::get_exe_path(src.process_ids[0])
+                                        .unwrap_or_default();
+                                    self.config
+                                        .register_app_audio(src.exe_name.clone(), exe_path);
+                                    if let Err(e) = self.config.save() {
+                                        tracing::error!("failed to save config: {e}");
+                                        self.error_message =
+                                            Some(format!("{}{e}", s.config_save_failed_prefix));
+                                    }
+                                }
                                 // Outside the disabled scope above -- must stay
                                 // clickable even for a not-running registered
                                 // row, since that's the only way to un-pin one.
