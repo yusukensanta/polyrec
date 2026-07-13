@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.25] - 2026-07-13
+
 ### Added
 
 - "Entire screen" capture: every connected display now appears as its own selectable capture source (e.g. "🖥 Display 1 (Primary) (2560×1440)"), listed above windows in the source panel. Captured via `Windows.Graphics.Capture`'s per-monitor capture item, same backend as window capture.
