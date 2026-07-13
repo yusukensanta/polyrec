@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The "+ Add app" search picker only searched apps currently holding a live WASAPI audio session -- an open app that wasn't actively producing sound at that moment (e.g. a voice chat app nobody's talking in yet) wouldn't show up at all. It now searches every currently open window's exe, the same source the capture-source list itself uses, so an app just needs to be open, not making noise, to be found and pinned ahead of time.
+
 ## [v0.5.28] - 2026-07-13
 
 ### Changed

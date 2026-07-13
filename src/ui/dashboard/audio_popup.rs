@@ -3,9 +3,9 @@ use super::theme::{ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
 use super::widgets::{
     accent_button, audio_device_icon, checkbox_with_volume_slider, section_header,
 };
-use crate::capture::audio::enumerate_app_audio_sessions;
 use crate::config::Config;
 use crate::i18n::Strings;
+use crate::types::CaptureKind;
 use eframe::egui;
 use rfd::FileDialog;
 
@@ -190,12 +190,15 @@ impl App {
     }
 
     /// Inline search-and-pick panel shown in place of the "+ Add app"
-    /// button once clicked -- lists currently running, not-yet-registered
-    /// apps (same search-box convention as the source panel's
-    /// `source_filter`) so the common case needs no file browsing at all;
-    /// registers on click, deriving the path from the live process the same
-    /// way the old register-via-checkbox flow did. "Browse for .exe
-    /// instead…" remains as the only path for an app that isn't running.
+    /// button once clicked -- lists every currently open window's exe (same
+    /// source `self.sources` already populates the capture-source list
+    /// from, same search-box convention as its `source_filter`), not just
+    /// ones that happen to be actively producing sound right now, so an app
+    /// that's open but currently silent (e.g. a voice chat app nobody's
+    /// talking in) can still be found and pinned ahead of time. Registers
+    /// on click, deriving the path from the live process the same way the
+    /// old register-via-checkbox flow did. "Browse for .exe instead…"
+    /// remains as the only path for an app that isn't running at all.
     fn render_add_app_picker(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         ui.add(
             egui::TextEdit::singleline(&mut self.add_app_search)
@@ -211,14 +214,29 @@ impl App {
             .map(|r| r.exe_name.clone())
             .collect();
         let filter = self.add_app_search.to_lowercase();
-        let candidates: Vec<_> = enumerate_app_audio_sessions()
-            .unwrap_or_default()
-            .into_iter()
+        let mut seen_exe_names = std::collections::HashSet::new();
+        let candidates: Vec<(String, String, u32)> = self
+            .sources
+            .iter()
+            .filter(|src| src.kind == CaptureKind::Window && !src.exe_name.is_empty())
             .filter(|src| !registered.contains(&src.exe_name))
             .filter(|src| {
                 filter.is_empty()
-                    || src.display_name.to_lowercase().contains(&filter)
+                    || src.window_title.to_lowercase().contains(&filter)
                     || src.exe_name.to_lowercase().contains(&filter)
+            })
+            // One row per exe, not per window -- a multi-window app (several
+            // File Explorer windows, several browser windows) would
+            // otherwise list the same exe repeatedly.
+            .filter(|src| seen_exe_names.insert(src.exe_name.clone()))
+            .map(|src| {
+                let display_name = src
+                    .exe_name
+                    .strip_suffix(".exe")
+                    .or_else(|| src.exe_name.strip_suffix(".EXE"))
+                    .unwrap_or(&src.exe_name)
+                    .to_string();
+                (display_name, src.exe_name.clone(), src.process_id)
             })
             .collect();
 
@@ -239,9 +257,9 @@ impl App {
             .max_height(120.0)
             .id_salt("add_app_picker_scroll")
             .show(ui, |ui| {
-                for c in &candidates {
-                    if ui.button(&c.display_name).clicked() {
-                        picked = Some((c.exe_name.clone(), c.process_ids[0]));
+                for (display_name, exe_name, pid) in &candidates {
+                    if ui.button(display_name).clicked() {
+                        picked = Some((exe_name.clone(), *pid));
                     }
                 }
             });
