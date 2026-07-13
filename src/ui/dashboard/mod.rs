@@ -87,6 +87,12 @@ pub struct App {
     /// running, not-yet-registered apps by exe/display name, same
     /// convention as `source_filter`.
     add_app_search: String,
+    /// Installed apps found by resolving Start Menu shortcuts, so the add-app
+    /// picker can also find one that isn't running yet -- scanned once when
+    /// the picker opens (`enumerate_installed_apps` walks every `.lnk` under
+    /// two Start Menu folders and resolves each via COM, too slow to redo
+    /// every frame), not refreshed again until it's reopened.
+    add_app_installed: Vec<crate::sources::InstalledApp>,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -201,6 +207,7 @@ impl App {
             show_audio_popup: false,
             show_add_app_picker: false,
             add_app_search: String::new(),
+            add_app_installed: Vec::new(),
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
