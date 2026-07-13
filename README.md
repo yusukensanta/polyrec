@@ -43,9 +43,9 @@ Releases are also immutable once published — assets can't be silently replaced
 ## Features
 
 - **Window capture** via Windows.Graphics.Capture — pick any visible window. Recording defaults to that window's own native resolution; "Match display" and "Custom" are opt-in alternatives in **⚙ Quality**.
-- **Multi-track audio** — record system loopback (Speakers) and microphone as independent tracks, grouped under AUDIO ▸ SYSTEM. Loopback is selected by default so the common case is one clean, unambiguous track; check Microphone to add a second. Each checked device gets its own volume slider (0–100%, default 100%) that only affects the recording, not what you actually hear.
+- **Multi-track audio** (**🔊 Audio**) — record system loopback (Speakers) and microphone as independent tracks. Loopback is selected by default so the common case is one clean, unambiguous track; check Microphone to add a second. Each checked device gets its own volume slider (0–100%, default 100%) that only affects the recording, not what you actually hear.
 - **App audio only** — scope loopback capture to just the selected app's process via the Windows Process Loopback Capture API, instead of the full desktop mix.
-- **Per-app audio tracks** — pick individual running apps with sound (Discord, Spotify, a game, etc.) as their own independent audio tracks, under AUDIO ▸ APPLICATIONS. Each gets its own volume slider. Independent of App audio only / the video capture source — pick an app's audio here without it needing to be the window you're recording.
+- **Per-app audio tracks** (also in **🔊 Audio**) — pick individual running apps with sound (Discord, Spotify, a game, etc.) as their own independent audio tracks. Each gets its own volume slider. Independent of App audio only / the video capture source — pick an app's audio here without it needing to be the window you're recording.
 - **Pause / resume** without cutting the recording.
 - **Global hotkeys** — start/stop, pause, toggle the on-screen overlay, and save a Highlight clip from anywhere, rebindable from the in-app **⌨ Hotkeys** popup (F9 / F8 / F7 / F10 by default). Pressing start/stop while some other window has focus records *that* window, not whatever's selected in the list.
 - **Highlight** — an optional rolling background buffer (30–300s, configurable) that keeps recording even when you're not; hit the save-highlight hotkey to export the last N seconds without having started a manual recording.
@@ -70,7 +70,7 @@ The built binary is at `target/release/polyrec.exe`, with the app icon embedded 
 ## Usage
 
 1. Pick a capture source from the list on the left.
-2. Choose which audio tracks to include (Speakers / Microphone), and optionally check **App audio only** to isolate the selected app's sound.
+2. In **🔊 Audio**, choose which audio tracks to include (Speakers / Microphone / running apps), and optionally check **App audio only** to isolate the selected app's sound.
 3. Adjust **⚙ Quality** or **⌨ Hotkeys** if you want something other than the defaults.
 4. Press **REC** (or the start/stop hotkey) to start, pause hotkey to pause/resume, start/stop hotkey again to stop.
 5. On stop, export lets you pick which audio tracks to keep in the final file.

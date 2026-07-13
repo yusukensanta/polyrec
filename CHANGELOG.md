@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Audio device/app selection moved out of the always-visible source panel into a new **🔊 Audio** popup, matching the existing Quality/Hotkeys pattern -- it's set-once-per-session like those, not something referenced on every recording the way the source list is. The source panel is now just the capture-source list, full height. A "{n} selected" (or "No audio selected") caption under the settings buttons shows the current selection at a glance without opening the popup.
+
 ## [v0.5.23] - 2026-07-13
 
 ### Changed

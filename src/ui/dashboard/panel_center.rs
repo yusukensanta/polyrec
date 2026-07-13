@@ -158,7 +158,29 @@ impl App {
                 {
                     self.show_hotkeys_popup = true;
                 }
+                if ui
+                    .add(accent_button(s.audio_button, ACCENT_SECONDARY))
+                    .on_hover_text(s.audio_tooltip)
+                    .clicked()
+                {
+                    self.show_audio_popup = true;
+                }
             });
+            // Current audio selection at a glance, since it now lives behind
+            // the Audio button rather than always-visible in the source
+            // panel -- without this, checking what's selected would mean
+            // opening the popup every time.
+            let audio_selected_count = self.selected_audio.iter().filter(|&&b| b).count()
+                + self.selected_app_audio.iter().filter(|&&b| b).count();
+            ui.label(
+                egui::RichText::new(if audio_selected_count == 0 {
+                    s.no_audio_selected.to_string()
+                } else {
+                    format!("{audio_selected_count} {}", s.audio_sources_word)
+                })
+                .size(TEXT_CAPTION)
+                .color(TEXT_MUTED),
+            );
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {

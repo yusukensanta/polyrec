@@ -1,12 +1,9 @@
 use super::App;
 use super::theme::{
-    ACCENT_SECONDARY, BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, TEXT_BODY,
-    TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
+    BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, TEXT_BODY, TEXT_CAPTION,
+    TEXT_MUTED, TEXT_PRIMARY,
 };
-use super::widgets::{
-    audio_device_icon, checkbox_with_volume_slider, section_header, subsection_header,
-};
-use crate::config::Config;
+use super::widgets::section_header;
 use crate::i18n::Strings;
 use eframe::egui;
 
@@ -16,125 +13,6 @@ impl App {
             .default_size(260.0)
             .size_range(200.0..=380.0)
             .show(ui, |ui| {
-                // AUDIO is pinned to the bottom, fully visible, never
-                // scrolled -- rendered first so it claims its natural
-                // height from the bottom of the panel (Panel::bottom isn't
-                // resizable by default: it should size to its own content,
-                // not be draggable), leaving whatever remains above for the
-                // source list. Audio needs to be readable at a glance on
-                // launch, not something you scroll to find, and the set of
-                // system devices + currently audio-active apps is normally
-                // small enough that "always fully shown" is the common
-                // case, not just the best case.
-                //
-                // That leaves exactly one scrollable region in this panel
-                // (the source list below) rather than two -- multiple
-                // simultaneously-visible/independently-scrollable regions
-                // on one page is a documented accessibility problem
-                // (keyboard/switch users can't reliably tell which region
-                // has scroll focus; screen magnifier users can miss content
-                // cropped by an inner region's own boundary).
-                egui::Panel::bottom("audio_footer").show(ui, |ui| {
-                    // AUDIO is the parent heading for the two subsections
-                    // below it -- SYSTEM (physical devices) and
-                    // APPLICATIONS (per-app sources) are both audio
-                    // *inputs* in the same sense, just scoped differently,
-                    // so they read as siblings under one "AUDIO" umbrella
-                    // rather than as two unrelated top-level sections.
-                    section_header(ui, s.audio_header);
-
-                    subsection_header(ui, s.system_audio_header);
-                    if self.audio_devices.is_empty() {
-                        ui.label(
-                            egui::RichText::new(s.no_audio_devices)
-                                .size(TEXT_CAPTION)
-                                .color(TEXT_MUTED),
-                        );
-                    }
-                    for (i, dev) in self.audio_devices.iter().enumerate() {
-                        checkbox_with_volume_slider(
-                            ui,
-                            None,
-                            &mut self.config,
-                            &mut self.error_message,
-                            s.config_save_failed_prefix,
-                            &mut self.selected_audio[i],
-                            format!("{} {}", audio_device_icon(dev), dev.name),
-                            dev.id.clone(),
-                        );
-                    }
-
-                    ui.add_space(8.0);
-                    subsection_header(ui, s.applications_header);
-                    if self.app_audio_sources.is_empty() {
-                        ui.label(
-                            egui::RichText::new(s.no_app_audio_sources)
-                                .size(TEXT_CAPTION)
-                                .color(TEXT_MUTED),
-                        );
-                    }
-                    for (i, src) in self.app_audio_sources.iter().enumerate() {
-                        if let std::collections::hash_map::Entry::Vacant(entry) =
-                            self.app_audio_icon_textures.entry(i)
-                            && let Some((rgba, w, h)) = &src.icon_rgba
-                        {
-                            let image = egui::ColorImage::from_rgba_unmultiplied(
-                                [*w as usize, *h as usize],
-                                rgba,
-                            );
-                            let tex = ui.ctx().load_texture(
-                                format!("app_audio_icon_{i}"),
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            entry.insert(tex);
-                        }
-                        checkbox_with_volume_slider(
-                            ui,
-                            self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
-                            &mut self.config,
-                            &mut self.error_message,
-                            s.config_save_failed_prefix,
-                            &mut self.selected_app_audio[i],
-                            src.display_name.clone(),
-                            Config::app_audio_gain_key(&src.exe_name),
-                        );
-                    }
-
-                    ui.add_space(8.0);
-                    let loopback_selected = self
-                        .audio_devices
-                        .iter()
-                        .zip(self.selected_audio.iter())
-                        .any(|(dev, &sel)| dev.is_loopback && sel);
-                    let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
-                    let has_source = self.selected_source.is_some();
-                    ui.add_enabled_ui(loopback_selected && has_source, |ui| {
-                        let response = ui
-                            .checkbox(
-                                &mut self.app_audio_only,
-                                egui::RichText::new(s.app_audio_only_label).color(ACCENT_SECONDARY),
-                            )
-                            .on_hover_text(if !has_loopback_device {
-                                s.tooltip_no_loopback_device
-                            } else if !loopback_selected {
-                                s.tooltip_check_loopback_first
-                            } else {
-                                s.tooltip_app_audio_only
-                            });
-                        // Persisted as the default for next launch (and thus what a
-                        // hotkey-started recording uses) -- same pattern as overlay_enabled.
-                        if response.changed() {
-                            self.config.default_app_audio_only = self.app_audio_only;
-                            if let Err(e) = self.config.save() {
-                                tracing::error!("failed to save config: {e}");
-                                self.error_message =
-                                    Some(format!("{}{e}", s.config_save_failed_prefix));
-                            }
-                        }
-                    });
-                });
-
                 section_header(ui, s.capture_source_header);
 
                 ui.add(

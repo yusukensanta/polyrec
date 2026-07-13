@@ -1,6 +1,7 @@
 mod hotkeys_popup;
 
 mod actions;
+mod audio_popup;
 mod background;
 mod overlay;
 mod panel_center;
@@ -74,6 +75,7 @@ pub struct App {
     overlay_enabled: bool,
     show_quality_popup: bool,
     show_hotkeys_popup: bool,
+    show_audio_popup: bool,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -181,6 +183,7 @@ impl App {
             overlay_enabled,
             show_quality_popup: false,
             show_hotkeys_popup: false,
+            show_audio_popup: false,
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
@@ -239,6 +242,7 @@ impl eframe::App for App {
         self.render_source_panel(ui, s);
         self.render_center_panel(ui, s);
         self.render_overlay_viewport(ctx, s);
+        self.render_audio_popup(ctx, s);
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);
         self.render_error_banner(ctx, s);
