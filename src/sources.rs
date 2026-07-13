@@ -1,4 +1,5 @@
 use crate::types::{CaptureKind, CaptureSource};
+use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject,
@@ -270,9 +271,268 @@ pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32
     }
 }
 
+/// An app found by resolving Start Menu shortcuts -- not necessarily
+/// running. Used by the Audio popup's add-app picker (see
+/// `enumerate_installed_apps`) so an app can be pinned for future recording
+/// without needing to already be open.
+pub struct InstalledApp {
+    pub display_name: String,
+    /// e.g. "Discord.exe" -- derived from `exe_path`, used as the identity
+    /// key for `Config::register_app_audio`, same convention as
+    /// `AppAudioSource::exe_name`.
+    pub exe_name: String,
+    pub exe_path: String,
+}
+
+/// Finds installed desktop apps by resolving every `.lnk` shortcut under the
+/// per-user and all-users Start Menu ("Programs") folders to its target exe
+/// -- the same set Windows' own Start Menu search draws from. Deliberately
+/// does NOT need any app to be running: unlike `enumerate_sources` (open
+/// windows) or `capture::audio::enumerate_app_audio_sessions` (live audio
+/// sessions), this lets the Audio popup's add-app picker find an app the
+/// user hasn't launched yet, so pinning it doesn't require opening it first
+/// just to be findable.
+///
+/// Best-effort throughout: an unreadable Start Menu folder, a shortcut that
+/// fails to resolve, or a target that isn't an existing `.exe` is silently
+/// skipped rather than surfaced as an error -- same convention as
+/// `extract_exe_icon_rgba`. Deduped by resolved exe path (case-insensitive),
+/// since multiple shortcuts commonly point at the same exe (e.g. a "Safe
+/// Mode" variant alongside the normal one).
+pub fn enumerate_installed_apps() -> Vec<InstalledApp> {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        );
+    }
+
+    let mut start_menu_dirs = Vec::new();
+    if let Some(appdata) = dirs::data_dir() {
+        start_menu_dirs.push(
+            appdata
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+        );
+    }
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        start_menu_dirs.push(
+            std::path::PathBuf::from(program_data)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+        );
+    }
+
+    let mut lnk_paths = Vec::new();
+    for dir in &start_menu_dirs {
+        collect_lnk_files(dir, &mut lnk_paths);
+    }
+
+    let mut seen_exe_paths = std::collections::HashSet::new();
+    let mut apps = Vec::new();
+    for lnk_path in lnk_paths {
+        let Some(exe_path) = resolve_shortcut_target(&lnk_path) else {
+            continue;
+        };
+        if !exe_path.to_lowercase().ends_with(".exe") || !std::path::Path::new(&exe_path).exists() {
+            continue;
+        }
+        if !seen_exe_paths.insert(exe_path.to_lowercase()) {
+            continue;
+        }
+        let Some(display_name) = lnk_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let Some(exe_name) = std::path::Path::new(&exe_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+        else {
+            continue;
+        };
+        apps.push(InstalledApp {
+            display_name: display_name.to_string(),
+            exe_name: exe_name.to_string(),
+            exe_path,
+        });
+    }
+    apps.sort_by_key(|a| a.display_name.to_lowercase());
+    apps
+}
+
+/// Recursively collects every `.lnk` file under `dir` into `out` -- a
+/// missing or unreadable directory (e.g. the all-users Start Menu folder
+/// under a restricted profile) is silently skipped, same best-effort
+/// convention as the rest of this module's shell-facing code.
+fn collect_lnk_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lnk_files(&path, out);
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Resolves a `.lnk` shortcut to its target path via the standard
+/// `IShellLinkW` + `IPersistFile` COM pattern.
+fn resolve_shortcut_target(lnk_path: &std::path::Path) -> Option<String> {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::Interface;
+
+    let (target_path, arguments) = unsafe {
+        let shell_link: IShellLinkW =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist_file: IPersistFile = shell_link.cast().ok()?;
+        let wide_lnk: Vec<u16> = lnk_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        persist_file
+            .Load(PCWSTR(wide_lnk.as_ptr()), STGM_READ)
+            .ok()?;
+
+        let mut path_buf = [0u16; 260]; // MAX_PATH
+        let mut find_data = windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW::default();
+        shell_link.GetPath(&mut path_buf, &mut find_data, 0).ok()?;
+        let path_end = path_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(path_buf.len());
+        if path_end == 0 {
+            return None;
+        }
+        let target_path = String::from_utf16_lossy(&path_buf[..path_end]);
+
+        let mut args_buf = [0u16; 260];
+        let arguments = if shell_link.GetArguments(&mut args_buf).is_ok() {
+            let args_end = args_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(args_buf.len());
+            String::from_utf16_lossy(&args_buf[..args_end])
+        } else {
+            String::new()
+        };
+        (target_path, arguments)
+    };
+
+    // Squirrel (the updater framework Discord, Slack, and many other
+    // Electron apps use) points its Start Menu shortcut at `Update.exe
+    // --processStart <AppExe>` rather than the real app directly --
+    // Update.exe is a launcher stub that spawns the real exe (from
+    // whichever `app-<version>` folder is current) and exits immediately,
+    // so pinning it as-is would scope audio capture to a process that's
+    // already gone by the time anything could produce sound. Resolve
+    // through to the real exe instead of returning the stub; if that fails,
+    // treat the shortcut as unresolvable rather than returning a target
+    // known to be useless.
+    if std::path::Path::new(&target_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f.eq_ignore_ascii_case("Update.exe"))
+    {
+        return parse_process_start_arg(&arguments)
+            .and_then(|app_exe| resolve_squirrel_app_exe(&target_path, &app_exe));
+    }
+
+    Some(target_path)
+}
+
+/// Extracts the exe name from a Squirrel shortcut's `--processStart
+/// <AppExe>` argument (optionally quoted) -- see `resolve_shortcut_target`.
+fn parse_process_start_arg(arguments: &str) -> Option<String> {
+    let mut tokens = arguments.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok.eq_ignore_ascii_case("--processStart") {
+            return tokens.next().map(|s| s.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Finds `<app_exe_name>` under whichever `app-<version>` sibling folder of
+/// `update_exe_path` has it most recently modified -- Squirrel keeps the
+/// live app in a versioned folder next to `Update.exe` and typically only
+/// the current version's folder survives an update, but picking by mtime
+/// rather than assuming exactly one folder or trying to parse/compare
+/// version strings handles both the common case and a stale leftover
+/// folder from an interrupted update.
+fn resolve_squirrel_app_exe(update_exe_path: &str, app_exe_name: &str) -> Option<String> {
+    let parent = std::path::Path::new(update_exe_path).parent()?;
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let dir = entry.path();
+        let is_app_dir = dir.is_dir()
+            && dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("app-"));
+        if !is_app_dir {
+            continue;
+        }
+        let candidate = dir.join(app_exe_name);
+        let Ok(modified) = std::fs::metadata(&candidate).and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+            best = Some((modified, candidate));
+        }
+    }
+    best.map(|(_, path)| path.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Ignored: assumes a real desktop with actual installed apps and a
+    // populated Start Menu, which GitHub's hosted windows-latest CI runner
+    // may not have in a comparable shape (headless, minimal image) --
+    // same reasoning as this codebase's other real-hardware/real-environment
+    // #[ignore]d tests. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn enumerate_installed_apps_finds_at_least_one_and_has_no_duplicate_exe_paths() {
+        let apps = enumerate_installed_apps();
+        assert!(
+            !apps.is_empty(),
+            "expected at least one resolvable Start Menu shortcut on a real desktop"
+        );
+        let mut paths: Vec<String> = apps.iter().map(|a| a.exe_path.to_lowercase()).collect();
+        paths.sort_unstable();
+        let mut deduped = paths.clone();
+        deduped.dedup();
+        assert_eq!(paths, deduped, "expected no duplicate exe paths");
+        for app in &apps {
+            assert!(!app.display_name.is_empty());
+            assert!(!app.exe_name.is_empty());
+            assert!(
+                app.exe_path.to_lowercase().ends_with(".exe"),
+                "exe_path should end in .exe: {}",
+                app.exe_path
+            );
+        }
+    }
 
     #[test]
     fn enumerate_returns_at_least_one_window() {

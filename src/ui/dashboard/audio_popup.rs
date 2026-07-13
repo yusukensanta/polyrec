@@ -3,11 +3,23 @@ use super::theme::{ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
 use super::widgets::{
     accent_button, audio_device_icon, checkbox_with_volume_slider, section_header,
 };
-use crate::capture::audio::enumerate_app_audio_sessions;
 use crate::config::Config;
 use crate::i18n::Strings;
+use crate::types::CaptureKind;
 use eframe::egui;
 use rfd::FileDialog;
+
+/// Where the add-app picker found a candidate -- determines how its exe
+/// path gets resolved at pick time (see `render_add_app_picker`).
+#[derive(Clone)]
+enum AddAppSource {
+    /// A live window's process id -- path resolved via `get_exe_path` when
+    /// picked, not eagerly, since it's only needed once.
+    OpenWindow(u32),
+    /// An installed-but-not-running app's already-resolved exe path (from
+    /// its Start Menu shortcut).
+    Installed(String),
+}
 
 impl App {
     pub(super) fn render_audio_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
@@ -129,6 +141,7 @@ impl App {
                             {
                                 self.show_add_app_picker = true;
                                 self.add_app_search.clear();
+                                self.add_app_installed = crate::sources::enumerate_installed_apps();
                             }
                         } else {
                             self.render_add_app_picker(ui, s);
@@ -190,12 +203,17 @@ impl App {
     }
 
     /// Inline search-and-pick panel shown in place of the "+ Add app"
-    /// button once clicked -- lists currently running, not-yet-registered
-    /// apps (same search-box convention as the source panel's
-    /// `source_filter`) so the common case needs no file browsing at all;
-    /// registers on click, deriving the path from the live process the same
-    /// way the old register-via-checkbox flow did. "Browse for .exe
-    /// instead…" remains as the only path for an app that isn't running.
+    /// button once clicked. Searches two merged sources so an app doesn't
+    /// need to be open, let alone actively making sound, to be found:
+    /// currently open windows (`self.sources`, same list the capture-source
+    /// panel itself uses) and installed-but-not-running apps
+    /// (`self.add_app_installed`, populated once when the picker opens --
+    /// see its doc comment on why it isn't rescanned every frame). An exe
+    /// already open wins the dedup over the same exe found only via a Start
+    /// Menu shortcut. Registers on click -- an open window's path is
+    /// derived from its live process, an installed app's is already known
+    /// from its resolved shortcut. "Browse for .exe instead…" remains for
+    /// the rare case neither source finds (unregistered, no shortcut).
     fn render_add_app_picker(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         ui.add(
             egui::TextEdit::singleline(&mut self.add_app_search)
@@ -211,16 +229,60 @@ impl App {
             .map(|r| r.exe_name.clone())
             .collect();
         let filter = self.add_app_search.to_lowercase();
-        let candidates: Vec<_> = enumerate_app_audio_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|src| !registered.contains(&src.exe_name))
-            .filter(|src| {
-                filter.is_empty()
-                    || src.display_name.to_lowercase().contains(&filter)
-                    || src.exe_name.to_lowercase().contains(&filter)
-            })
-            .collect();
+        let mut seen_exe_names = std::collections::HashSet::new();
+        let mut candidates: Vec<(String, String, AddAppSource)> = Vec::new();
+        for src in self
+            .sources
+            .iter()
+            .filter(|src| src.kind == CaptureKind::Window && !src.exe_name.is_empty())
+        {
+            if registered.contains(&src.exe_name) {
+                continue;
+            }
+            if !(filter.is_empty()
+                || src.window_title.to_lowercase().contains(&filter)
+                || src.exe_name.to_lowercase().contains(&filter))
+            {
+                continue;
+            }
+            // One row per exe, not per window -- a multi-window app (several
+            // File Explorer windows, several browser windows) would
+            // otherwise list the same exe repeatedly.
+            if !seen_exe_names.insert(src.exe_name.to_lowercase()) {
+                continue;
+            }
+            let display_name = src
+                .exe_name
+                .strip_suffix(".exe")
+                .or_else(|| src.exe_name.strip_suffix(".EXE"))
+                .unwrap_or(&src.exe_name)
+                .to_string();
+            candidates.push((
+                display_name,
+                src.exe_name.clone(),
+                AddAppSource::OpenWindow(src.process_id),
+            ));
+        }
+        for app in &self.add_app_installed {
+            if registered.contains(&app.exe_name) {
+                continue;
+            }
+            if !(filter.is_empty()
+                || app.display_name.to_lowercase().contains(&filter)
+                || app.exe_name.to_lowercase().contains(&filter))
+            {
+                continue;
+            }
+            if !seen_exe_names.insert(app.exe_name.to_lowercase()) {
+                continue;
+            }
+            candidates.push((
+                app.display_name.clone(),
+                app.exe_name.clone(),
+                AddAppSource::Installed(app.exe_path.clone()),
+            ));
+        }
+        candidates.sort_by_key(|c| c.0.to_lowercase());
 
         if candidates.is_empty() {
             let msg = if filter.is_empty() {
@@ -234,19 +296,24 @@ impl App {
                     .color(TEXT_MUTED),
             );
         }
-        let mut picked: Option<(String, u32)> = None;
+        let mut picked: Option<(String, AddAppSource)> = None;
         egui::ScrollArea::vertical()
             .max_height(120.0)
             .id_salt("add_app_picker_scroll")
             .show(ui, |ui| {
-                for c in &candidates {
-                    if ui.button(&c.display_name).clicked() {
-                        picked = Some((c.exe_name.clone(), c.process_ids[0]));
+                for (display_name, exe_name, source) in &candidates {
+                    if ui.button(display_name).clicked() {
+                        picked = Some((exe_name.clone(), source.clone()));
                     }
                 }
             });
-        if let Some((exe_name, pid)) = picked {
-            let exe_path = crate::sources::get_exe_path(pid).unwrap_or_default();
+        if let Some((exe_name, source)) = picked {
+            let exe_path = match source {
+                AddAppSource::OpenWindow(pid) => {
+                    crate::sources::get_exe_path(pid).unwrap_or_default()
+                }
+                AddAppSource::Installed(path) => path,
+            };
             self.config.register_app_audio(exe_name, exe_path);
             if let Err(e) = self.config.save() {
                 tracing::error!("failed to save config: {e}");

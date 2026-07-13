@@ -112,18 +112,20 @@ pub struct Strings {
     /// unchecking it un-registers (removes) the app -- the checkbox is the
     /// only pin/unpin control, there's no separate remove button.
     pub remove_registered_app_tooltip: &'static str,
-    /// Placeholder text for the add-app picker's search box, which lists
-    /// currently-running not-yet-registered apps (from
-    /// `enumerate_app_audio_sessions`) -- picking one there derives its
-    /// path from the live process, no file browsing needed. Same
-    /// convention as `source_filter_placeholder`.
+    /// Placeholder text for the add-app picker's search box, which searches
+    /// both currently open windows and installed-but-not-running apps
+    /// (resolved from Start Menu shortcuts) -- an app doesn't need to be
+    /// open, let alone making sound, to be found and pinned. Picking a
+    /// result needs no file browsing. Same convention as
+    /// `source_filter_placeholder`.
     pub add_app_search_placeholder: &'static str,
-    /// Shown when the add-app search box's filter matches nothing among
-    /// currently-running apps -- distinct from "no apps producing sound at
-    /// all right now" (handled by hiding the list instead).
+    /// Shown when the add-app search box's filter matches neither an open
+    /// window nor an installed app -- distinct from "nothing found at all"
+    /// (handled by hiding the list instead).
     pub add_app_no_matches: &'static str,
-    /// Shown instead of the search results when nothing is currently
-    /// producing audio to search through at all.
+    /// Shown instead of the search results when neither source has anything
+    /// to search through at all (no windows open, no Start Menu shortcuts
+    /// resolvable) -- a vanishingly rare edge case.
     pub add_app_none_running: &'static str,
     /// Fallback button in the add-app picker for an app that isn't
     /// currently running (so it can't be found by searching live
@@ -277,9 +279,9 @@ pub static EN: Strings = Strings {
     tooltip_app_audio_only_needs_window: "Select a specific window (not a monitor) as the capture source to use this — an entire-screen recording has no single app to scope audio to.",
     add_app_button: "+ Add app",
     remove_registered_app_tooltip: "Uncheck to remove this app — while it isn't running there's nothing to record yet, but it'll start automatically the moment it launches.",
-    add_app_search_placeholder: "Search running apps…",
-    add_app_no_matches: "No running apps match.",
-    add_app_none_running: "No apps currently producing sound.",
+    add_app_search_placeholder: "Search apps…",
+    add_app_no_matches: "No apps match.",
+    add_app_none_running: "No apps found.",
     add_app_browse_button: "Browse for .exe instead…",
 
     status_header: "STATUS",
@@ -409,9 +411,9 @@ pub static JA: Strings = Strings {
     tooltip_app_audio_only_needs_window: "この機能を使うには、モニターではなく特定のウィンドウをキャプチャソースとして選択してください。画面全体の録画には音声を絞り込む対象のアプリがありません。",
     add_app_button: "+ アプリを追加",
     remove_registered_app_tooltip: "チェックを外すとこのアプリを削除します。実行されていない間は録音対象がありませんが、起動すると自動的に録音が始まります。",
-    add_app_search_placeholder: "実行中のアプリを検索…",
-    add_app_no_matches: "一致する実行中のアプリがありません。",
-    add_app_none_running: "現在音声を再生しているアプリはありません。",
+    add_app_search_placeholder: "アプリを検索…",
+    add_app_no_matches: "一致するアプリがありません。",
+    add_app_none_running: "アプリが見つかりません。",
     add_app_browse_button: "代わりに .exe を参照…",
 
     status_header: "ステータス",
