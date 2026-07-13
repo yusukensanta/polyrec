@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.27] - 2026-07-13
+
 ### Changed
 
 - Checking any app in the Applications audio list now pins it too, not just apps added via "+ Add app" -- it stays selected across restarts even after closing, the same way an explicitly-browsed-to app already did. Unchecking still doesn't un-pin; only the "×" removes it.
