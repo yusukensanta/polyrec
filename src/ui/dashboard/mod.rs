@@ -12,7 +12,7 @@ mod theme;
 mod util;
 mod widgets;
 
-use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
+use crate::capture::audio::enumerate_audio_devices;
 use crate::config::Config;
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
@@ -76,6 +76,17 @@ pub struct App {
     show_quality_popup: bool,
     show_hotkeys_popup: bool,
     show_audio_popup: bool,
+    /// "+ Add app" opens this inline instead of going straight to a native
+    /// file browser -- lets the common case (an app that's already running)
+    /// be searched and added without the user needing to know where it's
+    /// installed. `Config::register_app_audio` still needs a path, so
+    /// picking a running app derives it from the live process the same way
+    /// the register-via-checkbox flow used to.
+    show_add_app_picker: bool,
+    /// Live text from the add-app picker's search box -- filters currently
+    /// running, not-yet-registered apps by exe/display name, same
+    /// convention as `source_filter`.
+    add_app_search: String,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -147,23 +158,12 @@ impl App {
         // the loopback device by default keeps the common case to a single,
         // deterministically audible track; mic capture remains an opt-in checkbox.
         let selected_audio: Vec<bool> = audio_devices.iter().map(|d| d.is_loopback).collect();
-        let app_audio_sources = actions::merge_registered_app_audio(
-            enumerate_app_audio_sessions().unwrap_or_default(),
-            &config,
-        );
-        // Registering an app implies "yes, record it" -- same default a
-        // freshly-registered app gets when it first appears mid-session via
-        // refresh_sources_and_audio_if_due, applied here too so it doesn't
-        // need a live refresh tick after launch to take effect.
-        let registered_exe_names: std::collections::HashSet<&str> = config
-            .registered_app_audio
-            .iter()
-            .map(|r| r.exe_name.as_str())
-            .collect();
-        let selected_app_audio: Vec<bool> = app_audio_sources
-            .iter()
-            .map(|s| registered_exe_names.contains(s.exe_name.as_str()))
-            .collect();
+        // Curated entirely by config -- see `actions::build_app_audio_sources`'s
+        // doc comment for why this doesn't auto-populate from whatever's
+        // currently making sound. Every entry is registered by
+        // construction, so it's always checked.
+        let app_audio_sources = actions::build_app_audio_sources(&config);
+        let selected_app_audio = vec![true; app_audio_sources.len()];
         let export_track_selection = vec![true; n];
         let wake_ctx = cc.egui_ctx.clone();
         let hotkey_listener = HotkeyListener::spawn(
@@ -199,6 +199,8 @@ impl App {
             show_quality_popup: false,
             show_hotkeys_popup: false,
             show_audio_popup: false,
+            show_add_app_picker: false,
+            add_app_search: String::new(),
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,

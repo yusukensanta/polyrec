@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Checking any app in the Applications audio list now pins it too, not just apps added via "+ Add app" -- it stays selected across restarts even after closing, the same way an explicitly-browsed-to app already did. Unchecking still doesn't un-pin; only the "×" removes it.
+- The Applications audio list is now entirely curated, not auto-populated -- a fresh install shows nothing here but "+ Add app" regardless of how many apps happen to be making sound, and only apps you've explicitly added ever appear. The checkbox itself is the only pin/unpin control: checking an app in persists it across restarts, and unchecking it removes it immediately (no separate button). An added app that isn't currently running still shows, checked, so it starts recording automatically the moment it launches without needing to be re-checked.
+- "+ Add app" now opens an in-app search box listing currently running apps by name, instead of going straight to a file browser -- picking one needs no knowledge of where it's installed. A "Browse for .exe instead…" fallback remains for pinning an app that isn't running yet.
 
 ## [v0.5.26] - 2026-07-13
 

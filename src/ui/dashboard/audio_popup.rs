@@ -3,6 +3,7 @@ use super::theme::{ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
 use super::widgets::{
     accent_button, audio_device_icon, checkbox_with_volume_slider, section_header,
 };
+use crate::capture::audio::enumerate_app_audio_sessions;
 use crate::config::Config;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -49,6 +50,7 @@ impl App {
                                 &mut self.selected_audio[i],
                                 format!("{} {}", audio_device_icon(dev), dev.name),
                                 dev.id.clone(),
+                                None,
                             );
                         }
 
@@ -61,7 +63,13 @@ impl App {
                                     .color(TEXT_MUTED),
                             );
                         }
-                        for (i, src) in self.app_audio_sources.iter().enumerate() {
+                        // Iterated from a clone, not `self.app_audio_sources`
+                        // directly -- an uncheck below rebuilds that Vec
+                        // in-place via `rebuild_app_audio_sources_now`,
+                        // which a live borrow of it here would conflict
+                        // with.
+                        let app_audio_sources = self.app_audio_sources.clone();
+                        for (i, src) in app_audio_sources.iter().enumerate() {
                             if let std::collections::hash_map::Entry::Vacant(entry) =
                                 self.app_audio_icon_textures.entry(i)
                                 && let Some((rgba, w, h)) = &src.icon_rgba
@@ -77,89 +85,53 @@ impl App {
                                 );
                                 entry.insert(tex);
                             }
-                            // Registered-but-not-currently-live apps (see
-                            // `actions::merge_registered_app_audio`) have no
-                            // pid to actually capture -- shown but
-                            // non-interactive, same convention as the "App
-                            // audio only" checkbox's own disabled state
-                            // below.
-                            let is_running = !src.process_ids.is_empty();
-                            let is_registered = self
-                                .config
-                                .registered_app_audio
-                                .iter()
-                                .any(|r| r.exe_name == src.exe_name);
                             let was_checked = self.selected_app_audio[i];
-                            ui.horizontal(|ui| {
-                                ui.add_enabled_ui(is_running, |ui| {
-                                    checkbox_with_volume_slider(
-                                        ui,
-                                        self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
-                                        &mut self.config,
-                                        &mut self.error_message,
-                                        s.config_save_failed_prefix,
-                                        &mut self.selected_app_audio[i],
-                                        src.display_name.clone(),
-                                        Config::app_audio_gain_key(&src.exe_name),
-                                    );
-                                });
-                                // Checking a live app pins it too, not just
-                                // "+ Add app" -- so it's still selected next
-                                // launch without the user needing to know the
-                                // separate browse-to-pin flow exists.
-                                // Structurally can only fire for a running
-                                // app: the checkbox above is disabled
-                                // whenever `is_running` is false, so this can
-                                // never trigger for a not-yet-launched
-                                // registered entry. Unchecking does NOT
-                                // un-pin -- only "×" does, below.
-                                if !was_checked && self.selected_app_audio[i] {
-                                    let exe_path = crate::sources::get_exe_path(src.process_ids[0])
-                                        .unwrap_or_default();
-                                    self.config
-                                        .register_app_audio(src.exe_name.clone(), exe_path);
-                                    if let Err(e) = self.config.save() {
-                                        tracing::error!("failed to save config: {e}");
-                                        self.error_message =
-                                            Some(format!("{}{e}", s.config_save_failed_prefix));
-                                    }
+                            checkbox_with_volume_slider(
+                                ui,
+                                self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
+                                &mut self.config,
+                                &mut self.error_message,
+                                s.config_save_failed_prefix,
+                                &mut self.selected_app_audio[i],
+                                src.display_name.clone(),
+                                Config::app_audio_gain_key(&src.exe_name),
+                                Some(s.remove_registered_app_tooltip),
+                            );
+                            // Every entry here is already registered (see
+                            // `actions::build_app_audio_sources`) -- the
+                            // checkbox is the only pin/unpin control, no
+                            // separate remove button. Unchecking
+                            // immediately un-registers and drops the row,
+                            // whether or not the app is currently running
+                            // (there's no "checked but idle" state to fall
+                            // back to -- being in this list at all already
+                            // means "record this").
+                            if was_checked && !self.selected_app_audio[i] {
+                                self.config.unregister_app_audio(&src.exe_name);
+                                if let Err(e) = self.config.save() {
+                                    tracing::error!("failed to save config: {e}");
+                                    self.error_message =
+                                        Some(format!("{}{e}", s.config_save_failed_prefix));
                                 }
-                                // Outside the disabled scope above -- must stay
-                                // clickable even for a not-running registered
-                                // row, since that's the only way to un-pin one.
-                                if is_registered
-                                    && ui
-                                        .small_button(egui::RichText::new("×").color(TEXT_MUTED))
-                                        .on_hover_text(s.remove_registered_app_tooltip)
-                                        .clicked()
-                                {
-                                    self.config.unregister_app_audio(&src.exe_name);
-                                    if let Err(e) = self.config.save() {
-                                        tracing::error!("failed to save config: {e}");
-                                        self.error_message =
-                                            Some(format!("{}{e}", s.config_save_failed_prefix));
-                                    }
-                                }
-                            });
-                        }
-                        if ui
-                            .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
-                            .clicked()
-                            && let Some(path) = FileDialog::new()
-                                .add_filter("Executable", &["exe"])
-                                .pick_file()
-                            && let Some(exe_name) = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                        {
-                            self.config
-                                .register_app_audio(exe_name, path.to_string_lossy().into_owned());
-                            if let Err(e) = self.config.save() {
-                                tracing::error!("failed to save config: {e}");
-                                self.error_message =
-                                    Some(format!("{}{e}", s.config_save_failed_prefix));
+                                self.rebuild_app_audio_sources_now();
+                                break;
                             }
+                        }
+                        // The Applications list is entirely opt-in via this
+                        // button -- unlike SYSTEM devices, it never shows an
+                        // app just because it's currently making sound (see
+                        // `actions::build_app_audio_sources`'s doc comment).
+                        // A fresh install shows nothing here but this button.
+                        if !self.show_add_app_picker {
+                            if ui
+                                .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
+                                .clicked()
+                            {
+                                self.show_add_app_picker = true;
+                                self.add_app_search.clear();
+                            }
+                        } else {
+                            self.render_add_app_picker(ui, s);
                         }
 
                         ui.add_space(8.0);
@@ -215,5 +187,98 @@ impl App {
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_audio_popup = false;
         }
+    }
+
+    /// Inline search-and-pick panel shown in place of the "+ Add app"
+    /// button once clicked -- lists currently running, not-yet-registered
+    /// apps (same search-box convention as the source panel's
+    /// `source_filter`) so the common case needs no file browsing at all;
+    /// registers on click, deriving the path from the live process the same
+    /// way the old register-via-checkbox flow did. "Browse for .exe
+    /// instead…" remains as the only path for an app that isn't running.
+    fn render_add_app_picker(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        ui.add(
+            egui::TextEdit::singleline(&mut self.add_app_search)
+                .hint_text(s.add_app_search_placeholder)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+
+        let registered: std::collections::HashSet<String> = self
+            .config
+            .registered_app_audio
+            .iter()
+            .map(|r| r.exe_name.clone())
+            .collect();
+        let filter = self.add_app_search.to_lowercase();
+        let candidates: Vec<_> = enumerate_app_audio_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|src| !registered.contains(&src.exe_name))
+            .filter(|src| {
+                filter.is_empty()
+                    || src.display_name.to_lowercase().contains(&filter)
+                    || src.exe_name.to_lowercase().contains(&filter)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            let msg = if filter.is_empty() {
+                s.add_app_none_running
+            } else {
+                s.add_app_no_matches
+            };
+            ui.label(
+                egui::RichText::new(msg)
+                    .size(TEXT_CAPTION)
+                    .color(TEXT_MUTED),
+            );
+        }
+        let mut picked: Option<(String, u32)> = None;
+        egui::ScrollArea::vertical()
+            .max_height(120.0)
+            .id_salt("add_app_picker_scroll")
+            .show(ui, |ui| {
+                for c in &candidates {
+                    if ui.button(&c.display_name).clicked() {
+                        picked = Some((c.exe_name.clone(), c.process_ids[0]));
+                    }
+                }
+            });
+        if let Some((exe_name, pid)) = picked {
+            let exe_path = crate::sources::get_exe_path(pid).unwrap_or_default();
+            self.config.register_app_audio(exe_name, exe_path);
+            if let Err(e) = self.config.save() {
+                tracing::error!("failed to save config: {e}");
+                self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
+            }
+            self.rebuild_app_audio_sources_now();
+            self.show_add_app_picker = false;
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button(s.add_app_browse_button).clicked()
+                && let Some(path) = FileDialog::new()
+                    .add_filter("Executable", &["exe"])
+                    .pick_file()
+                && let Some(exe_name) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            {
+                self.config
+                    .register_app_audio(exe_name, path.to_string_lossy().into_owned());
+                if let Err(e) = self.config.save() {
+                    tracing::error!("failed to save config: {e}");
+                    self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
+                }
+                self.rebuild_app_audio_sources_now();
+                self.show_add_app_picker = false;
+            }
+            if ui.button(s.close_button).clicked() {
+                self.show_add_app_picker = false;
+            }
+        });
     }
 }

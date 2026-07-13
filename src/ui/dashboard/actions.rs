@@ -9,33 +9,42 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-/// `enumerate_app_audio_sessions()` plus a synthetic entry (`process_ids:
-/// vec![]`) for every `Config::registered_app_audio` app that isn't
-/// currently live -- so a pinned app still shows (greyed, see
-/// `render_audio_popup`) even while not producing sound, and its icon can
-/// still be shown via the path it was registered with.
-pub(super) fn merge_registered_app_audio(
-    mut sources: Vec<AppAudioSource>,
-    config: &Config,
-) -> Vec<AppAudioSource> {
-    for reg in &config.registered_app_audio {
-        if sources.iter().any(|s| s.exe_name == reg.exe_name) {
-            continue;
-        }
-        let display_name = reg
-            .exe_name
-            .strip_suffix(".exe")
-            .or_else(|| reg.exe_name.strip_suffix(".EXE"))
-            .unwrap_or(&reg.exe_name)
-            .to_string();
-        sources.push(AppAudioSource {
-            process_ids: Vec::new(),
-            exe_name: reg.exe_name.clone(),
-            display_name,
-            icon_rgba: crate::sources::extract_exe_icon_rgba(&reg.exe_path),
-        });
-    }
-    sources
+/// The Applications audio list is entirely curated via `Config::register_app_audio`
+/// / `unregister_app_audio` ("+ Add app", or unchecking a row -- see
+/// `render_audio_popup`) -- unlike the SYSTEM device list, it does NOT
+/// auto-populate from whatever happens to be making sound right now. A
+/// fresh install (nothing registered yet) shows nothing here but the "+ Add
+/// app" button, regardless of how many apps are currently producing audio.
+///
+/// For each registered app, looks up its current live session (if any) to
+/// get real `process_ids` and an up-to-date icon; a registered app that
+/// isn't currently running gets a synthetic `process_ids: vec![]` entry
+/// (icon re-extracted from the path it was registered with) so it still
+/// shows and can still be un-registered even while idle.
+pub(super) fn build_app_audio_sources(config: &Config) -> Vec<AppAudioSource> {
+    let live = enumerate_app_audio_sessions().unwrap_or_default();
+    config
+        .registered_app_audio
+        .iter()
+        .map(|reg| {
+            if let Some(matched) = live.iter().find(|s| s.exe_name == reg.exe_name) {
+                matched.clone()
+            } else {
+                let display_name = reg
+                    .exe_name
+                    .strip_suffix(".exe")
+                    .or_else(|| reg.exe_name.strip_suffix(".EXE"))
+                    .unwrap_or(&reg.exe_name)
+                    .to_string();
+                AppAudioSource {
+                    process_ids: Vec::new(),
+                    exe_name: reg.exe_name.clone(),
+                    display_name,
+                    icon_rgba: crate::sources::extract_exe_icon_rgba(&reg.exe_path),
+                }
+            }
+        })
+        .collect()
 }
 
 /// Order-independent fingerprint of an app-audio list, for deciding whether
@@ -174,48 +183,33 @@ impl App {
             // actually-probed track count, not the live device list.
         }
 
-        let new_app_audio_sources = merge_registered_app_audio(
-            enumerate_app_audio_sessions().unwrap_or_default(),
-            &self.config,
-        );
+        // Every entry the list can ever contain is a registered app (see
+        // `build_app_audio_sources`'s doc comment), so there's no separate
+        // "checked" state to preserve across a rebuild the way SYSTEM
+        // devices have -- being in the list at all already means "record
+        // this", always. Only the live process_ids (idle vs running) can
+        // change between refreshes.
+        let new_app_audio_sources = build_app_audio_sources(&self.config);
         if app_audio_fingerprint(&new_app_audio_sources)
             != app_audio_fingerprint(&self.app_audio_sources)
         {
-            // Preserved by exe name, not list index or process id -- a
-            // refresh can legitimately re-enumerate the same still-running
-            // app at the same PID (no change needed), but also survives the
-            // app having been closed and reopened (new PID) between
-            // refreshes without silently unchecking it. An exe name that
-            // already existed keeps whatever checked state it had
-            // (including a manual uncheck, even across it going idle<->live)
-            // -- only a genuinely brand-new exe name gets a fresh default,
-            // which is true for a registered app (registering one implies
-            // "yes, record it") and false otherwise, matching the
-            // already-existing default for any newly-appearing live app.
-            let previous_checked_by_exe: std::collections::HashMap<&str, bool> = self
-                .app_audio_sources
-                .iter()
-                .zip(self.selected_app_audio.iter())
-                .map(|(s, &sel)| (s.exe_name.as_str(), sel))
-                .collect();
-            let registered_exe_names: std::collections::HashSet<&str> = self
-                .config
-                .registered_app_audio
-                .iter()
-                .map(|r| r.exe_name.as_str())
-                .collect();
-            self.selected_app_audio = new_app_audio_sources
-                .iter()
-                .map(|s| {
-                    previous_checked_by_exe
-                        .get(s.exe_name.as_str())
-                        .copied()
-                        .unwrap_or_else(|| registered_exe_names.contains(s.exe_name.as_str()))
-                })
-                .collect();
+            self.selected_app_audio = vec![true; new_app_audio_sources.len()];
             self.app_audio_sources = new_app_audio_sources;
             self.app_audio_icon_textures.clear();
         }
+    }
+
+    /// Rebuilds the Applications audio list from `self.config` immediately
+    /// -- called right after a register/unregister action so the popup
+    /// reflects it the same frame, instead of waiting for
+    /// `refresh_sources_and_audio_if_due`'s next timer tick (which also
+    /// wouldn't notice a registration change on its own: unregistering an
+    /// app that's still running doesn't change its live `process_ids`, the
+    /// thing that poll's fingerprint actually watches for).
+    pub(super) fn rebuild_app_audio_sources_now(&mut self) {
+        self.app_audio_sources = build_app_audio_sources(&self.config);
+        self.selected_app_audio = vec![true; self.app_audio_sources.len()];
+        self.app_audio_icon_textures.clear();
     }
 
     pub(super) fn stop_recording(&mut self) {
