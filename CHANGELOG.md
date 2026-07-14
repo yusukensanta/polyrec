@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.33] - 2026-07-14
+
 ### Fixed
 
 - A hand-edited `config.toml` with `fps = 0` crashed on the very first frame of every recording (division by zero computing per-frame duration). The UI itself only ever writes 30 or 60, so this only hit users who edited the file directly, but recovery meant deleting the config -- `fps` is now clamped to `[1, 240]` the same way `resolution_mode`/`bitrate_mode`/`encoder_mode` already guard their own raw config inputs.
