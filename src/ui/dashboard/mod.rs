@@ -60,11 +60,11 @@ pub struct App {
     source_filter: String,
     audio_devices: Vec<AudioDevice>,
     selected_audio: Vec<bool>,
-    /// Running apps with an active WASAPI audio session -- see
-    /// `AppAudioSource`'s doc comment. Unlike `audio_devices` (which always
-    /// has loopback pre-selected), these default to unchecked -- there's no
-    /// natural "pick this one for me" default among an arbitrary, changing
-    /// set of running apps.
+    /// Curated from `config.registered_app_audio`, not auto-populated from
+    /// whatever's currently making sound -- see
+    /// `actions::build_app_audio_sources`'s doc comment. Every entry here is
+    /// registered by construction, so `selected_app_audio` is always `true`
+    /// for each one; there's no separate "checked but not registered" state.
     app_audio_sources: Vec<AppAudioSource>,
     selected_app_audio: Vec<bool>,
     /// Keyed by index into `app_audio_sources` -- same convention and same
@@ -77,15 +77,16 @@ pub struct App {
     show_hotkeys_popup: bool,
     show_audio_popup: bool,
     /// "+ Add app" opens this inline instead of going straight to a native
-    /// file browser -- lets the common case (an app that's already running)
-    /// be searched and added without the user needing to know where it's
-    /// installed. `Config::register_app_audio` still needs a path, so
-    /// picking a running app derives it from the live process the same way
-    /// the register-via-checkbox flow used to.
+    /// file browser -- lets an app be found and pinned via
+    /// `Config::register_app_audio` by searching (currently open windows,
+    /// or installed-but-not-running apps found via Start Menu shortcuts)
+    /// instead of needing to know where it's installed. A native file
+    /// browser remains as a fallback ("Browse for .exe instead…") for the
+    /// rare app neither search source finds.
     show_add_app_picker: bool,
-    /// Live text from the add-app picker's search box -- filters currently
-    /// running, not-yet-registered apps by exe/display name, same
-    /// convention as `source_filter`.
+    /// Live text from the add-app picker's search box -- filters both
+    /// currently open windows and installed-but-not-running apps by
+    /// exe/display name, same convention as `source_filter`.
     add_app_search: String,
     /// Installed apps found by resolving Start Menu shortcuts, so the add-app
     /// picker can also find one that isn't running yet -- scanned once when

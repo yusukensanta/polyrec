@@ -251,14 +251,8 @@ impl App {
             if !seen_exe_names.insert(src.exe_name.to_lowercase()) {
                 continue;
             }
-            let display_name = src
-                .exe_name
-                .strip_suffix(".exe")
-                .or_else(|| src.exe_name.strip_suffix(".EXE"))
-                .unwrap_or(&src.exe_name)
-                .to_string();
             candidates.push((
-                display_name,
+                crate::sources::display_name_from_exe_name(&src.exe_name),
                 src.exe_name.clone(),
                 AddAppSource::OpenWindow(src.process_id),
             ));
@@ -314,13 +308,7 @@ impl App {
                 }
                 AddAppSource::Installed(path) => path,
             };
-            self.config.register_app_audio(exe_name, exe_path);
-            if let Err(e) = self.config.save() {
-                tracing::error!("failed to save config: {e}");
-                self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-            }
-            self.rebuild_app_audio_sources_now();
-            self.show_add_app_picker = false;
+            self.register_app_and_close_picker(exe_name, exe_path, s);
         }
 
         ui.add_space(4.0);
@@ -334,18 +322,29 @@ impl App {
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_string())
             {
-                self.config
-                    .register_app_audio(exe_name, path.to_string_lossy().into_owned());
-                if let Err(e) = self.config.save() {
-                    tracing::error!("failed to save config: {e}");
-                    self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-                }
-                self.rebuild_app_audio_sources_now();
-                self.show_add_app_picker = false;
+                self.register_app_and_close_picker(
+                    exe_name,
+                    path.to_string_lossy().into_owned(),
+                    s,
+                );
             }
             if ui.button(s.close_button).clicked() {
                 self.show_add_app_picker = false;
             }
         });
+    }
+
+    /// Pins `exe_name`/`exe_path`, rebuilds the Applications list to reflect
+    /// it immediately, and closes the add-app picker -- the common tail of
+    /// both ways the picker can register an app (picked from the search
+    /// list, or via the "Browse for .exe instead…" fallback).
+    fn register_app_and_close_picker(&mut self, exe_name: String, exe_path: String, s: &Strings) {
+        self.config.register_app_audio(exe_name, exe_path);
+        if let Err(e) = self.config.save() {
+            tracing::error!("failed to save config: {e}");
+            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
+        }
+        self.rebuild_app_audio_sources_now();
+        self.show_add_app_picker = false;
     }
 }

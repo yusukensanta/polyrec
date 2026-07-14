@@ -256,13 +256,8 @@ pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
                 CoTaskMemFree(Some(pwsz.0 as *const _));
                 s
             });
-            let display_name = wasapi_name.unwrap_or_else(|| {
-                exe_name
-                    .strip_suffix(".exe")
-                    .or_else(|| exe_name.strip_suffix(".EXE"))
-                    .unwrap_or(&exe_name)
-                    .to_string()
-            });
+            let display_name = wasapi_name
+                .unwrap_or_else(|| crate::sources::display_name_from_exe_name(&exe_name));
 
             match sources
                 .iter_mut()

@@ -168,6 +168,21 @@ pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
     }
 }
 
+/// Strips a trailing `.exe`/`.EXE` from an exe filename for display (e.g.
+/// "Discord.exe" -> "Discord") -- falls back to the input unchanged if it
+/// doesn't end in either case variant. `pub(crate)` -- shared by every
+/// exe_name-to-display_name derivation in the app-audio path
+/// (`capture::audio::enumerate_app_audio_sessions`,
+/// `ui::dashboard::actions::build_app_audio_sources`, the add-app picker's
+/// open-window candidates) so the casing convention lives in one place.
+pub(crate) fn display_name_from_exe_name(exe_name: &str) -> String {
+    exe_name
+        .strip_suffix(".exe")
+        .or_else(|| exe_name.strip_suffix(".EXE"))
+        .unwrap_or(exe_name)
+        .to_string()
+}
+
 /// Extracts the exe's small shell icon as straight-alpha, top-down RGBA bytes.
 /// Best-effort: returns `None` on any failure rather than propagating an error —
 /// a missing icon just means the source list row shows no icon, not a broken list.
