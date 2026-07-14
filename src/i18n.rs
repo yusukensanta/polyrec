@@ -132,6 +132,16 @@ pub struct Strings {
     /// sessions) -- opens the native file browser instead, same as
     /// `add_app_button` used to directly.
     pub add_app_browse_button: &'static str,
+    /// Shown in the add-app picker while `enumerate_installed_apps`'s
+    /// background scan is still running -- open-window candidates already
+    /// show above this, so it's specifically flagging that more
+    /// (installed-only) results may still arrive, not that nothing's found
+    /// yet.
+    pub add_app_scanning: &'static str,
+    /// Small tag next to a picker candidate that's currently running --
+    /// distinguishes it from an installed-but-not-running one, which starts
+    /// capturing only once launched.
+    pub add_app_running_tag: &'static str,
 
     // Center panel — status
     pub status_header: &'static str,
@@ -283,6 +293,8 @@ pub static EN: Strings = Strings {
     add_app_no_matches: "No apps match.",
     add_app_none_running: "No apps found.",
     add_app_browse_button: "Browse for .exe instead…",
+    add_app_scanning: "Still searching installed apps…",
+    add_app_running_tag: "● Running",
 
     status_header: "STATUS",
     state_paused: "PAUSED",
@@ -415,6 +427,8 @@ pub static JA: Strings = Strings {
     add_app_no_matches: "一致するアプリがありません。",
     add_app_none_running: "アプリが見つかりません。",
     add_app_browse_button: "代わりに .exe を参照…",
+    add_app_scanning: "インストール済みアプリを検索中…",
+    add_app_running_tag: "● 実行中",
 
     status_header: "ステータス",
     state_paused: "一時停止中",

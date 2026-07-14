@@ -1,5 +1,5 @@
 use super::App;
-use super::theme::{ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
+use super::theme::{ACCENT_IDLE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
 use super::widgets::{
     accent_button, audio_device_icon, checkbox_with_volume_slider, section_header,
 };
@@ -8,6 +8,7 @@ use crate::i18n::Strings;
 use crate::types::CaptureKind;
 use eframe::egui;
 use rfd::FileDialog;
+use std::sync::mpsc;
 
 /// Where the add-app picker found a candidate -- determines how its exe
 /// path gets resolved at pick time (see `render_add_app_picker`).
@@ -19,6 +20,24 @@ enum AddAppSource {
     /// An installed-but-not-running app's already-resolved exe path (from
     /// its Start Menu shortcut).
     Installed(String),
+}
+
+/// One row in the add-app picker's search results.
+struct AddAppCandidate {
+    display_name: String,
+    exe_name: String,
+    source: AddAppSource,
+    icon_rgba: Option<(Vec<u8>, u32, u32)>,
+}
+
+impl AddAppCandidate {
+    /// Whether this candidate is currently running -- shown as a "● Running"
+    /// tag (see `render_add_app_picker`) so the user can tell at a glance
+    /// which candidates will start capturing immediately versus wait for
+    /// launch, without needing to already know that from the exe name alone.
+    fn is_running(&self) -> bool {
+        matches!(self.source, AddAppSource::OpenWindow(_))
+    }
 }
 
 impl App {
@@ -141,7 +160,16 @@ impl App {
                             {
                                 self.show_add_app_picker = true;
                                 self.add_app_search.clear();
-                                self.add_app_installed = crate::sources::enumerate_installed_apps();
+                                // Cleared, not left stale, so a previous
+                                // open's results don't briefly show before
+                                // this scan's real results arrive.
+                                self.add_app_installed = Vec::new();
+                                let (tx, rx) = mpsc::channel();
+                                self.add_app_installed_rx = Some(rx);
+                                tokio::task::spawn_blocking(move || {
+                                    let apps = crate::sources::enumerate_installed_apps();
+                                    let _ = tx.send(apps);
+                                });
                             }
                         } else {
                             self.render_add_app_picker(ui, s);
@@ -205,15 +233,16 @@ impl App {
     /// Inline search-and-pick panel shown in place of the "+ Add app"
     /// button once clicked. Searches two merged sources so an app doesn't
     /// need to be open, let alone actively making sound, to be found:
-    /// currently open windows (`self.sources`, same list the capture-source
-    /// panel itself uses) and installed-but-not-running apps
-    /// (`self.add_app_installed`, populated once when the picker opens --
-    /// see its doc comment on why it isn't rescanned every frame). An exe
-    /// already open wins the dedup over the same exe found only via a Start
-    /// Menu shortcut. Registers on click -- an open window's path is
-    /// derived from its live process, an installed app's is already known
-    /// from its resolved shortcut. "Browse for .exe instead…" remains for
-    /// the rare case neither source finds (unregistered, no shortcut).
+    /// currently open windows (`self.sources`, already available, so these
+    /// show immediately) and installed-but-not-running apps
+    /// (`self.add_app_installed`, populated asynchronously -- see
+    /// `add_app_installed_rx`'s doc comment -- so these appear a moment
+    /// later on a machine with many Start Menu shortcuts). An exe already
+    /// open wins the dedup over the same exe found only via a Start Menu
+    /// shortcut. Registers on click -- an open window's path is derived
+    /// from its live process, an installed app's is already known from its
+    /// resolved shortcut. "Browse for .exe instead…" remains for the rare
+    /// case neither source finds (unregistered, no shortcut).
     fn render_add_app_picker(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         ui.add(
             egui::TextEdit::singleline(&mut self.add_app_search)
@@ -230,7 +259,7 @@ impl App {
             .collect();
         let filter = self.add_app_search.to_lowercase();
         let mut seen_exe_names = std::collections::HashSet::new();
-        let mut candidates: Vec<(String, String, AddAppSource)> = Vec::new();
+        let mut candidates: Vec<AddAppCandidate> = Vec::new();
         for src in self
             .sources
             .iter()
@@ -251,11 +280,12 @@ impl App {
             if !seen_exe_names.insert(src.exe_name.to_lowercase()) {
                 continue;
             }
-            candidates.push((
-                crate::sources::display_name_from_exe_name(&src.exe_name),
-                src.exe_name.clone(),
-                AddAppSource::OpenWindow(src.process_id),
-            ));
+            candidates.push(AddAppCandidate {
+                display_name: crate::sources::display_name_from_exe_name(&src.exe_name),
+                exe_name: src.exe_name.clone(),
+                source: AddAppSource::OpenWindow(src.process_id),
+                icon_rgba: src.icon_rgba.clone(),
+            });
         }
         for app in &self.add_app_installed {
             if registered.contains(&app.exe_name) {
@@ -270,15 +300,26 @@ impl App {
             if !seen_exe_names.insert(app.exe_name.to_lowercase()) {
                 continue;
             }
-            candidates.push((
-                app.display_name.clone(),
-                app.exe_name.clone(),
-                AddAppSource::Installed(app.exe_path.clone()),
-            ));
+            candidates.push(AddAppCandidate {
+                display_name: app.display_name.clone(),
+                exe_name: app.exe_name.clone(),
+                source: AddAppSource::Installed(app.exe_path.clone()),
+                icon_rgba: app.icon_rgba.clone(),
+            });
         }
-        candidates.sort_by_key(|c| c.0.to_lowercase());
+        candidates.sort_by_key(|c| c.display_name.to_lowercase());
 
-        if candidates.is_empty() {
+        // Shown even once open-window candidates are already visible above
+        // -- distinct from "no matches", it's telling the user more
+        // (installed-only) results may still be on the way.
+        if self.add_app_installed_rx.is_some() {
+            ui.label(
+                egui::RichText::new(s.add_app_scanning)
+                    .size(TEXT_CAPTION)
+                    .color(TEXT_MUTED),
+            );
+        }
+        if candidates.is_empty() && self.add_app_installed_rx.is_none() {
             let msg = if filter.is_empty() {
                 s.add_app_none_running
             } else {
@@ -292,13 +333,44 @@ impl App {
         }
         let mut picked: Option<(String, AddAppSource)> = None;
         egui::ScrollArea::vertical()
-            .max_height(120.0)
+            .max_height(220.0)
             .id_salt("add_app_picker_scroll")
             .show(ui, |ui| {
-                for (display_name, exe_name, source) in &candidates {
-                    if ui.button(display_name).clicked() {
-                        picked = Some((exe_name.clone(), source.clone()));
+                for candidate in &candidates {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = self
+                        .add_app_icon_textures
+                        .entry(candidate.exe_name.to_lowercase())
+                        && let Some((rgba, w, h)) = &candidate.icon_rgba
+                    {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [*w as usize, *h as usize],
+                            rgba,
+                        );
+                        let tex = ui.ctx().load_texture(
+                            format!("add_app_icon_{}", candidate.exe_name),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        entry.insert(tex);
                     }
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = self
+                            .add_app_icon_textures
+                            .get(&candidate.exe_name.to_lowercase())
+                        {
+                            ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                        }
+                        if ui.button(&candidate.display_name).clicked() {
+                            picked = Some((candidate.exe_name.clone(), candidate.source.clone()));
+                        }
+                        if candidate.is_running() {
+                            ui.label(
+                                egui::RichText::new(s.add_app_running_tag)
+                                    .size(TEXT_CAPTION)
+                                    .color(ACCENT_IDLE),
+                            );
+                        }
+                    });
                 }
             });
         if let Some((exe_name, source)) = picked {

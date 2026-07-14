@@ -297,6 +297,7 @@ pub struct InstalledApp {
     /// `AppAudioSource::exe_name`.
     pub exe_name: String,
     pub exe_path: String,
+    pub icon_rgba: Option<(Vec<u8>, u32, u32)>,
 }
 
 /// Finds installed desktop apps by resolving every `.lnk` shortcut under the
@@ -375,6 +376,7 @@ pub fn enumerate_installed_apps() -> Vec<InstalledApp> {
         apps.push(InstalledApp {
             display_name: display_name.to_string(),
             exe_name: exe_name.to_string(),
+            icon_rgba: extract_exe_icon_rgba(&exe_path),
             exe_path,
         });
     }
