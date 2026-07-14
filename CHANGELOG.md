@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Clicking an available update no longer refuses outright just because Highlight buffering was running -- unlike a manual recording (still blocked, in-progress footage would be lost), buffering is just a rotating background buffer nothing was explicitly started for. It's now stopped and disabled automatically, with a notice popup explaining why, before the update confirmation dialog opens.
+
 ## [v0.5.34] - 2026-07-15
 
 ### Fixed
