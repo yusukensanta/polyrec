@@ -77,6 +77,12 @@ pub struct Strings {
     pub update_working_message: &'static str,
     pub update_failed_prefix: &'static str,
     pub update_blocked_while_recording: &'static str,
+    /// Shown (via the same error-banner mechanism) right before the update
+    /// confirm popup, when clicking Update while Highlight buffering (but no
+    /// manual recording) was active -- buffering is stopped and
+    /// `Config::highlight.enabled` cleared to let the update proceed, since
+    /// unlike a manual recording there's no in-progress footage to lose.
+    pub update_highlight_disabled_notice: &'static str,
 
     // Left panel — source list / audio
     pub capture_source_header: &'static str,
@@ -276,7 +282,8 @@ pub static EN: Strings = Strings {
     update_view_release_notes: "View release notes",
     update_working_message: "Updating… PolyRec will restart shortly.",
     update_failed_prefix: "Update failed: ",
-    update_blocked_while_recording: "Can't update while a recording or Highlight buffering is in progress — stop it first.",
+    update_blocked_while_recording: "Can't update while a recording is in progress — stop it first.",
+    update_highlight_disabled_notice: "Highlight buffering was stopped and disabled to let the update proceed.",
 
     capture_source_header: "CAPTURE SOURCE",
     no_windows_found: "No visible windows found.",
@@ -411,7 +418,8 @@ pub static JA: Strings = Strings {
     update_view_release_notes: "リリースノートを見る",
     update_working_message: "更新中…まもなくPolyRecが再起動します。",
     update_failed_prefix: "更新に失敗しました: ",
-    update_blocked_while_recording: "録画中またはハイライトバッファ動作中は更新できません。先に停止してください。",
+    update_blocked_while_recording: "録画中は更新できません。先に停止してください。",
+    update_highlight_disabled_notice: "更新のため、ハイライトバッファを停止して無効にしました。",
 
     capture_source_header: "キャプチャ ソース",
     no_windows_found: "表示中のウィンドウが見つかりません。",

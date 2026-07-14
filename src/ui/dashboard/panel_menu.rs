@@ -57,18 +57,32 @@ impl App {
                             .on_hover_text(s.update_tooltip)
                             .clicked();
                         if clicked {
-                            // Closing/restarting mid-recording (or mid-Highlight-
-                            // buffering) would corrupt or lose it -- block the
-                            // confirm dialog from even opening in that case,
-                            // same "explain why, don't just silently ignore the
-                            // click" approach as the other blocked-action paths.
-                            if self.session.is_recording()
-                                || self.session.is_paused()
-                                || self.session.is_highlighting()
-                            {
+                            // Closing/restarting mid-recording would corrupt or
+                            // lose it -- block the confirm dialog from even
+                            // opening in that case, same "explain why, don't
+                            // just silently ignore the click" approach as the
+                            // other blocked-action paths. Highlight buffering
+                            // is different: it's just a rotating background
+                            // buffer the user never explicitly started, with
+                            // nothing in-progress to lose, so it's stopped and
+                            // disabled automatically instead of blocking the
+                            // update outright (see
+                            // `update_highlight_disabled_notice`'s doc comment
+                            // for why `config.highlight.enabled` also gets
+                            // cleared, not just the running session).
+                            if self.session.is_recording() || self.session.is_paused() {
                                 self.error_message =
                                     Some(s.update_blocked_while_recording.to_string());
                             } else {
+                                if self.session.is_highlighting() {
+                                    self.session.stop_highlight_buffering(true);
+                                    self.config.highlight.enabled = false;
+                                    if let Err(e) = self.config.save() {
+                                        tracing::error!("failed to save config: {e}");
+                                    }
+                                    self.error_message =
+                                        Some(s.update_highlight_disabled_notice.to_string());
+                                }
                                 self.self_update_state = SelfUpdateState::Confirming(update);
                             }
                         }
