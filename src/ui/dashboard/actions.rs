@@ -255,7 +255,7 @@ impl App {
         let track_count = selected_devices.len() + selected_app_sources.len();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
-            fps: self.config.encode.fps,
+            fps: self.config.encode.fps(),
             resolution_mode: self.config.encode.resolution_mode(),
             bitrate_mode: self.config.encode.bitrate_mode(),
             encoder_mode: self.config.encode.encoder_mode(),
@@ -390,7 +390,7 @@ impl App {
             .collect();
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
-            fps: self.config.encode.fps,
+            fps: self.config.encode.fps(),
             resolution_mode: self.config.encode.resolution_mode(),
             bitrate_mode: self.config.encode.bitrate_mode(),
             encoder_mode: self.config.encode.encoder_mode(),

@@ -204,6 +204,18 @@ impl EncodeConfig {
             _ => EncoderMode::Hardware,
         }
     }
+
+    /// Clamped to `[1, 240]` -- the UI only ever writes 30 or 60, but unlike
+    /// `resolution_mode()`/`bitrate_mode()`'s inputs, raw `fps` was never
+    /// guarded, so a hand-edited `config.toml` with `fps = 0` divided by
+    /// zero on the very first frame of every recording (see
+    /// `encode::writer::RecordingWriter::write_video`'s duration_hns
+    /// calculation). 240 is a generous ceiling, not a real target -- just
+    /// keeps a wildly-out-of-range value from producing a degenerate
+    /// per-frame duration either.
+    pub fn fps(&self) -> u32 {
+        self.fps.clamp(1, 240)
+    }
 }
 
 /// UI-enforced range for `Config::audio_device_gain` values -- 0% (muted) to
@@ -670,6 +682,17 @@ mod tests {
         let mut c = Config::default();
         c.encode.encoder_mode = "not-a-real-mode".into();
         assert!(matches!(c.encode.encoder_mode(), EncoderMode::Hardware));
+    }
+
+    #[test]
+    fn fps_clamps_to_1_240() {
+        let mut c = Config::default();
+        c.encode.fps = 0;
+        assert_eq!(c.encode.fps(), 1);
+        c.encode.fps = 500;
+        assert_eq!(c.encode.fps(), 240);
+        c.encode.fps = 30;
+        assert_eq!(c.encode.fps(), 30);
     }
 
     #[test]
