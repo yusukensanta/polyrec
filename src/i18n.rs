@@ -232,6 +232,10 @@ pub struct Strings {
     // Export controls (inline in the status panel)
     pub recording_saved_label: &'static str,
     pub audio_tracks_header: &'static str,
+    /// Fallback per-track checkbox label when the recorded file has more
+    /// tracks than `last_recording_audio_labels` has names for (e.g. a
+    /// device disconnected mid-recording) -- used as "{track_label_fallback} {n}".
+    pub track_label_fallback: &'static str,
     pub export_button: &'static str,
     pub export_tooltip: &'static str,
     pub open_folder_button: &'static str,
@@ -367,6 +371,7 @@ pub static EN: Strings = Strings {
 
     recording_saved_label: "Recording saved:",
     audio_tracks_header: "AUDIO TRACKS",
+    track_label_fallback: "Track",
     export_button: "Export",
     export_tooltip: "Remux with only the checked audio tracks (no re-encoding)",
     open_folder_button: "Open Folder",
@@ -501,6 +506,7 @@ pub static JA: Strings = Strings {
 
     recording_saved_label: "録画を保存しました:",
     audio_tracks_header: "オーディオ トラック",
+    track_label_fallback: "トラック",
     export_button: "エクスポート",
     export_tooltip: "チェックした音声トラックのみで再多重化します（再エンコードなし）",
     open_folder_button: "フォルダを開く",

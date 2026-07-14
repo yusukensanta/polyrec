@@ -246,6 +246,7 @@ impl SessionManager {
                     video_pause,
                     video_stop,
                     video_tx,
+                    true,
                 )
                 .await
                 {
@@ -569,6 +570,7 @@ impl SessionManager {
                     video_pause,
                     video_stop,
                     video_tx,
+                    false,
                 )
                 .await
                 {
