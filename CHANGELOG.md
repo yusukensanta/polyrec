@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The **⚙ Quality** popup's scroll region was capped too low (400px) -- even the default configuration (Native resolution, Auto bitrate) already clipped the Auto/Manual bitrate choice and the entire Highlight section, with no visible scrollbar to hint more was there. Raised to 520px so the common cases fit without scrolling; only the rare combination of Custom resolution + Manual bitrate + Highlight all expanded at once still needs it.
+
 ## [v0.5.31] - 2026-07-14
 
 ### Changed

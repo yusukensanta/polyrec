@@ -29,9 +29,14 @@ impl App {
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
                 // short window (or more settings added later) scrolls instead
-                // of forcing the popup taller than its parent.
+                // of forcing the popup taller than its parent. 480 (not the
+                // original 400) -- found via a live check that 400 already
+                // clipped the default (no Custom resolution, no Manual
+                // bitrate) content, hiding the Auto/Manual bitrate choice and
+                // the entire Highlight section with no visible scrollbar cue
+                // to suggest more was there.
                 egui::ScrollArea::vertical()
-                    .max_height(400.0)
+                    .max_height(520.0)
                     .show(ui, |ui| {
                         section_header(ui, s.fps_header);
                         ui.horizontal(|ui| {
