@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The "+ Add app" search picker no longer scans the Start Menu on the UI thread -- opening it now shows currently-open windows immediately, with installed-but-not-running apps appearing a moment later (with a "Still searching installed apps…" note in between) instead of the whole popup briefly freezing while every shortcut resolves.
+- Picker rows now show each app's icon, and a green "● Running" tag on candidates that are currently open -- easier to scan a long list, and clear at a glance which ones will start capturing immediately versus once launched.
+
 ## [v0.5.29] - 2026-07-13
 
 ### Fixed

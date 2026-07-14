@@ -21,6 +21,16 @@ impl App {
             self.update_check_rx = None;
         }
 
+        // Poll the add-app picker's background Start Menu scan -- see
+        // `add_app_installed_rx`'s doc comment for why this isn't done
+        // synchronously on the click that opens the picker.
+        if let Some(rx) = &self.add_app_installed_rx
+            && let Ok(apps) = rx.try_recv()
+        {
+            self.add_app_installed = apps;
+            self.add_app_installed_rx = None;
+        }
+
         // Poll export result channel
         let export_result = self
             .export_result_rx

@@ -92,8 +92,25 @@ pub struct App {
     /// picker can also find one that isn't running yet -- scanned once when
     /// the picker opens (`enumerate_installed_apps` walks every `.lnk` under
     /// two Start Menu folders and resolves each via COM, too slow to redo
-    /// every frame), not refreshed again until it's reopened.
+    /// every frame), not refreshed again until it's reopened. Populated
+    /// asynchronously (see `add_app_installed_rx`) rather than on the UI
+    /// thread -- open-window candidates still show immediately in the
+    /// meantime, since those come from the already-available `sources`.
     add_app_installed: Vec<crate::sources::InstalledApp>,
+    /// One-shot channel for the background `enumerate_installed_apps` scan
+    /// kicked off when the add-app picker opens -- polled in
+    /// `poll_background_work`, same pattern as `update_check_rx`. `None`
+    /// once the result has arrived (or the picker was never opened).
+    add_app_installed_rx: Option<mpsc::Receiver<Vec<crate::sources::InstalledApp>>>,
+    /// Textures for add-app picker candidates -- keyed by lowercased
+    /// exe_name (not list index, unlike `app_audio_icon_textures`) since the
+    /// candidate list's order and membership shift on every keystroke as
+    /// the search filter changes; keying by identity means a texture
+    /// already loaded for a still-matching candidate is never needlessly
+    /// reloaded. Persists for the app's lifetime once loaded, same
+    /// "clear on list change, rebuild lazily" spirit as the other icon
+    /// caches, just never needing the clear since the key is stable.
+    add_app_icon_textures: std::collections::HashMap<String, egui::TextureHandle>,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -209,6 +226,8 @@ impl App {
             show_add_app_picker: false,
             add_app_search: String::new(),
             add_app_installed: Vec::new(),
+            add_app_installed_rx: None,
+            add_app_icon_textures: std::collections::HashMap::new(),
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
