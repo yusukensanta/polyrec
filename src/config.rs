@@ -282,7 +282,9 @@ impl Config {
     }
 
     /// Adds `exe_name` to the Applications audio list -- the only way an
-    /// app ends up there at all, via "+ Add app"'s file browser. The
+    /// app ends up there at all, via "+ Add app"'s in-app search picker
+    /// (either a running window or an installed-but-not-running app found
+    /// via Start Menu shortcut) or its native-file-browser fallback. The
     /// Applications list itself only ever contains registered apps (see
     /// `actions::build_app_audio_sources`'s doc comment) -- there's no
     /// separate ephemeral "checked but not remembered" state, checking one

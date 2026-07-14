@@ -30,16 +30,10 @@ pub(super) fn build_app_audio_sources(config: &Config) -> Vec<AppAudioSource> {
             if let Some(matched) = live.iter().find(|s| s.exe_name == reg.exe_name) {
                 matched.clone()
             } else {
-                let display_name = reg
-                    .exe_name
-                    .strip_suffix(".exe")
-                    .or_else(|| reg.exe_name.strip_suffix(".EXE"))
-                    .unwrap_or(&reg.exe_name)
-                    .to_string();
                 AppAudioSource {
                     process_ids: Vec::new(),
                     exe_name: reg.exe_name.clone(),
-                    display_name,
+                    display_name: crate::sources::display_name_from_exe_name(&reg.exe_name),
                     icon_rgba: crate::sources::extract_exe_icon_rgba(&reg.exe_path),
                 }
             }
