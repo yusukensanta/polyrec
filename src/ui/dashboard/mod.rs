@@ -134,6 +134,17 @@ pub struct App {
     /// there's nothing a track-selection export could meaningfully remove.
     export_available_tracks: usize,
     export_track_selection: Vec<bool>,
+    /// Display label for each audio track actually used in the last
+    /// finished manual recording (devices, then app-audio sources, in the
+    /// same order `start_recording_with_source` assigns track ids) --
+    /// NOT the live system device list (`audio_devices`), which reflects
+    /// whatever's currently plugged in and has no entries for app-audio
+    /// sources at all. The export checkbox list zips this against
+    /// `export_track_selection` by position; a length mismatch (e.g. a
+    /// device disconnected mid-recording, producing fewer tracks than were
+    /// selected) falls back to a generic "Track N" label for the unlabeled
+    /// tail rather than panicking or misattributing a name.
+    last_recording_audio_labels: Vec<String>,
     export_state: ExportState,
     export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     hotkey_listener: Option<HotkeyListener>,
@@ -239,6 +250,7 @@ impl App {
             sources_checked_at: None,
             export_available_tracks: 0,
             export_track_selection,
+            last_recording_audio_labels: Vec::new(),
             export_state: ExportState::Idle,
             export_result_rx: None,
             hotkey_listener: Some(hotkey_listener),

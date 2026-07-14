@@ -153,6 +153,7 @@ pub async fn run_video_capture(
     pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<VideoFrame>,
+    show_border: bool,
 ) -> Result<(), AppError> {
     unsafe {
         windows::Win32::System::Com::CoInitializeEx(
@@ -206,6 +207,18 @@ pub async fn run_video_capture(
     let session = frame_pool
         .CreateCaptureSession(&item)
         .map_err(|e| AppError::Capture(format!("CreateCaptureSession: {e}")))?;
+
+    // Windows draws its own colored border around a window/monitor with an
+    // active capture session -- desired for a manual recording (`show_border
+    // = true`, an explicit signal the user asked for), but highlight
+    // buffering runs a capture session continuously in the background
+    // whenever `config.highlight.enabled` is on, with no recording actually
+    // started -- showing the same OS border for that made it indistinguishable
+    // from "recording right now". `IGraphicsCaptureSession3` (and thus
+    // `SetIsBorderRequired`) only exists on Windows 11 24H2+; the cast/call
+    // fails harmlessly on older Windows, which just keeps the OS default
+    // (border shown) since there's no way to suppress it there.
+    let _ = session.SetIsBorderRequired(show_border);
 
     session
         .StartCapture()

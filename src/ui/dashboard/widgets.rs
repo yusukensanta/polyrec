@@ -66,8 +66,9 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
 }
 
-/// Icon for an audio-device checkbox label — used both in the source panel's
-/// device list and the export dialog's per-track selection.
+/// Icon for an audio-device checkbox label — used in the source panel's
+/// device list, and by `actions::start_recording_with_source` to build the
+/// export dialog's per-track labels at record-start time.
 pub(super) fn audio_device_icon(dev: &AudioDevice) -> &'static str {
     if dev.is_loopback { "🔊" } else { "🎙" }
 }

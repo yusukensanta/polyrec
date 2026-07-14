@@ -4,9 +4,7 @@ use super::theme::{
     TEXT_BUTTON, TEXT_CAPTION, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
 };
 use super::util::open_folder;
-use super::widgets::{
-    accent_button, audio_device_icon, centered_action_row, format_bytes_free, section_header,
-};
+use super::widgets::{accent_button, centered_action_row, format_bytes_free, section_header};
 use super::{App, ExportState, HighlightSaveState};
 use crate::encode::remux::remux;
 use crate::i18n::Strings;
@@ -424,13 +422,12 @@ impl App {
         }
 
         section_header(ui, s.audio_tracks_header);
-        for (i, dev) in self.audio_devices.iter().enumerate() {
-            if i < self.export_track_selection.len() {
-                ui.checkbox(
-                    &mut self.export_track_selection[i],
-                    format!("{} {}", audio_device_icon(dev), dev.name),
-                );
-            }
+        for i in 0..self.export_track_selection.len() {
+            let label = match self.last_recording_audio_labels.get(i) {
+                Some(name) => name.clone(),
+                None => format!("{} {}", s.track_label_fallback, i + 1),
+            };
+            ui.checkbox(&mut self.export_track_selection[i], label);
         }
 
         ui.add_space(8.0);

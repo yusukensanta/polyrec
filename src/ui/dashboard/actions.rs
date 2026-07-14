@@ -1,10 +1,11 @@
+use super::widgets::audio_device_icon;
 use super::{App, HighlightSaveState};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
 use crate::session::{EncodeSettings, state::SessionAction};
 use crate::sources::enumerate_sources;
-use crate::types::{AppAudioSource, CaptureSource};
+use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -57,6 +58,20 @@ fn app_audio_fingerprint(sources: &[AppAudioSource]) -> Vec<(String, Vec<u32>)> 
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
+}
+
+/// Display label for each audio track a recording with these sources will
+/// produce, in the same order `session::start_capture` assigns track ids
+/// (devices first, then app-audio sources) -- see
+/// `App::last_recording_audio_labels`'s field doc for why the export dialog
+/// needs this captured at record-start time instead of reading it back from
+/// the live device list.
+fn build_audio_labels(devices: &[AudioDevice], app_sources: &[AppAudioSource]) -> Vec<String> {
+    devices
+        .iter()
+        .map(|dev| format!("{} {}", audio_device_icon(dev), dev.name))
+        .chain(app_sources.iter().map(|src| src.display_name.clone()))
+        .collect()
 }
 
 impl App {
@@ -253,6 +268,7 @@ impl App {
             .map(|src| self.config.app_audio_gain(&src.exe_name))
             .collect();
         let track_count = selected_devices.len() + selected_app_sources.len();
+        let audio_labels = build_audio_labels(&selected_devices, &selected_app_sources);
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps(),
@@ -281,6 +297,7 @@ impl App {
                 );
                 self.session.apply(SessionAction::Start);
                 self.recording_start = Some(Instant::now());
+                self.last_recording_audio_labels = audio_labels;
             }
             Err(e) => {
                 tracing::error!("start_capture failed for source={source_title:?}: {e}");
@@ -459,5 +476,38 @@ fn foreground_capture_source() -> Option<CaptureSource> {
             return None;
         }
         Some(crate::sources::capture_source_for_hwnd(hwnd))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mic() -> AudioDevice {
+        AudioDevice {
+            id: "mic-id".into(),
+            name: "Mic".into(),
+            is_loopback: false,
+        }
+    }
+
+    fn app_source(display_name: &str) -> AppAudioSource {
+        AppAudioSource {
+            process_ids: vec![1234],
+            exe_name: "game.exe".into(),
+            display_name: display_name.into(),
+            icon_rgba: None,
+        }
+    }
+
+    #[test]
+    fn build_audio_labels_orders_devices_before_app_sources() {
+        let labels = build_audio_labels(&[mic()], &[app_source("Game")]);
+        assert_eq!(labels, vec!["🎙 Mic".to_string(), "Game".to_string()]);
+    }
+
+    #[test]
+    fn build_audio_labels_empty_when_nothing_selected() {
+        assert!(build_audio_labels(&[], &[]).is_empty());
     }
 }

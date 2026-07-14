@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The post-recording export track-selection checkboxes listed whatever's in the live system audio-device list, not what the recording actually used -- app-audio sources (e.g. a game captured via per-app loopback) never appeared at all, since they aren't system devices, and with 2+ devices installed the checkbox shown for a given track could easily be the wrong device's name. Unchecking a track to exclude it from export could silently do nothing meaningful, or exclude the wrong track. The export dialog now labels each checkbox from what was actually selected for that specific recording (devices, then app-audio sources, matching track order), falling back to a generic "Track N" label only if the file ends up with more tracks than were selected (e.g. a device disconnecting mid-recording).
+- Windows draws its own colored border around a capture target while its window has focus. Highlight buffering runs a capture session continuously in the background whenever enabled, with no recording actually started, so seeing this border made it look like a manual recording was in progress. Manual recordings still show it; highlight buffering now suppresses it (Windows 11 24H2+; on older Windows there's no way to suppress it, so the border still shows during highlight buffering there).
+
 ## [v0.5.33] - 2026-07-14
 
 ### Fixed
