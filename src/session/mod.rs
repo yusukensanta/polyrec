@@ -339,6 +339,11 @@ impl SessionManager {
         // process_ids) contributes no tracks at all.
         let mut next_app_track_id = device_track_count as u32;
         for (i, app_source) in app_audio_sources.into_iter().enumerate() {
+            tracing::info!(
+                "AppAudio diagnostic: source={} process_ids={:?} (empty means no capture task spawns for it at all)",
+                app_source.exe_name,
+                app_source.process_ids
+            );
             let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
             for &target_pid in &app_source.process_ids {
                 let track_id = TrackId::new(next_app_track_id);
@@ -655,6 +660,11 @@ impl SessionManager {
         // mixer here to merge separately captured PCM streams into one).
         let mut next_app_track_id = device_track_count as u32;
         for (i, app_source) in app_audio_sources.into_iter().enumerate() {
+            tracing::info!(
+                "AppAudio diagnostic: source={} process_ids={:?} (empty means no capture task spawns for it at all)",
+                app_source.exe_name,
+                app_source.process_ids
+            );
             let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
             for &target_pid in &app_source.process_ids {
                 let track_id = TrackId::new(next_app_track_id);

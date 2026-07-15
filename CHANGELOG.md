@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A recording with multiple audio tracks (e.g. mic + system audio) could sound completely silent in a player that only plays the first audio track by default -- Media Foundation doesn't guarantee the finished file's physical track order matches recording order, so which track ended up "first" was unpredictable. Selected devices are now ordered with system/loopback audio (what most people actually want to hear by default, e.g. game sound) ahead of the mic before recording starts -- app-audio sources already tend to land after device tracks in practice (activating one needs an async setup step a device capture doesn't), so this is the one remaining lever that reliably helps. Not a hard guarantee for every case, but meaningfully improves the odds the default track is the one you want.
+
 ## [v0.5.37] - 2026-07-15
 
 ### Fixed

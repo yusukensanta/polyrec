@@ -260,13 +260,25 @@ impl App {
 
     pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
         let source_title = source.window_title.clone();
-        let selected_devices: Vec<_> = self
+        let mut selected_devices: Vec<_> = self
             .audio_devices
             .iter()
             .zip(self.selected_audio.iter())
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
+        // The MP4 container's physical track order doesn't reliably follow
+        // AddStream() call order for a live (real-time-encoded) recording --
+        // see writer.rs/remux.rs -- but process-loopback (app-audio) tracks
+        // still consistently land after device tracks in practice, since
+        // activating one needs an async WASAPI round-trip a plain device
+        // capture doesn't, so it starts flushing samples later regardless of
+        // call order. That leaves device-vs-device order as the one lever
+        // actually worth pulling: putting loopback (system/game audio, what
+        // users overwhelmingly want as "the" track) ahead of the mic
+        // improves the odds it's what a player defaults to without explicit
+        // track selection, even though nothing here can fully guarantee it.
+        selected_devices.sort_by_key(|dev| !dev.is_loopback);
         let selected_gains: Vec<f32> = selected_devices
             .iter()
             .map(|dev| self.config.audio_gain(&dev.id))
@@ -398,13 +410,15 @@ impl App {
     }
 
     pub(super) fn start_highlight_buffering_for(&mut self, source: CaptureSource) {
-        let selected_devices: Vec<_> = self
+        let mut selected_devices: Vec<_> = self
             .audio_devices
             .iter()
             .zip(self.selected_audio.iter())
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
+        // See start_recording_with_source's identical sort for why.
+        selected_devices.sort_by_key(|dev| !dev.is_loopback);
         let selected_gains: Vec<f32> = selected_devices
             .iter()
             .map(|dev| self.config.audio_gain(&dev.id))
