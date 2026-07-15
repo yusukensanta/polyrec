@@ -14,7 +14,8 @@ impl App {
             return;
         }
 
-        let track_count = self.selected_audio.iter().filter(|&&b| b).count();
+        let track_count = self.selected_audio.iter().filter(|&&b| b).count()
+            + self.selected_app_audio.iter().filter(|&&b| b).count();
         let elapsed_secs = self
             .session
             .active

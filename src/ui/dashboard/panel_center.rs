@@ -87,7 +87,8 @@ impl App {
                 ui.add_space(4.0);
 
                 // Stats row
-                let track_count = self.selected_audio.iter().filter(|&&b| b).count();
+                let track_count = self.selected_audio.iter().filter(|&&b| b).count()
+                    + self.selected_app_audio.iter().filter(|&&b| b).count();
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!("{track_count} {}", s.tracks_word))

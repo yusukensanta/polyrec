@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The "N tracks" counter shown while recording (and in the overlay HUD) only ever counted checked system audio devices -- checked app-audio sources (e.g. a game captured via per-app loopback) never added to it, so recording with an app-audio source selected always undercounted. Both now count devices and app-audio sources together, matching the audio popup's own "{n} selected" summary, which already did this correctly.
+
 ## [v0.5.35] - 2026-07-15
 
 ### Changed
