@@ -66,11 +66,26 @@ fn app_audio_fingerprint(sources: &[AppAudioSource]) -> Vec<(String, Vec<u32>)> 
 /// `App::last_recording_audio_labels`'s field doc for why the export dialog
 /// needs this captured at record-start time instead of reading it back from
 /// the live device list.
+///
+/// One app source can expand to several tracks: `session::start_capture`
+/// spawns one capture task (and track id) per entry in
+/// `AppAudioSource::process_ids`, not one per source -- two independent top-
+/// level processes of the same exe (e.g. Discord's main + helper processes,
+/// or two Chrome windows) each get their own track. Repeating the display
+/// name `process_ids.len()` times (zero for a registered-but-inactive
+/// source) keeps this list's length and order matching the real tracks
+/// exactly; emitting one label per source regardless of process count would
+/// desync every label after the first multi-process source from its actual
+/// track.
 fn build_audio_labels(devices: &[AudioDevice], app_sources: &[AppAudioSource]) -> Vec<String> {
     devices
         .iter()
         .map(|dev| format!("{} {}", audio_device_icon(dev), dev.name))
-        .chain(app_sources.iter().map(|src| src.display_name.clone()))
+        .chain(
+            app_sources.iter().flat_map(|src| {
+                std::iter::repeat_n(src.display_name.clone(), src.process_ids.len())
+            }),
+        )
         .collect()
 }
 
@@ -492,8 +507,12 @@ mod tests {
     }
 
     fn app_source(display_name: &str) -> AppAudioSource {
+        app_source_with_pids(display_name, vec![1234])
+    }
+
+    fn app_source_with_pids(display_name: &str, process_ids: Vec<u32>) -> AppAudioSource {
         AppAudioSource {
-            process_ids: vec![1234],
+            process_ids,
             exe_name: "game.exe".into(),
             display_name: display_name.into(),
             icon_rgba: None,
@@ -509,5 +528,41 @@ mod tests {
     #[test]
     fn build_audio_labels_empty_when_nothing_selected() {
         assert!(build_audio_labels(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn build_audio_labels_repeats_name_once_per_process_id() {
+        // session::start_capture spawns one track per pid, not one per
+        // AppAudioSource -- e.g. Discord's main + helper processes, or two
+        // independent windows of the same exe.
+        let labels = build_audio_labels(
+            &[mic()],
+            &[app_source_with_pids("Discord", vec![111, 222, 333])],
+        );
+        assert_eq!(
+            labels,
+            vec![
+                "🎙 Mic".to_string(),
+                "Discord".to_string(),
+                "Discord".to_string(),
+                "Discord".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_audio_labels_contributes_nothing_for_a_registered_but_inactive_source() {
+        // Empty process_ids (registered but not currently running) spawns no
+        // capture task in session::start_capture, so it must contribute no
+        // label either -- otherwise a later source's label would land on the
+        // wrong track.
+        let labels = build_audio_labels(
+            &[mic()],
+            &[
+                app_source_with_pids("Idle App", vec![]),
+                app_source_with_pids("Live App", vec![42]),
+            ],
+        );
+        assert_eq!(labels, vec!["🎙 Mic".to_string(), "Live App".to_string()]);
     }
 }
