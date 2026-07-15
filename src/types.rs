@@ -87,9 +87,14 @@ pub struct AppAudioSource {
     /// per pid, so two independent instances of the same exe (not
     /// parent/child) share one checkbox/slider instead of needing both
     /// toggled separately. Each pid gets its own Process Loopback Capture
-    /// task at recording start, all feeding the same track (see
-    /// `session::start_capture`'s per-app spawn loop) -- capture, not this
-    /// struct, is where the "many processes, one track" merge happens.
+    /// task AND its own recording track at recording start (see
+    /// `session::start_capture`'s per-app spawn loop, and
+    /// `actions::build_audio_labels`'s doc comment for why anything deriving
+    /// per-track state from this list must expand by `process_ids.len()`,
+    /// not treat one `AppAudioSource` as one track) -- genuinely mixing
+    /// separately captured PCM streams into one track would need a real-time
+    /// mixer this doesn't have, so multiple processes stay as separate
+    /// tracks instead of merging into a single one.
     ///
     /// Empty for a `Config::registered_app_audio` entry that isn't
     /// currently running: still shown (greyed, see `render_audio_popup`)
