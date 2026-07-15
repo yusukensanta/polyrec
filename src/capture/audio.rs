@@ -488,6 +488,23 @@ async unsafe fn run_capture_loop(
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
+        // One-shot diagnostic for a report of app-audio tracks recording as
+        // silence despite the source app audibly producing sound (mic/device
+        // tracks unaffected) -- distinguishes "WASAPI itself reports this
+        // buffer as silent" (AUDCLNT_BUFFERFLAGS_SILENT, meaning the process-
+        // loopback session genuinely isn't seeing the target's real audio
+        // graph -- a Windows/targeting issue, not something fixable here)
+        // from "WASAPI handed us a real, non-silent buffer but every sample
+        // we read out is still zero" (a parsing bug in this loop). Logged
+        // once per track after ~1s of buffers so it doesn't spam.
+        const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 2;
+        let mut diag_buffers_seen: u32 = 0;
+        let mut diag_any_silent_flag = false;
+        let mut diag_max_abs_sample: f32 = 0.0;
+        let mut diag_logged = false;
+        let diag_start = std::time::Instant::now();
+        let mut diag_zero_buffer_warned = false;
+
         loop {
             if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
@@ -519,6 +536,22 @@ async unsafe fn run_capture_loop(
                         .ReleaseBuffer(frames_available)
                         .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
 
+                    if !diag_logged {
+                        if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
+                            diag_any_silent_flag = true;
+                        }
+                        for &s in &samples {
+                            diag_max_abs_sample = diag_max_abs_sample.max(s.abs());
+                        }
+                        diag_buffers_seen += 1;
+                        if diag_buffers_seen >= 100 {
+                            diag_logged = true;
+                            tracing::info!(
+                                "AudioCapture[{track_id:?}] diagnostic (first ~{diag_buffers_seen} buffers): any_silent_flag={diag_any_silent_flag} max_abs_sample={diag_max_abs_sample:.6}"
+                            );
+                        }
+                    }
+
                     // Always release buffer first (above), then discard if paused.
                     if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
@@ -542,6 +575,24 @@ async unsafe fn run_capture_loop(
                     }
                 }
                 Ok(()) => {
+                    // Companion to the diagnostic above: if this track has
+                    // gone 5+ seconds without GetBuffer ever reporting
+                    // frames_available > 0 even once, WriteSample is never
+                    // called for it at all -- which (per the export-dialog
+                    // report this is chasing) means the track can end up
+                    // entirely absent from the finished file, not just
+                    // silent. One-shot so it doesn't spam a track that's
+                    // just between sounds.
+                    if !diag_zero_buffer_warned
+                        && diag_buffers_seen == 0
+                        && diag_start.elapsed() >= std::time::Duration::from_secs(5)
+                    {
+                        diag_zero_buffer_warned = true;
+                        tracing::warn!(
+                            "AudioCapture[{track_id:?}] diagnostic: no buffer with frames_available > 0 in {:.1}s -- this track may end up with zero samples written",
+                            diag_start.elapsed().as_secs_f32()
+                        );
+                    }
                     // No data yet; yield to the async runtime
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }
