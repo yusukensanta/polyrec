@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.37] - 2026-07-15
+
 ### Fixed
 
 - The export dialog's per-track labels (added in v0.5.34) desynced from the actual tracks whenever an app-audio source had more than one process -- e.g. Discord's main + helper processes, or two windows of the same exe -- since one recording track gets created per process id, not one per app-audio source. Labeling built only one label per source regardless, so every label after the first multi-process source landed on the wrong track: a real app-audio track could show a generic "Track N" fallback (looking like it wasn't captured at all) while its actual name ended up on an unrelated track. Labels now repeat once per process id, matching how the tracks are actually created.
