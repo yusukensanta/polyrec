@@ -1489,6 +1489,244 @@ mod tests {
         println!("output size: {} bytes", metadata.len());
     }
 
+    /// DIAGNOSTIC (temporary): reproduces the reported "Saving recording..."
+    /// hang -- 2 real devices + 1 app-audio source (3 audio tracks total),
+    /// stopped almost immediately (well inside process-loopback's ~5s async
+    /// activation window, so the app-audio track likely never receives a
+    /// single sample). Times `stop_capture()` + finalize under an overall
+    /// `tokio::time::timeout` so a genuine hang fails the test instead of
+    /// wedging the run forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn diag_stop_soon_after_start_with_three_audio_tracks_does_not_hang() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+        use crate::types::AppAudioSource;
+
+        let sources = enumerate_sources();
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+        println!("real audio devices: {}", audio_devices.len());
+
+        // Our own test process: guaranteed running, guaranteed to emit zero
+        // audio -- the app-audio slot that never gets a first buffer.
+        let app_audio_sources = vec![AppAudioSource {
+            process_ids: vec![std::process::id()],
+            exe_name: "diag-self.exe".to_string(),
+            display_name: "diag-self".to_string(),
+            icon_rgba: None,
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        sm.start_capture(
+            source,
+            audio_devices,
+            vec![],
+            app_audio_sources,
+            vec![],
+            false,
+            Arc::clone(&frame_count),
+            dir.path(),
+            EncodeSettings::default(),
+        )
+        .expect("start_capture failed");
+
+        // Stop almost immediately -- well inside the ~5s process-loopback
+        // activation window.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let stop_started = std::time::Instant::now();
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "stop+finalize did not complete within 30s (elapsed before timeout: {:.1}s) -- reproduces the reported hang",
+                    stop_started.elapsed().as_secs_f32()
+                )
+            })
+            .expect("recorder task panicked/aborted");
+        let finalized_path = result.expect("finalize() returned an error");
+
+        println!(
+            "stop+finalize took {:.2}s",
+            stop_started.elapsed().as_secs_f32()
+        );
+        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
+        println!("output size: {} bytes", metadata.len());
+    }
+
+    /// DIAGNOSTIC (temporary): same quick-stop shape, but the app-audio slot
+    /// is one `AppAudioSource` with TWO process_ids (mimics a real
+    /// multi-process app like Discord, where audio comes from more than one
+    /// top-level process) -- 2 devices + 2 app-audio pids = 4 real audio
+    /// tracks, stopped almost immediately.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn diag_stop_soon_after_start_with_four_tracks_multi_pid_app_does_not_hang() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+        use crate::types::AppAudioSource;
+
+        let sources = enumerate_sources();
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+        println!("real audio devices: {}", audio_devices.len());
+
+        #[allow(clippy::zombie_processes)]
+        let mut player = std::process::Command::new("powershell")
+            .args([
+                "-c",
+                "for ($i=0; $i -lt 20; $i++) { (New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync() }",
+            ])
+            .spawn()
+            .expect("failed to spawn powershell sound player");
+        let player_pid = player.id();
+        println!(
+            "sound player pid: {player_pid}, silent pid: {}",
+            std::process::id()
+        );
+
+        // One AppAudioSource, two process_ids: one real active player, one
+        // guaranteed-silent (our own process) -- mirrors a multi-process app
+        // where only one of its processes is actually the one making sound.
+        let app_audio_sources = vec![AppAudioSource {
+            process_ids: vec![player_pid, std::process::id()],
+            exe_name: "diag-multi.exe".to_string(),
+            display_name: "diag-multi".to_string(),
+            icon_rgba: None,
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        sm.start_capture(
+            source,
+            audio_devices,
+            vec![],
+            app_audio_sources,
+            vec![],
+            false,
+            Arc::clone(&frame_count),
+            dir.path(),
+            EncodeSettings::default(),
+        )
+        .expect("start_capture failed");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let stop_started = std::time::Instant::now();
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle).await;
+        let _ = player.kill();
+        let result = result
+            .unwrap_or_else(|_| {
+                panic!(
+                    "stop+finalize did not complete within 30s (elapsed before timeout: {:.1}s) -- reproduces the reported hang",
+                    stop_started.elapsed().as_secs_f32()
+                )
+            })
+            .expect("recorder task panicked/aborted");
+        let finalized_path = result.expect("finalize() returned an error");
+
+        println!(
+            "stop+finalize took {:.2}s",
+            stop_started.elapsed().as_secs_f32()
+        );
+        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
+        println!("output size: {} bytes", metadata.len());
+    }
+
+    /// DIAGNOSTIC (temporary): same shape as the "quick stop" repro above,
+    /// but the app-audio track is a real, continuously sound-producing
+    /// process (a looped WAV via a spawned powershell) for a longer (~10s)
+    /// recording -- covers the case the quick-stop version can't: 3
+    /// genuinely active concurrent audio encodes (2 devices + 1 app) plus
+    /// hardware video, long enough for a real recording_tx backlog to build
+    /// if encoding can't keep up with real time on this machine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn diag_stop_after_longer_recording_with_three_active_audio_tracks() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+        use crate::types::AppAudioSource;
+
+        let sources = enumerate_sources();
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let audio_devices = enumerate_audio_devices().unwrap_or_default();
+        println!("real audio devices: {}", audio_devices.len());
+
+        // Loops a short WAV for the whole test so the app-audio track has
+        // continuous real signal, not a one-shot blip.
+        #[allow(clippy::zombie_processes)]
+        let mut player = std::process::Command::new("powershell")
+            .args([
+                "-c",
+                "for ($i=0; $i -lt 20; $i++) { (New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync() }",
+            ])
+            .spawn()
+            .expect("failed to spawn powershell sound player");
+        let player_pid = player.id();
+        println!("sound player pid: {player_pid}");
+
+        let app_audio_sources = vec![AppAudioSource {
+            process_ids: vec![player_pid],
+            exe_name: "diag-player.exe".to_string(),
+            display_name: "diag-player".to_string(),
+            icon_rgba: None,
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        sm.start_capture(
+            source,
+            audio_devices,
+            vec![],
+            app_audio_sources,
+            vec![],
+            false,
+            Arc::clone(&frame_count),
+            dir.path(),
+            EncodeSettings::default(),
+        )
+        .expect("start_capture failed");
+
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        let stop_started = std::time::Instant::now();
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(60), handle).await;
+        let _ = player.kill();
+        let result = result
+            .unwrap_or_else(|_| {
+                panic!(
+                    "stop+finalize did not complete within 60s (elapsed before timeout: {:.1}s) -- reproduces the reported hang",
+                    stop_started.elapsed().as_secs_f32()
+                )
+            })
+            .expect("recorder task panicked/aborted");
+        let finalized_path = result.expect("finalize() returned an error");
+
+        println!(
+            "stop+finalize took {:.2}s",
+            stop_started.elapsed().as_secs_f32()
+        );
+        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
+        println!("output size: {} bytes", metadata.len());
+    }
+
     /// End-to-end: real window + real audio devices through the actual
     /// `start_highlight_buffering`/`save_highlight` wiring the GUI uses (not
     /// just the isolated `highlight`/`encode::highlight_export` unit tests).
