@@ -113,6 +113,12 @@ impl App {
                     self.last_output_path = Some(path);
                     if disk_full {
                         self.error_message = Some(s.disk_full_mid_recording.to_string());
+                    } else if let Some(msg) = audio_tracks_missing_message(
+                        s,
+                        self.export_available_tracks,
+                        self.last_recording_audio_labels.len(),
+                    ) {
+                        self.error_message = Some(msg);
                     }
                 }
                 Ok(Err(e)) => {
@@ -179,5 +185,65 @@ impl App {
             Ok(Err(e)) => HighlightSaveState::Failed(e.to_string()),
             Err(e) => HighlightSaveState::Failed(e.to_string()),
         };
+    }
+}
+
+/// `None` when `actual >= expected` (nothing missing, or the recording
+/// legitimately ended up with more tracks than expected -- see
+/// `track_label_fallback`'s doc comment for that case, which this doesn't
+/// need to warn about). Otherwise fills in `s.audio_tracks_missing_template`'s
+/// `{actual}`/`{expected}` placeholders.
+fn audio_tracks_missing_message(s: &Strings, actual: usize, expected: usize) -> Option<String> {
+    if actual >= expected {
+        return None;
+    }
+    Some(
+        s.audio_tracks_missing_template
+            .replace("{actual}", &actual.to_string())
+            .replace("{expected}", &expected.to_string()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    #[test]
+    fn audio_tracks_missing_message_none_when_all_tracks_present() {
+        let s = Lang::En.strings();
+        assert!(audio_tracks_missing_message(s, 3, 3).is_none());
+    }
+
+    #[test]
+    fn audio_tracks_missing_message_none_when_actual_exceeds_expected() {
+        let s = Lang::En.strings();
+        assert!(audio_tracks_missing_message(s, 4, 3).is_none());
+    }
+
+    #[test]
+    fn audio_tracks_missing_message_none_when_nothing_was_expected() {
+        let s = Lang::En.strings();
+        assert!(audio_tracks_missing_message(s, 0, 0).is_none());
+    }
+
+    #[test]
+    fn audio_tracks_missing_message_fills_in_both_counts() {
+        let s = Lang::En.strings();
+        let msg = audio_tracks_missing_message(s, 2, 4).expect("expected a message");
+        assert!(msg.contains("2 of 4"), "message was: {msg}");
+        assert!(!msg.contains('{'), "unreplaced placeholder in: {msg}");
+    }
+
+    #[test]
+    fn audio_tracks_missing_message_has_no_unreplaced_placeholders_in_every_language() {
+        for lang in [Lang::En, Lang::Ja] {
+            let msg =
+                audio_tracks_missing_message(lang.strings(), 1, 2).expect("expected a message");
+            assert!(
+                !msg.contains('{'),
+                "{lang:?}: unreplaced placeholder in: {msg}"
+            );
+        }
     }
 }
