@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.40] - 2026-07-17
+
 ### Added
 
 - Export now has a "Mix into one track" checkbox -- combines the checked audio tracks into a single track instead of keeping each separate, for platforms like YouTube that only ever play one audio track from an uploaded file and silently ignore the rest.
