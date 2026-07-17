@@ -4,11 +4,13 @@ use crate::error::AppError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MF_MT_AUDIO_BITS_PER_SAMPLE,
-    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFAudioFormat_PCM, MFCreateMediaType,
-    MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video,
-    MFSTARTUP_FULL, MFShutdown, MFStartup,
+    IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
+    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
+    MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType, MFCreateSinkWriterFromURL,
+    MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown,
+    MFStartup,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::core::HSTRING;
@@ -323,7 +325,30 @@ unsafe fn do_mix(
         let mixed = sum_and_normalize(&decoded_tracks, mix_channels);
 
         // ── Sink writer: video passthrough + one transcoded (PCM->AAC) audio stream ──
-        let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, None)
+        //
+        // Unlike `do_remux`'s pure compressed-passthrough sink writer (no
+        // encoder MFT involved, so this never bites it), this sink writer
+        // does real PCM->AAC transcoding for the audio stream -- and
+        // IMFSinkWriter's default behavior throttles WriteSample to real-
+        // time pace whenever an actual encoder is in the pipeline, on the
+        // assumption the caller is a live recording. For this offline batch
+        // job that meant writing a mixed track took as long as the
+        // recording itself (confirmed against a real ~5.5min file: decode +
+        // mix finished in 1.3s, then the write loop alone ran past a minute
+        // with ~0s of CPU time consumed in that window -- sleeping, not
+        // computing). Disabling it here writes as fast as the CPU can go.
+        let mut attrs_opt: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs_opt, 2)
+            .map_err(|e| AppError::Encode(format!("MFCreateAttributes: {e}")))?;
+        let attrs =
+            attrs_opt.ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
+        attrs
+            .SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)
+            .map_err(|e| AppError::Encode(format!("SetUINT32 disable_throttling: {e}")))?;
+        attrs
+            .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
+            .map_err(|e| AppError::Encode(format!("SetUINT32 hw_transforms: {e}")))?;
+        let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, Some(&attrs))
             .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
         let video_sink = writer
             .AddStream(&video_type)
@@ -625,6 +650,77 @@ mod tests {
             count_audio_tracks(&dest).expect("count_audio_tracks failed"),
             1,
             "mixed output should have exactly one audio track"
+        );
+    }
+
+    /// Regression test for a real bug: `mix_tracks`'s sink writer left
+    /// `MF_SINK_WRITER_DISABLE_THROTTLING` unset, so `IMFSinkWriter`
+    /// defaulted to pacing `WriteSample` to real-time speed (its assumption
+    /// for any pipeline with an active encoder MFT, which the mixed audio
+    /// track always has). A real ~5.5min recording took 15+ minutes and
+    /// never finished before this was found and fixed -- decode+mix alone
+    /// took 1.3s, confirming the write loop itself was the bottleneck.
+    /// Bounded by a timeout thread (not an inline call) so a real
+    /// regression fails fast instead of hanging the test run.
+    #[test]
+    fn mix_tracks_does_not_throttle_to_real_time_on_a_longer_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("longer_two_track_source.mp4");
+        let writer = RecordingWriter::new(
+            &path,
+            64,
+            64,
+            30,
+            "h264",
+            500_000,
+            &[(48000u32, 2u16), (48000u32, 2u16)],
+            false,
+        )
+        .expect("RecordingWriter::new");
+        writer.begin_writing().expect("begin_writing");
+        writer
+            .write_video(VideoFrame {
+                pts: Duration::ZERO,
+                data: vec![0u8; 64 * 64 * 4],
+            })
+            .expect("write_video");
+        // ~3s of audio per track -- long enough that real-time throttling
+        // (if it regresses) makes this an actually slow test, not just a
+        // theoretical concern.
+        const CHUNKS: u64 = 30;
+        for chunk in 0..CHUNKS {
+            let pts = Duration::from_millis(chunk * 100);
+            for track_idx in 0..2 {
+                writer
+                    .write_audio(
+                        track_idx,
+                        AudioSamples {
+                            track_id: TrackId::new(track_idx as u32),
+                            pts,
+                            samples: vec![0.1f32; 4800 * 2],
+                            sample_rate: 48000,
+                            channels: 2,
+                        },
+                    )
+                    .expect("write_audio");
+            }
+        }
+        let source = writer.finalize().expect("finalize");
+
+        let dest = dir.path().join("mixed_longer.mp4");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let result = mix_tracks(&source, &dest, &[0, 1]);
+            let _ = tx.send((result, start.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("mix_tracks did not complete within 20s -- real-time throttling regression?");
+        result.expect("mix_tracks failed");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "mix_tracks took {elapsed:.2?} for a ~3s recording -- should be near-instant, not throttled to real time"
         );
     }
 
