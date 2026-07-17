@@ -255,7 +255,7 @@ unsafe fn make_video_input_type(
     }
 }
 
-unsafe fn make_audio_output_type(
+pub(crate) unsafe fn make_audio_output_type(
     sample_rate: u32,
     channels: u16,
 ) -> Result<IMFMediaType, AppError> {
@@ -276,7 +276,10 @@ unsafe fn make_audio_output_type(
     }
 }
 
-unsafe fn make_audio_input_type(sample_rate: u32, channels: u16) -> Result<IMFMediaType, AppError> {
+pub(crate) unsafe fn make_audio_input_type(
+    sample_rate: u32,
+    channels: u16,
+) -> Result<IMFMediaType, AppError> {
     unsafe {
         let block_align = channels as u32 * 2;
         let bytes_per_sec = sample_rate * block_align;
@@ -300,7 +303,7 @@ unsafe fn make_audio_input_type(sample_rate: u32, channels: u16) -> Result<IMFMe
     }
 }
 
-unsafe fn make_sample(
+pub(crate) unsafe fn make_sample(
     data: &[u8],
     pts_hns: i64,
     duration_hns: i64,

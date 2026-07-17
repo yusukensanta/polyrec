@@ -145,6 +145,15 @@ pub struct App {
     /// selected) falls back to a generic "Track N" label for the unlabeled
     /// tail rather than panicking or misattributing a name.
     last_recording_audio_labels: Vec<String>,
+    /// App name for the last finished manual recording (same derivation as
+    /// the recording's own filename, via `session::app_name_from_exe`) --
+    /// used to pre-fill the export Save dialog's default filename. Stored at
+    /// record-start rather than re-parsed from the recording's filename, so
+    /// it can't drift if that filename format ever changes.
+    last_recording_app_name: String,
+    /// "Mix selected tracks into one" export checkbox -- unchecked by
+    /// default. See `render_export_controls`.
+    export_mix_tracks: bool,
     export_state: ExportState,
     export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     hotkey_listener: Option<HotkeyListener>,
@@ -251,6 +260,8 @@ impl App {
             export_available_tracks: 0,
             export_track_selection,
             last_recording_audio_labels: Vec::new(),
+            last_recording_app_name: String::new(),
+            export_mix_tracks: false,
             export_state: ExportState::Idle,
             export_result_rx: None,
             hotkey_listener: Some(hotkey_listener),

@@ -6,7 +6,7 @@ use super::theme::{
 use super::util::open_folder;
 use super::widgets::{accent_button, centered_action_row, format_bytes_free, section_header};
 use super::{App, ExportState, HighlightSaveState};
-use crate::encode::remux::remux;
+use crate::encode::remux::{mix_tracks, remux};
 use crate::i18n::Strings;
 use crate::types::SessionState;
 use eframe::egui;
@@ -430,6 +430,8 @@ impl App {
             };
             ui.checkbox(&mut self.export_track_selection[i], label);
         }
+        ui.checkbox(&mut self.export_mix_tracks, s.export_mix_tracks_label)
+            .on_hover_text(s.export_mix_tracks_tooltip);
 
         ui.add_space(8.0);
 
@@ -452,26 +454,41 @@ impl App {
                     .add(accent_button(s.export_button, ACCENT_IDLE))
                     .on_hover_text(s.export_tooltip)
                     .clicked()
-                    && let Some(dest) = rfd::FileDialog::new()
-                        .add_filter("MP4 video", &["mp4"])
-                        .set_file_name("export.mp4")
-                        .save_file()
                 {
-                    let src = path.to_path_buf();
-                    let indices: Vec<usize> = self
-                        .export_track_selection
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, &sel)| sel)
-                        .map(|(i, _)| i)
-                        .collect();
-                    let (tx, rx) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let result = remux(&src, &dest, &indices).map_err(|e| e.to_string());
-                        let _ = tx.send(result);
-                    });
-                    self.export_result_rx = Some(rx);
-                    self.export_state = ExportState::Running;
+                    let default_dir = default_export_dir(&self.config.output_dir);
+                    let _ = std::fs::create_dir_all(&default_dir);
+                    let default_name = default_export_file_name(
+                        &self.last_recording_app_name,
+                        chrono::Local::now(),
+                    );
+                    if let Some(dest) = rfd::FileDialog::new()
+                        .add_filter("MP4 video", &["mp4"])
+                        .set_directory(&default_dir)
+                        .set_file_name(&default_name)
+                        .save_file()
+                    {
+                        let src = path.to_path_buf();
+                        let indices: Vec<usize> = self
+                            .export_track_selection
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &sel)| sel)
+                            .map(|(i, _)| i)
+                            .collect();
+                        let mix = self.export_mix_tracks;
+                        let (tx, rx) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result = if mix {
+                                mix_tracks(&src, &dest, &indices)
+                            } else {
+                                remux(&src, &dest, &indices)
+                            }
+                            .map_err(|e| e.to_string());
+                            let _ = tx.send(result);
+                        });
+                        self.export_result_rx = Some(rx);
+                        self.export_state = ExportState::Running;
+                    }
                 }
                 if ui
                     .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
@@ -511,5 +528,64 @@ impl App {
                     .color(ACCENT_REC),
             );
         }
+    }
+}
+
+/// `<output_dir>/polyrec/exported/` -- recordings themselves live in
+/// `<output_dir>/polyrec/` (see `session::prepare_recording_paths`);
+/// exports get their own subdirectory there instead of mixing in with the
+/// raw recordings.
+fn default_export_dir(output_dir: &std::path::Path) -> PathBuf {
+    output_dir.join("polyrec").join("exported")
+}
+
+/// `<app_name>_<YYYY-MM-DD-HH-MM-SS>.mp4` -- same convention the original
+/// recording's own filename uses (see `encode::actor::spawn_recording_actor`),
+/// just stamped with the export moment rather than the recording's finish
+/// time, so an exported file reads as "the same thing, exported" instead of
+/// a differently-shaped name.
+fn default_export_file_name(app_name: &str, now: chrono::DateTime<chrono::Local>) -> String {
+    let name = if app_name.is_empty() {
+        "recording"
+    } else {
+        app_name
+    };
+    format!("{name}_{}.mp4", now.format("%Y-%m-%d-%H-%M-%S"))
+}
+
+#[cfg(test)]
+mod default_export_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn default_export_dir_is_polyrec_exported_under_output_dir() {
+        let output_dir = std::path::Path::new(r"E:\recordings");
+        assert_eq!(
+            default_export_dir(output_dir),
+            std::path::Path::new(r"E:\recordings\polyrec\exported")
+        );
+    }
+
+    #[test]
+    fn default_export_file_name_matches_recording_naming_convention() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 7, 17, 14, 18, 11)
+            .unwrap();
+        assert_eq!(
+            default_export_file_name("DeadByDaylight-Win64-Shipping", now),
+            "DeadByDaylight-Win64-Shipping_2026-07-17-14-18-11.mp4"
+        );
+    }
+
+    #[test]
+    fn default_export_file_name_falls_back_to_recording_when_app_name_empty() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 7, 17, 14, 18, 11)
+            .unwrap();
+        assert_eq!(
+            default_export_file_name("", now),
+            "recording_2026-07-17-14-18-11.mp4"
+        );
     }
 }

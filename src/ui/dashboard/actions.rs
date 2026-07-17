@@ -260,6 +260,7 @@ impl App {
 
     pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
         let source_title = source.window_title.clone();
+        let app_name = crate::session::app_name_from_exe(&source.exe_name);
         let mut selected_devices: Vec<_> = self
             .audio_devices
             .iter()
@@ -325,6 +326,7 @@ impl App {
                 self.session.apply(SessionAction::Start);
                 self.recording_start = Some(Instant::now());
                 self.last_recording_audio_labels = audio_labels;
+                self.last_recording_app_name = app_name;
             }
             Err(e) => {
                 tracing::error!("start_capture failed for source={source_title:?}: {e}");
