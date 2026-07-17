@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.39] - 2026-07-17
+
 ### Added
 
 - A warning now shows after a recording finishes if fewer audio tracks made it into the file than were selected (e.g. a muted mic, a disconnected device, or an app that produced no sound) -- previously a source that never produced a single real audio buffer was silently dropped from the finished file with no indication anything was missing.
