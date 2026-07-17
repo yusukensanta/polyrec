@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Export now has a "Mix into one track" checkbox -- combines the checked audio tracks into a single track instead of keeping each separate, for platforms like YouTube that only ever play one audio track from an uploaded file and silently ignore the rest.
+- The export Save dialog now opens pre-filled at `<output dir>/polyrec/exported/<app name>_<timestamp>.mp4` (auto-created) instead of an unrelated default location and a generic "export.mp4" name -- still fully overridable in the dialog.
+
 ## [v0.5.39] - 2026-07-17
 
 ### Added

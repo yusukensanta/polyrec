@@ -250,6 +250,12 @@ pub struct Strings {
     /// tracks than `last_recording_audio_labels` has names for (e.g. a
     /// device disconnected mid-recording) -- used as "{track_label_fallback} {n}".
     pub track_label_fallback: &'static str,
+    /// Checkbox: decode the checked tracks above and sum them into a single
+    /// output track instead of keeping each as its own stream -- useful for
+    /// platforms (e.g. YouTube) that only ever play one audio track from an
+    /// uploaded file. Unchecked by default.
+    pub export_mix_tracks_label: &'static str,
+    pub export_mix_tracks_tooltip: &'static str,
     pub export_button: &'static str,
     pub export_tooltip: &'static str,
     pub open_folder_button: &'static str,
@@ -388,6 +394,8 @@ pub static EN: Strings = Strings {
     recording_saved_label: "Recording saved:",
     audio_tracks_header: "AUDIO TRACKS",
     track_label_fallback: "Track",
+    export_mix_tracks_label: "Mix into one track",
+    export_mix_tracks_tooltip: "Combine the checked tracks above into a single audio track -- useful for sites like YouTube that only play one audio track from an uploaded file.",
     export_button: "Export",
     export_tooltip: "Remux with only the checked audio tracks (no re-encoding)",
     open_folder_button: "Open Folder",
@@ -525,6 +533,8 @@ pub static JA: Strings = Strings {
     recording_saved_label: "録画を保存しました:",
     audio_tracks_header: "オーディオ トラック",
     track_label_fallback: "トラック",
+    export_mix_tracks_label: "1つのトラックに統合",
+    export_mix_tracks_tooltip: "上でチェックしたトラックを1つの音声トラックに統合します -- アップロードしたファイルの音声トラックを1つしか再生しないYouTubeなどのサイト向けです。",
     export_button: "エクスポート",
     export_tooltip: "チェックした音声トラックのみで再多重化します（再エンコードなし）",
     open_folder_button: "フォルダを開く",
