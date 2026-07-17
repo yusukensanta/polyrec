@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.41] - 2026-07-17
+
 ### Fixed
 
 - "Mix into one track" export (added in v0.5.40) could take as long as the original recording itself, even for short clips -- its sink writer left Media Foundation's real-time write throttling enabled, which paces `WriteSample` to 1x playback speed whenever an actual encoder is involved (as opposed to a plain track-selection export, which never transcodes anything). A ~5.5 minute recording that mixed and decoded in 1.3s then took 15+ minutes to actually write. Disabling the throttle brings that down to a couple of seconds.
