@@ -105,8 +105,19 @@ jobs:
       # "Trusted Build System" linked at the organization level, which isn't
       # available on the free/Foundation OSS tier this project's certificate
       # comes from. The generic REST API has no such requirement.
+      # continue-on-error: SignPath's free/Foundation OSS tier has a yearly
+      # artifact-size quota -- exceeding it (or a stuck manual-approval,
+      # etc.) previously failed this step and skipped every step after it
+      # (Package zip onward), meaning the whole release silently never
+      # happened. Signing is a nice-to-have (avoids the SmartScreen
+      # "Unknown Publisher" warning) but shouldn't be able to block
+      # shipping entirely -- a failure here now just leaves the exe
+      # unsigned and the release continues. See the "Note unsigned
+      # artifacts" step below for how that's surfaced.
       - name: Sign polyrec.exe
+        id: sign_exe
         shell: pwsh
+        continue-on-error: true
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
@@ -145,8 +156,12 @@ jobs:
       # Separate signing request from polyrec.exe's -- the installer is its
       # own PE file (with its own Authenticode signature slot), signed
       # independently even though the exe it contains is already signed too.
+      # See the continue-on-error comment on "Sign polyrec.exe" above --
+      # same reasoning applies here.
       - name: Sign installer
+        id: sign_installer
         shell: pwsh
+        continue-on-error: true
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
@@ -156,6 +171,21 @@ jobs:
             -ArtifactConfigurationSlug polyrec-installer `
             -Description "${{ steps.tag.outputs.tag }} installer" `
             -OutputPath "${{ steps.installer.outputs.installerPath }}"
+
+      # Surfaces a signing failure in the workflow run summary -- easy to
+      # miss otherwise, since continue-on-error only shows as a small
+      # yellow warning icon on the step itself, and the released files
+      # being unsigned isn't otherwise called out anywhere.
+      - name: Note unsigned artifacts
+        if: steps.sign_exe.outcome == 'failure' || steps.sign_installer.outcome == 'failure'
+        shell: pwsh
+        run: |
+          "## :warning: Release published with unsigned artifacts" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "- polyrec.exe signing: ${{ steps.sign_exe.outcome }}" >> $env:GITHUB_STEP_SUMMARY
+          "- installer signing: ${{ steps.sign_installer.outcome }}" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "Likely a SignPath quota/approval issue -- check the failed step's log. Downloaders will see a Windows SmartScreen ""Unknown Publisher"" warning until a future release signs successfully." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Generate checksums
         shell: pwsh
