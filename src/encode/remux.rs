@@ -138,27 +138,48 @@ pub fn count_audio_tracks(path: &Path) -> Result<usize, AppError> {
     }
 }
 
-/// Like `remux`, but decodes the selected audio tracks to PCM and sums them
-/// into a single mixed track instead of keeping each as its own stream --
-/// for platforms (e.g. YouTube) that only ever play one audio track from an
-/// uploaded file and silently ignore the rest. Video is still a lossless
-/// compressed passthrough copy, same as `remux`.
+/// Like `remux`, but decodes every selected audio track to PCM and sums
+/// them into a single mixed track instead of keeping each as its own
+/// stream -- for platforms (e.g. YouTube) that only ever play one audio
+/// track from an uploaded file and silently ignore the rest. Video is
+/// still a lossless compressed passthrough copy, same as `remux`.
 ///
-/// Fewer than 2 selected tracks has nothing to mix, so this just delegates
-/// to `remux` (0 tracks -> video-only, 1 track -> that track unchanged).
+/// A thin wrapper over `export_grouped` with everything selected in one
+/// group.
 pub fn mix_tracks(
     input: &Path,
     output: &Path,
     audio_track_indices: &[usize],
 ) -> Result<PathBuf, AppError> {
-    if audio_track_indices.len() < 2 {
-        return remux(input, output, audio_track_indices);
+    export_grouped(input, output, &[audio_track_indices.to_vec()])
+}
+
+/// Produces one output audio track per entry in `groups` -- a group with a
+/// single index is a lossless compressed passthrough copy (like `remux`);
+/// a group with 2+ indices gets those specific tracks decoded to PCM,
+/// summed into one, and re-encoded (like `mix_tracks`, but scoped to just
+/// that group instead of everything selected). Lets e.g. a multi-process
+/// app's several tracks collapse into one "app" track while a separately
+/// selected device stays its own independent track in the same export,
+/// without requiring the caller to choose one all-or-nothing mixing mode
+/// for the whole file.
+///
+/// Video is always a lossless compressed passthrough copy, same as
+/// `remux`/`mix_tracks`.
+pub fn export_grouped(
+    input: &Path,
+    output: &Path,
+    groups: &[Vec<usize>],
+) -> Result<PathBuf, AppError> {
+    if groups.iter().all(|g| g.len() <= 1) {
+        let flat: Vec<usize> = groups.iter().flatten().copied().collect();
+        return remux(input, output, &flat);
     }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_FULL)
             .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
-        let result = do_mix(input, output, audio_track_indices);
+        let result = do_export_grouped(input, output, groups);
         let _ = MFShutdown();
         result
     }
@@ -198,10 +219,111 @@ fn sum_and_normalize(tracks: &[(usize, Vec<i16>)], channels: usize) -> Vec<i16> 
         .collect()
 }
 
-unsafe fn do_mix(
+/// Decodes one audio track (by its logical index into `layout.audio`) to
+/// PCM, forcing the same target rate/channels this app always encodes at
+/// so multiple tracks line up frame-for-frame without a separate resample
+/// step. Returns `(first_frame_offset, interleaved_samples)` -- the offset
+/// lets `sum_and_normalize` align tracks that started capturing at
+/// different moments (e.g. process-loopback's async activation delay).
+unsafe fn decode_track_to_pcm(
+    input_url: &HSTRING,
+    layout: &StreamLayout,
+    idx: usize,
+    mix_rate: u32,
+    mix_channels: usize,
+) -> Result<(usize, Vec<i16>), AppError> {
+    unsafe {
+        let src_idx = *layout
+            .audio
+            .get(idx)
+            .ok_or_else(|| AppError::Encode(format!("no audio track at logical index {idx}")))?;
+
+        let reader: IMFSourceReader =
+            MFCreateSourceReaderFromURL(input_url, None).map_err(|e| {
+                AppError::Encode(format!("MFCreateSourceReaderFromURL audio[{idx}]: {e}"))
+            })?;
+        reader
+            .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
+            .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
+        reader
+            .SetStreamSelection(src_idx, true)
+            .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {idx}): {e}")))?;
+
+        let pcm_type =
+            MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
+        pcm_type
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+            .map_err(|e| AppError::Encode(format!("SetGUID major_type: {e}")))?;
+        pcm_type
+            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+            .map_err(|e| AppError::Encode(format!("SetGUID PCM: {e}")))?;
+        pcm_type
+            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, mix_rate)
+            .map_err(|e| AppError::Encode(format!("SetUINT32 rate: {e}")))?;
+        pcm_type
+            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, mix_channels as u32)
+            .map_err(|e| AppError::Encode(format!("SetUINT32 channels: {e}")))?;
+        pcm_type
+            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+            .map_err(|e| AppError::Encode(format!("SetUINT32 bits: {e}")))?;
+        reader
+            .SetCurrentMediaType(src_idx, None, &pcm_type)
+            .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(audio {idx}): {e}")))?;
+
+        let mut samples: Vec<i16> = Vec::new();
+        let mut first_frame_offset: Option<usize> = None;
+
+        loop {
+            let mut actual_idx: u32 = 0;
+            let mut stream_flags: u32 = 0;
+            let mut timestamp: i64 = 0;
+            let mut sample: Option<IMFSample> = None;
+            reader
+                .ReadSample(
+                    src_idx,
+                    0,
+                    Some(&mut actual_idx),
+                    Some(&mut stream_flags),
+                    Some(&mut timestamp),
+                    Some(&mut sample),
+                )
+                .map_err(|e| AppError::Encode(format!("ReadSample(audio {idx}): {e}")))?;
+
+            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                break;
+            }
+            let Some(sample) = sample else { continue };
+            let buffer = sample.ConvertToContiguousBuffer().map_err(|e| {
+                AppError::Encode(format!("ConvertToContiguousBuffer(audio {idx}): {e}"))
+            })?;
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let mut cur_len = 0u32;
+            buffer
+                .Lock(&mut data, None, Some(&mut cur_len))
+                .map_err(|e| AppError::Encode(format!("Lock(audio {idx}): {e}")))?;
+            let bytes = std::slice::from_raw_parts(data, cur_len as usize);
+
+            if first_frame_offset.is_none() {
+                let frame_offset = (timestamp * mix_rate as i64 / 10_000_000).max(0) as usize;
+                first_frame_offset = Some(frame_offset);
+            }
+            for chunk in bytes.chunks_exact(2) {
+                samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+            }
+
+            buffer
+                .Unlock()
+                .map_err(|e| AppError::Encode(format!("Unlock(audio {idx}): {e}")))?;
+        }
+
+        Ok((first_frame_offset.unwrap_or(0), samples))
+    }
+}
+
+unsafe fn do_export_grouped(
     input: &Path,
     output: &Path,
-    audio_track_indices: &[usize],
+    groups: &[Vec<usize>],
 ) -> Result<PathBuf, AppError> {
     unsafe {
         let input_url = HSTRING::from(
@@ -225,118 +347,61 @@ unsafe fn do_mix(
         let mix_rate = TARGET_SAMPLE_RATE;
         let mix_channels = TARGET_CHANNELS as usize;
 
-        // ── Decode each selected track to PCM, forcing the same target
-        // rate/channels this app always encodes at, so tracks line up
-        // frame-for-frame without needing a separate resample step here. ──
-        let mut decoded_tracks: Vec<(usize, Vec<i16>)> = Vec::new();
-        for &idx in audio_track_indices {
-            let src_idx = *layout.audio.get(idx).ok_or_else(|| {
-                AppError::Encode(format!("no audio track at logical index {idx}"))
-            })?;
-
-            let reader: IMFSourceReader =
-                MFCreateSourceReaderFromURL(&input_url, None).map_err(|e| {
-                    AppError::Encode(format!("MFCreateSourceReaderFromURL audio[{idx}]: {e}"))
-                })?;
-            reader
-                .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
-                .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
-            reader
-                .SetStreamSelection(src_idx, true)
-                .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {idx}): {e}")))?;
-
-            let pcm_type = MFCreateMediaType()
-                .map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
-            pcm_type
-                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-                .map_err(|e| AppError::Encode(format!("SetGUID major_type: {e}")))?;
-            pcm_type
-                .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
-                .map_err(|e| AppError::Encode(format!("SetGUID PCM: {e}")))?;
-            pcm_type
-                .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, mix_rate)
-                .map_err(|e| AppError::Encode(format!("SetUINT32 rate: {e}")))?;
-            pcm_type
-                .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, mix_channels as u32)
-                .map_err(|e| AppError::Encode(format!("SetUINT32 channels: {e}")))?;
-            pcm_type
-                .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
-                .map_err(|e| AppError::Encode(format!("SetUINT32 bits: {e}")))?;
-            reader
-                .SetCurrentMediaType(src_idx, None, &pcm_type)
-                .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(audio {idx}): {e}")))?;
-
-            let mut samples: Vec<i16> = Vec::new();
-            let mut first_frame_offset: Option<usize> = None;
-
-            loop {
-                let mut actual_idx: u32 = 0;
-                let mut stream_flags: u32 = 0;
-                let mut timestamp: i64 = 0;
-                let mut sample: Option<IMFSample> = None;
-                reader
-                    .ReadSample(
-                        src_idx,
-                        0,
-                        Some(&mut actual_idx),
-                        Some(&mut stream_flags),
-                        Some(&mut timestamp),
-                        Some(&mut sample),
-                    )
-                    .map_err(|e| AppError::Encode(format!("ReadSample(audio {idx}): {e}")))?;
-
-                if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                    break;
-                }
-                let Some(sample) = sample else { continue };
-                let buffer = sample.ConvertToContiguousBuffer().map_err(|e| {
-                    AppError::Encode(format!("ConvertToContiguousBuffer(audio {idx}): {e}"))
-                })?;
-                let mut data: *mut u8 = std::ptr::null_mut();
-                let mut cur_len = 0u32;
-                buffer
-                    .Lock(&mut data, None, Some(&mut cur_len))
-                    .map_err(|e| AppError::Encode(format!("Lock(audio {idx}): {e}")))?;
-                let bytes = std::slice::from_raw_parts(data, cur_len as usize);
-
-                if first_frame_offset.is_none() {
-                    let frame_offset = (timestamp * mix_rate as i64 / 10_000_000).max(0) as usize;
-                    first_frame_offset = Some(frame_offset);
-                }
-                for chunk in bytes.chunks_exact(2) {
-                    samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-                }
-
-                buffer
-                    .Unlock()
-                    .map_err(|e| AppError::Encode(format!("Unlock(audio {idx}): {e}")))?;
+        // A group of 1 (or 0) index needs no decode/mix -- passthrough-copy
+        // it exactly like `remux` does. Only groups of 2+ need the PCM
+        // decode-and-sum treatment.
+        let mut passthrough_indices: Vec<usize> = Vec::new();
+        let mut merge_groups: Vec<&Vec<usize>> = Vec::new();
+        for g in groups {
+            if g.len() <= 1 {
+                passthrough_indices.extend(g.iter().copied());
+            } else {
+                merge_groups.push(g);
             }
-
-            decoded_tracks.push((first_frame_offset.unwrap_or(0), samples));
         }
 
-        // Every selected track was empty (e.g. all muted/silent the whole
-        // recording) -- fall back to a video-only file rather than writing
-        // a zero-length audio stream.
-        if decoded_tracks.iter().all(|(_, s)| s.is_empty()) {
+        // Decode + sum each merge group independently -- a group that
+        // turns out entirely empty (e.g. every process in it was silent
+        // the whole recording) is dropped rather than becoming a
+        // zero-length audio stream.
+        let mut merged_pcms: Vec<Vec<i16>> = Vec::new();
+        for group in &merge_groups {
+            let mut decoded: Vec<(usize, Vec<i16>)> = Vec::new();
+            for &idx in group.iter() {
+                decoded.push(decode_track_to_pcm(
+                    &input_url,
+                    &layout,
+                    idx,
+                    mix_rate,
+                    mix_channels,
+                )?);
+            }
+            let mixed = sum_and_normalize(&decoded, mix_channels);
+            if !mixed.is_empty() {
+                merged_pcms.push(mixed);
+            }
+        }
+
+        if passthrough_indices.is_empty() && merged_pcms.is_empty() {
             return do_remux(input, output, &[]);
         }
 
-        let mixed = sum_and_normalize(&decoded_tracks, mix_channels);
-
-        // ── Sink writer: video passthrough + one transcoded (PCM->AAC) audio stream ──
+        // ── Sink writer: video passthrough + one stream per passthrough
+        // index (compressed passthrough, like `remux`) + one stream per
+        // non-empty merge group (transcoded PCM->AAC, like the old
+        // `mix_tracks`). See the throttling comment below -- applies
+        // globally to the writer, so it's set whenever any transcoding is
+        // involved at all, harmless for the passthrough streams sharing it.
         //
         // Unlike `do_remux`'s pure compressed-passthrough sink writer (no
-        // encoder MFT involved, so this never bites it), this sink writer
-        // does real PCM->AAC transcoding for the audio stream -- and
-        // IMFSinkWriter's default behavior throttles WriteSample to real-
-        // time pace whenever an actual encoder is in the pipeline, on the
-        // assumption the caller is a live recording. For this offline batch
-        // job that meant writing a mixed track took as long as the
-        // recording itself (confirmed against a real ~5.5min file: decode +
-        // mix finished in 1.3s, then the write loop alone ran past a minute
-        // with ~0s of CPU time consumed in that window -- sleeping, not
-        // computing). Disabling it here writes as fast as the CPU can go.
+        // encoder MFT involved, so this never bites it), a writer with any
+        // transcoded stream defaults to throttling WriteSample to real-time
+        // pace, on the assumption the caller is a live recording. For this
+        // offline batch job that meant writing a mixed track took as long
+        // as the recording itself (confirmed against a real ~5.5min file:
+        // decode + mix finished in 1.3s, then the write loop alone ran past
+        // a minute with ~0s of CPU time consumed in that window -- sleeping,
+        // not computing). Disabling it here writes as fast as the CPU can go.
         let mut attrs_opt: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs_opt, 2)
             .map_err(|e| AppError::Encode(format!("MFCreateAttributes: {e}")))?;
@@ -350,31 +415,68 @@ unsafe fn do_mix(
             .map_err(|e| AppError::Encode(format!("SetUINT32 hw_transforms: {e}")))?;
         let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, Some(&attrs))
             .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+
         let video_sink = writer
             .AddStream(&video_type)
             .map_err(|e| AppError::Encode(format!("AddStream(video): {e}")))?;
         writer
             .SetInputMediaType(video_sink, &video_type, None)
             .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
-        let audio_out = make_audio_output_type(mix_rate, mix_channels as u16)?;
-        let audio_in = make_audio_input_type(mix_rate, mix_channels as u16)?;
-        let audio_sink = writer
-            .AddStream(&audio_out)
-            .map_err(|e| AppError::Encode(format!("AddStream(audio): {e}")))?;
-        writer
-            .SetInputMediaType(audio_sink, &audio_in, None)
-            .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio): {e}")))?;
+
+        let mut passthrough_sinks: Vec<(u32, u32)> = Vec::new(); // (src_idx, sink_idx)
+        for &idx in &passthrough_indices {
+            let src_idx = *layout.audio.get(idx).ok_or_else(|| {
+                AppError::Encode(format!("no audio track at logical index {idx}"))
+            })?;
+            let native_type: IMFMediaType = probe_reader
+                .GetNativeMediaType(src_idx, 0)
+                .map_err(|e| AppError::Encode(format!("GetNativeMediaType(audio {idx}): {e}")))?;
+            let sink_idx = writer
+                .AddStream(&native_type)
+                .map_err(|e| AppError::Encode(format!("AddStream(audio {idx}): {e}")))?;
+            writer
+                .SetInputMediaType(sink_idx, &native_type, None)
+                .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio {idx}): {e}")))?;
+            passthrough_sinks.push((src_idx, sink_idx));
+        }
+
+        let mut merge_sinks: Vec<u32> = Vec::new();
+        for _ in &merged_pcms {
+            let audio_out = make_audio_output_type(mix_rate, mix_channels as u16)?;
+            let audio_in = make_audio_input_type(mix_rate, mix_channels as u16)?;
+            let sink_idx = writer
+                .AddStream(&audio_out)
+                .map_err(|e| AppError::Encode(format!("AddStream(merged audio): {e}")))?;
+            writer
+                .SetInputMediaType(sink_idx, &audio_in, None)
+                .map_err(|e| AppError::Encode(format!("SetInputMediaType(merged audio): {e}")))?;
+            merge_sinks.push(sink_idx);
+        }
+
         writer
             .BeginWriting()
             .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))?;
 
-        // Video: compressed passthrough copy, same technique as `do_remux`.
+        // Video + passthrough audio: interleaved compressed-copy loop,
+        // same technique as `do_remux`.
         probe_reader
             .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
             .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
         probe_reader
             .SetStreamSelection(layout.video, true)
             .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
+        for &(src_idx, _) in &passthrough_sinks {
+            probe_reader
+                .SetStreamSelection(src_idx, true)
+                .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio): {e}")))?;
+        }
+        let mut source_to_sink: HashMap<u32, u32> = HashMap::new();
+        source_to_sink.insert(layout.video, video_sink);
+        for &(src_idx, sink_idx) in &passthrough_sinks {
+            source_to_sink.insert(src_idx, sink_idx);
+        }
+        let total_enabled = 1 + passthrough_sinks.len();
+        let mut done_streams: HashSet<u32> = HashSet::new();
         loop {
             let mut actual_idx: u32 = 0;
             let mut stream_flags: u32 = 0;
@@ -382,41 +484,52 @@ unsafe fn do_mix(
             let mut sample: Option<IMFSample> = None;
             probe_reader
                 .ReadSample(
-                    layout.video,
+                    MF_SOURCE_READER_ANY_STREAM,
                     0,
                     Some(&mut actual_idx),
                     Some(&mut stream_flags),
                     Some(&mut timestamp),
                     Some(&mut sample),
                 )
-                .map_err(|e| AppError::Encode(format!("ReadSample(video): {e}")))?;
-            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                break;
+                .map_err(|e| AppError::Encode(format!("ReadSample: {e}")))?;
+            if stream_flags & 1 != 0 {
+                return Err(AppError::Encode(format!(
+                    "ReadSample: stream {actual_idx} reported error"
+                )));
             }
-            if let Some(s) = sample {
-                writer
-                    .WriteSample(video_sink, &s)
-                    .map_err(|e| AppError::Encode(format!("WriteSample(video): {e}")))?;
+            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                done_streams.insert(actual_idx);
+                if done_streams.len() >= total_enabled {
+                    break;
+                }
+                continue;
+            }
+            if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
+                writer.WriteSample(sink_idx, &s).map_err(|e| {
+                    AppError::Encode(format!("WriteSample(stream {actual_idx}): {e}"))
+                })?;
             }
         }
 
-        // Mixed audio, written in ~100ms chunks.
+        // Merged audio, one group at a time, each written in ~100ms chunks.
         const CHUNK_FRAMES: usize = 4800;
-        let total_frames = mixed.len() / mix_channels;
-        let mut frame = 0usize;
-        while frame < total_frames {
-            let end = (frame + CHUNK_FRAMES).min(total_frames);
-            let chunk_bytes: Vec<u8> = mixed[frame * mix_channels..end * mix_channels]
-                .iter()
-                .flat_map(|s| s.to_le_bytes())
-                .collect();
-            let pts_hns = (frame as i64 * 10_000_000) / mix_rate as i64;
-            let duration_hns = ((end - frame) as i64 * 10_000_000) / mix_rate as i64;
-            let sample = make_sample(&chunk_bytes, pts_hns, duration_hns)?;
-            writer
-                .WriteSample(audio_sink, &sample)
-                .map_err(|e| AppError::Encode(format!("WriteSample(audio): {e}")))?;
-            frame = end;
+        for (pcm, &sink_idx) in merged_pcms.iter().zip(merge_sinks.iter()) {
+            let total_frames = pcm.len() / mix_channels;
+            let mut frame = 0usize;
+            while frame < total_frames {
+                let end = (frame + CHUNK_FRAMES).min(total_frames);
+                let chunk_bytes: Vec<u8> = pcm[frame * mix_channels..end * mix_channels]
+                    .iter()
+                    .flat_map(|s| s.to_le_bytes())
+                    .collect();
+                let pts_hns = (frame as i64 * 10_000_000) / mix_rate as i64;
+                let duration_hns = ((end - frame) as i64 * 10_000_000) / mix_rate as i64;
+                let sample = make_sample(&chunk_bytes, pts_hns, duration_hns)?;
+                writer
+                    .WriteSample(sink_idx, &sample)
+                    .map_err(|e| AppError::Encode(format!("WriteSample(merged audio): {e}")))?;
+                frame = end;
+            }
         }
 
         writer
@@ -635,6 +748,73 @@ mod tests {
                 .expect("write_audio");
         }
         writer.finalize().expect("finalize")
+    }
+
+    fn make_three_track_test_mp4(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("three_track_source.mp4");
+        let writer = RecordingWriter::new(
+            &path,
+            64,
+            64,
+            30,
+            "h264",
+            500_000,
+            &[(48000u32, 2u16), (48000u32, 2u16), (48000u32, 2u16)],
+            false,
+        )
+        .expect("RecordingWriter::new");
+        writer.begin_writing().expect("begin_writing");
+        writer
+            .write_video(VideoFrame {
+                pts: Duration::ZERO,
+                data: vec![0u8; 64 * 64 * 4],
+            })
+            .expect("write_video");
+        for track_idx in 0..3 {
+            writer
+                .write_audio(
+                    track_idx,
+                    AudioSamples {
+                        track_id: TrackId::new(track_idx as u32),
+                        pts: Duration::ZERO,
+                        samples: vec![0.1f32; 480 * 2],
+                        sample_rate: 48000,
+                        channels: 2,
+                    },
+                )
+                .expect("write_audio");
+        }
+        writer.finalize().expect("finalize")
+    }
+
+    #[test]
+    fn export_grouped_merges_within_a_group_but_keeps_groups_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = make_three_track_test_mp4(dir.path());
+        let dest = dir.path().join("grouped.mp4");
+        // Tracks 0 and 1 (e.g. a multi-process app) merge into one output
+        // track; track 2 (e.g. the mic) stays its own separate track.
+        let result = export_grouped(&source, &dest, &[vec![0, 1], vec![2]]);
+        assert!(result.is_ok(), "export_grouped failed: {:?}", result.err());
+        assert_eq!(
+            count_audio_tracks(&dest).expect("count_audio_tracks failed"),
+            2,
+            "expected one merged track + one separate track"
+        );
+    }
+
+    #[test]
+    fn export_grouped_with_only_single_track_groups_behaves_like_remux() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = make_three_track_test_mp4(dir.path());
+        let dest = dir.path().join("all_separate.mp4");
+        let result = export_grouped(&source, &dest, &[vec![0], vec![1], vec![2]]);
+        assert!(result.is_ok(), "export_grouped failed: {:?}", result.err());
+        assert_eq!(
+            count_audio_tracks(&dest).expect("count_audio_tracks failed"),
+            3,
+            "no group has 2+ indices, so nothing should get merged"
+        );
     }
 
     #[test]

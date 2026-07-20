@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Export track checkboxes are now grouped by app/device instead of one checkbox per underlying track -- a multi-process app (e.g. Discord with more than one live audio session at once) previously showed as several identically-named checkboxes for what's really one audio source. Same-app tracks are now automatically merged into a single output track when exported, while other selected sources stay independently separate -- distinct from (and unaffected by) the existing "Mix into one track" checkbox, which still mixes everything checked together when turned on.
+
 ## [v0.5.41] - 2026-07-17
 
 ### Fixed

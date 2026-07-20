@@ -6,7 +6,7 @@ use super::theme::{
 use super::util::open_folder;
 use super::widgets::{accent_button, centered_action_row, format_bytes_free, section_header};
 use super::{App, ExportState, HighlightSaveState};
-use crate::encode::remux::{mix_tracks, remux};
+use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
 use crate::types::SessionState;
 use eframe::egui;
@@ -423,12 +423,27 @@ impl App {
         }
 
         section_header(ui, s.audio_tracks_header);
-        for i in 0..self.export_track_selection.len() {
-            let label = match self.last_recording_audio_labels.get(i) {
+        // Grouped by resolved label, not one checkbox per raw track -- a
+        // multi-process app (e.g. Discord with more than one live audio
+        // session at once) gets one checkbox covering all of its tracks
+        // instead of one per underlying process, matching how nobody
+        // thinks of "Discord" as multiple audio sources. Toggling a group
+        // checkbox sets every track in that group together, so they can
+        // never end up selected inconsistently.
+        let resolved_labels: Vec<String> = (0..self.export_track_selection.len())
+            .map(|i| match self.last_recording_audio_labels.get(i) {
                 Some(name) => name.clone(),
                 None => format!("{} {}", s.track_label_fallback, i + 1),
-            };
-            ui.checkbox(&mut self.export_track_selection[i], label);
+            })
+            .collect();
+        let track_groups = group_tracks_by_label(&resolved_labels);
+        for (label, indices) in &track_groups {
+            let mut checked = indices.iter().all(|&i| self.export_track_selection[i]);
+            if ui.checkbox(&mut checked, label.clone()).changed() {
+                for &i in indices {
+                    self.export_track_selection[i] = checked;
+                }
+            }
         }
         ui.checkbox(&mut self.export_mix_tracks, s.export_mix_tracks_label)
             .on_hover_text(s.export_mix_tracks_tooltip);
@@ -468,6 +483,11 @@ impl App {
                         .save_file()
                     {
                         let src = path.to_path_buf();
+                        // Global "Mix into one track" (if checked) still
+                        // mixes everything selected regardless of app
+                        // grouping -- selected_groups (same-app tracks
+                        // merged, everything else kept separate) is only
+                        // used when that's off.
                         let indices: Vec<usize> = self
                             .export_track_selection
                             .iter()
@@ -475,13 +495,23 @@ impl App {
                             .filter(|&(_, &sel)| sel)
                             .map(|(i, _)| i)
                             .collect();
+                        let selected_groups: Vec<Vec<usize>> = track_groups
+                            .iter()
+                            .map(|(_, idxs)| {
+                                idxs.iter()
+                                    .copied()
+                                    .filter(|&i| self.export_track_selection[i])
+                                    .collect::<Vec<usize>>()
+                            })
+                            .filter(|g: &Vec<usize>| !g.is_empty())
+                            .collect();
                         let mix = self.export_mix_tracks;
                         let (tx, rx) = mpsc::channel();
                         std::thread::spawn(move || {
                             let result = if mix {
                                 mix_tracks(&src, &dest, &indices)
                             } else {
-                                remux(&src, &dest, &indices)
+                                export_grouped(&src, &dest, &selected_groups)
                             }
                             .map_err(|e| e.to_string());
                             let _ = tx.send(result);
@@ -529,6 +559,24 @@ impl App {
             );
         }
     }
+}
+
+/// Groups raw track indices by their resolved label, preserving each
+/// group's first-appearance order -- e.g. "Discord" appearing at indices
+/// `[1, 2]` (a multi-process app; see `AppAudioSource::process_ids`'s doc
+/// comment for why that happens) groups into one entry covering both,
+/// instead of exposing the process-level split as two separate checkboxes.
+/// Matches by label text, not adjacency, so it stays correct even if track
+/// order in the file doesn't match selection order.
+fn group_tracks_by_label(labels: &[String]) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        match groups.iter_mut().find(|(l, _)| l == label) {
+            Some((_, indices)) => indices.push(i),
+            None => groups.push((label.clone(), vec![i])),
+        }
+    }
+    groups
 }
 
 /// `<output_dir>/polyrec/exported/` -- recordings themselves live in
@@ -587,5 +635,58 @@ mod default_export_tests {
             default_export_file_name("", now),
             "recording_2026-07-17-14-18-11.mp4"
         );
+    }
+}
+
+#[cfg(test)]
+mod group_tracks_by_label_tests {
+    use super::*;
+
+    fn labels(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn each_unique_label_becomes_its_own_group() {
+        let groups = group_tracks_by_label(&labels(&["Mic", "Speakers", "Spotify"]));
+        assert_eq!(
+            groups,
+            vec![
+                ("Mic".to_string(), vec![0]),
+                ("Speakers".to_string(), vec![1]),
+                ("Spotify".to_string(), vec![2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_label_groups_all_its_indices_together() {
+        // Mirrors a multi-process app: "Discord" showing up at tracks 1 and 2.
+        let groups = group_tracks_by_label(&labels(&["Mic", "Discord", "Discord"]));
+        assert_eq!(
+            groups,
+            vec![
+                ("Mic".to_string(), vec![0]),
+                ("Discord".to_string(), vec![1, 2])
+            ]
+        );
+    }
+
+    #[test]
+    fn groups_by_label_text_not_just_adjacency() {
+        // Same label at non-adjacent indices still ends up in one group.
+        let groups = group_tracks_by_label(&labels(&["Discord", "Mic", "Discord"]));
+        assert_eq!(
+            groups,
+            vec![
+                ("Discord".to_string(), vec![0, 2]),
+                ("Mic".to_string(), vec![1])
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_input_produces_no_groups() {
+        assert!(group_tracks_by_label(&[]).is_empty());
     }
 }
