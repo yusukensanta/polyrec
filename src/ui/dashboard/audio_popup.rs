@@ -71,7 +71,21 @@ impl App {
                                     .color(TEXT_MUTED),
                             );
                         }
-                        for (i, dev) in self.audio_devices.iter().enumerate() {
+                        // Iterated from cloned (label, id) pairs, not
+                        // `self.audio_devices` directly -- persisting a
+                        // toggle below needs `&mut self`, which a live
+                        // borrow of `self.audio_devices` here would conflict
+                        // with (same reasoning as the Applications loop's
+                        // `app_audio_sources.clone()` below).
+                        let device_rows: Vec<(String, String)> = self
+                            .audio_devices
+                            .iter()
+                            .map(|dev| {
+                                (format!("{} {}", audio_device_icon(dev), dev.name), dev.id.clone())
+                            })
+                            .collect();
+                        for (i, (label, dev_id)) in device_rows.into_iter().enumerate() {
+                            let was_checked = self.selected_audio[i];
                             checkbox_with_volume_slider(
                                 ui,
                                 None,
@@ -79,10 +93,16 @@ impl App {
                                 &mut self.error_message,
                                 s.config_save_failed_prefix,
                                 &mut self.selected_audio[i],
-                                format!("{} {}", audio_device_icon(dev), dev.name),
-                                dev.id.clone(),
+                                label,
+                                dev_id,
                                 None,
                             );
+                            // Persisted immediately on toggle so it survives
+                            // an app restart -- see
+                            // `actions::persist_selected_audio_devices`.
+                            if was_checked != self.selected_audio[i] {
+                                self.persist_selected_audio_devices(s);
+                            }
                         }
 
                         ui.add_space(8.0);
