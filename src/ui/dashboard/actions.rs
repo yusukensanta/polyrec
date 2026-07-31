@@ -42,6 +42,22 @@ pub(super) fn build_app_audio_sources(config: &Config) -> Vec<AppAudioSource> {
         .collect()
 }
 
+/// Which of `devices`' checkboxes should start checked -- `config`'s saved
+/// selection (`Config::selected_audio_device_ids`) if the user has ever
+/// changed one, matched by the device's stable WASAPI endpoint id so a
+/// reconnected device (unplugged mic, sleeping Bluetooth headset) keeps
+/// its remembered state; otherwise falls back to the original
+/// loopback-only default (see the call sites' doc comments for why that's
+/// the right first-run default). Shared by `App::new` (initial load) and
+/// `refresh_sources_and_audio_if_due` (device set changed) so both apply
+/// the exact same precedence.
+pub(super) fn resolve_selected_audio(devices: &[AudioDevice], config: &Config) -> Vec<bool> {
+    match &config.selected_audio_device_ids {
+        Some(ids) => devices.iter().map(|d| ids.contains(&d.id)).collect(),
+        None => devices.iter().map(|d| d.is_loopback).collect(),
+    }
+}
+
 /// Order-independent fingerprint of an app-audio list, for deciding whether
 /// `refresh_sources_and_audio_if_due` needs to rebuild anything -- comparing
 /// just the set of exe names misses a registered app transitioning from
@@ -69,9 +85,13 @@ fn app_audio_fingerprint(sources: &[AppAudioSource]) -> Vec<(String, Vec<u32>)> 
 ///
 /// One app source can expand to several tracks: `session::start_capture`
 /// spawns one capture task (and track id) per entry in
-/// `AppAudioSource::process_ids`, not one per source -- two independent top-
-/// level processes of the same exe (e.g. Discord's main + helper processes,
-/// or two Chrome windows) each get their own track. Repeating the display
+/// `AppAudioSource::process_ids`, not one per source -- two genuinely
+/// independent top-level process trees of the same exe (e.g. two separate
+/// Chrome windows/profiles launched independently) each get their own track.
+/// A single app's own parent/child helper processes (e.g. Discord's
+/// GPU/renderer/utility processes) are already collapsed to one entry by
+/// `capture::audio::enumerate_app_audio_sessions`'s canonical_root_pid, so
+/// they don't multiply this list. Repeating the display
 /// name `process_ids.len()` times (zero for a registered-but-inactive
 /// source) keeps this list's length and order matching the real tracks
 /// exactly; emitting one label per source regardless of process count would
@@ -200,7 +220,7 @@ impl App {
         let new_ids: std::collections::HashSet<&str> =
             new_audio_devices.iter().map(|d| d.id.as_str()).collect();
         if new_ids != current_ids {
-            self.selected_audio = new_audio_devices.iter().map(|d| d.is_loopback).collect();
+            self.selected_audio = resolve_selected_audio(&new_audio_devices, &self.config);
             self.audio_devices = new_audio_devices;
             // export_track_selection is NOT reset here -- same reasoning as the
             // old Refresh button: it's tied to the last finished recording's
@@ -220,6 +240,29 @@ impl App {
             self.selected_app_audio = vec![true; new_app_audio_sources.len()];
             self.app_audio_sources = new_app_audio_sources;
             self.app_audio_icon_textures.clear();
+        }
+    }
+
+    /// Saves the SYSTEM device checkboxes' current state to `config` so it
+    /// survives an app restart -- called right after a checkbox toggle in
+    /// the Audio popup, same "checkbox click is the persistence trigger"
+    /// pattern as `Config::register_app_audio`/`unregister_app_audio` for
+    /// the Applications list, just keyed by device-id membership in
+    /// `Config::selected_audio_device_ids` instead of a separate list, since
+    /// every device (not just ones the user cares about) is always present
+    /// in `self.audio_devices`.
+    pub(super) fn persist_selected_audio_devices(&mut self, s: &'static Strings) {
+        let ids: Vec<String> = self
+            .audio_devices
+            .iter()
+            .zip(self.selected_audio.iter())
+            .filter(|&(_, &selected)| selected)
+            .map(|(d, _)| d.id.clone())
+            .collect();
+        self.config.selected_audio_device_ids = Some(ids);
+        if let Err(e) = self.config.save() {
+            tracing::error!("failed to save config: {e}");
+            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
         }
     }
 

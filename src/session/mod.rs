@@ -330,13 +330,17 @@ impl SessionManager {
         // above); each selected app is its own explicit target, always via
         // process loopback capture since that's the only way to isolate one
         // app's audio (see AppAudioSource's doc comment). One app_source can
-        // expand to several tracks: WASAPI's process-loopback capture only
-        // targets one pid per stream, and genuinely mixing separately
-        // captured PCM streams into one track needs a real-time mixer this
-        // doesn't have -- so multiple independent top-level processes of the
-        // same exe (see AppAudioSource::process_ids) each get their own
-        // track instead. A registered-but-inactive entry (empty
-        // process_ids) contributes no tracks at all.
+        // still expand to several tracks: WASAPI's process-loopback capture
+        // only targets one process tree per stream, and genuinely mixing
+        // separately captured PCM streams into one track needs a real-time
+        // mixer this doesn't have -- so multiple genuinely independent
+        // top-level process trees of the same exe (see
+        // AppAudioSource::process_ids, and enumerate_app_audio_sessions's
+        // canonical_root_pid, which already collapses a single app's
+        // parent/child helper processes -- e.g. Discord's GPU/renderer/utility
+        // processes -- down to one entry) each get their own track instead. A
+        // registered-but-inactive entry (empty process_ids) contributes no
+        // tracks at all.
         let mut next_app_track_id = device_track_count as u32;
         for (i, app_source) in app_audio_sources.into_iter().enumerate() {
             tracing::info!(

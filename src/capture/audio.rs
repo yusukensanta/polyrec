@@ -189,8 +189,22 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
 /// same exe (not parent/child -- e.g. two separate game/app windows) are
 /// still the same app from a recording-selection standpoint, so both land
 /// in one `AppAudioSource::process_ids` rather than two separate entries.
+///
+/// Each session's pid is first canonicalized to the topmost ancestor still
+/// running the same exe (see `canonical_root_pid`) before being added to
+/// `process_ids`. This matters because `run_process_loopback_capture` always
+/// captures with `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` (its
+/// whole process tree, not just that one pid) -- so a multi-process app
+/// (Electron apps like Discord spawn several child processes under the same
+/// exe: GPU, renderer, utility, audio service) that has more than one of
+/// those hold its own session would otherwise get one capture per pid, each
+/// already covering the other's audio via the tree -- producing duplicate,
+/// fully redundant tracks. Canonicalizing first means only genuinely
+/// independent process trees (unrelated top-level launches of the same exe)
+/// end up as separate `process_ids` entries.
 pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
     let mut sources = Vec::new();
+    let parent_of = build_parent_pid_map();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
@@ -259,17 +273,23 @@ pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
             let display_name = wasapi_name
                 .unwrap_or_else(|| crate::sources::display_name_from_exe_name(&exe_name));
 
+            let canonical_pid = canonical_root_pid(pid, &exe_name, &parent_of);
+
             match sources
                 .iter_mut()
                 .find(|s: &&mut AppAudioSource| s.exe_name == exe_name)
             {
-                Some(existing) => existing.process_ids.push(pid),
+                Some(existing) => {
+                    if !existing.process_ids.contains(&canonical_pid) {
+                        existing.process_ids.push(canonical_pid);
+                    }
+                }
                 None => {
                     let icon_rgba = exe_path
                         .as_deref()
                         .and_then(crate::sources::extract_exe_icon_rgba);
                     sources.push(AppAudioSource {
-                        process_ids: vec![pid],
+                        process_ids: vec![canonical_pid],
                         exe_name,
                         display_name,
                         icon_rgba,
@@ -279,6 +299,96 @@ pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
         }
     }
     Ok(sources)
+}
+
+/// Snapshot of every running process's parent pid, for `canonical_root_pid`
+/// to walk. Built once per `enumerate_app_audio_sessions` call rather than
+/// once per session found -- `CreateToolhelp32Snapshot` walks the whole
+/// system process list regardless of how many sessions end up using it, so
+/// one snapshot serves them all. Best-effort: an empty map on failure just
+/// means `canonical_root_pid` can't walk upward at all, falling back to
+/// today's per-pid behavior for every session, not a hard error.
+fn build_parent_pid_map() -> std::collections::HashMap<u32, u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut map = std::collections::HashMap::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return map;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+    }
+    map
+}
+
+/// Walks up the process tree from `pid` through `parent_of`, staying only
+/// within processes that share `exe_name`, to find the topmost still-same-exe
+/// ancestor -- see `enumerate_app_audio_sessions`'s doc comment for why this
+/// is the right identity to capture on rather than the raw session pid.
+/// Stops (returning `pid` itself, or whatever ancestor it reached) as soon as
+/// the parent is missing from the snapshot, already exited, or a different
+/// exe entirely -- that boundary is exactly where the "same app" tree ends
+/// (e.g. Discord.exe's topmost process's own parent is explorer.exe, a
+/// different exe, so the walk correctly stops there). Bounded to 64 hops as
+/// a defensive guard against a pid/ppid cycle from a snapshot racing process
+/// exit and id reuse -- not expected on a real process tree, but cheap to
+/// guard against.
+fn canonical_root_pid(
+    pid: u32,
+    exe_name: &str,
+    parent_of: &std::collections::HashMap<u32, u32>,
+) -> u32 {
+    canonical_root_pid_with(pid, exe_name, parent_of, |ancestor_pid| {
+        crate::sources::get_exe_path(ancestor_pid)
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    })
+}
+
+/// `canonical_root_pid`'s logic, parameterized over the ancestor-exe-name
+/// lookup so it's unit-testable without a real process tree (see the tests
+/// module below) -- `canonical_root_pid` supplies the real
+/// `crate::sources::get_exe_path`-backed lookup.
+fn canonical_root_pid_with(
+    pid: u32,
+    exe_name: &str,
+    parent_of: &std::collections::HashMap<u32, u32>,
+    exe_name_of: impl Fn(u32) -> Option<String>,
+) -> u32 {
+    let mut current = pid;
+    for _ in 0..64 {
+        let Some(&parent) = parent_of.get(&current) else {
+            break;
+        };
+        if parent == 0 || parent == current {
+            break;
+        }
+        let Some(parent_exe_name) = exe_name_of(parent) else {
+            break;
+        };
+        if !parent_exe_name.eq_ignore_ascii_case(exe_name) {
+            break;
+        }
+        current = parent;
+    }
+    current
 }
 
 /// Read PKEY_Device_FriendlyName from the device property store.
@@ -1010,5 +1120,79 @@ mod tests {
         let input = vec![0.5f32; 200 * 2];
         let out = r.process(&input);
         assert!(out.iter().all(|&s| (s - 0.5).abs() < 1e-5));
+    }
+
+    /// Discord.exe-shaped tree: main process 100 spawned renderer/GPU helper
+    /// 200, which in turn spawned a utility process 300 -- all still
+    /// Discord.exe. A session found on the deepest child (300) should
+    /// canonicalize all the way up to the topmost same-exe ancestor (100),
+    /// regardless of walk depth.
+    #[test]
+    fn canonical_root_pid_walks_up_through_multiple_same_exe_ancestors() {
+        let parent_of = std::collections::HashMap::from([(300u32, 200u32), (200u32, 100u32)]);
+        let exe_name_of = |pid: u32| match pid {
+            100 | 200 => Some("Discord.exe".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            canonical_root_pid_with(300, "Discord.exe", &parent_of, exe_name_of),
+            100
+        );
+    }
+
+    /// The walk stops at the boundary where the parent is a different exe
+    /// (e.g. the topmost Discord.exe process was launched by explorer.exe) --
+    /// it must not keep climbing into an unrelated process tree.
+    #[test]
+    fn canonical_root_pid_stops_at_a_different_parent_exe() {
+        let parent_of = std::collections::HashMap::from([(100u32, 1u32)]);
+        let exe_name_of = |pid: u32| match pid {
+            1 => Some("explorer.exe".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            canonical_root_pid_with(100, "Discord.exe", &parent_of, exe_name_of),
+            100
+        );
+    }
+
+    /// Two genuinely independent top-level launches of the same exe (neither
+    /// is an ancestor of the other) must resolve to two different canonical
+    /// pids -- this is the "two separate game/app windows" case that should
+    /// still get two separate tracks.
+    #[test]
+    fn canonical_root_pid_leaves_unrelated_instances_distinct() {
+        let parent_of = std::collections::HashMap::new();
+        let exe_name_of = |_pid: u32| None;
+        let a = canonical_root_pid_with(100, "Game.exe", &parent_of, exe_name_of);
+        let b = canonical_root_pid_with(500, "Game.exe", &parent_of, exe_name_of);
+        assert_eq!(a, 100);
+        assert_eq!(b, 500);
+        assert_ne!(a, b);
+    }
+
+    /// A pid missing from the parent map (e.g. the snapshot failed, or this
+    /// is the true root of the system process tree) must resolve to itself
+    /// rather than panicking or looping.
+    #[test]
+    fn canonical_root_pid_with_empty_parent_map_returns_pid_itself() {
+        let parent_of = std::collections::HashMap::new();
+        assert_eq!(
+            canonical_root_pid_with(42, "Anything.exe", &parent_of, |_| None),
+            42
+        );
+    }
+
+    /// A pid/ppid cycle (shouldn't happen on a real process tree, but a
+    /// snapshot racing pid reuse could in principle produce one) must not
+    /// hang -- the 64-hop bound should kick in and return some pid rather
+    /// than looping forever.
+    #[test]
+    fn canonical_root_pid_bounded_against_a_parent_cycle() {
+        let parent_of = std::collections::HashMap::from([(1u32, 2u32), (2u32, 1u32)]);
+        let exe_name_of = |_pid: u32| Some("Loop.exe".to_string());
+        // Must return promptly (no infinite loop) -- which pid it lands on
+        // isn't load-bearing for a case that shouldn't occur in practice.
+        let _ = canonical_root_pid_with(1, "Loop.exe", &parent_of, exe_name_of);
     }
 }

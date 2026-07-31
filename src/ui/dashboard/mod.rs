@@ -195,13 +195,16 @@ impl App {
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
-        // Default to loopback (system/game audio) only. The MP4 container's physical
-        // stream order doesn't follow AddStream() call order (see writer.rs/remux.rs),
-        // so when multiple audio tracks are muxed, naive players picking "the first
-        // audio stream" can land on a different track than intended. Recording just
-        // the loopback device by default keeps the common case to a single,
-        // deterministically audible track; mic capture remains an opt-in checkbox.
-        let selected_audio: Vec<bool> = audio_devices.iter().map(|d| d.is_loopback).collect();
+        // Restores the user's last saved SYSTEM audio selection if there is
+        // one; otherwise defaults to loopback (system/game audio) only. The
+        // MP4 container's physical stream order doesn't follow AddStream()
+        // call order (see writer.rs/remux.rs), so when multiple audio tracks
+        // are muxed, naive players picking "the first audio stream" can land
+        // on a different track than intended. Recording just the loopback
+        // device by default keeps the common case to a single,
+        // deterministically audible track; mic capture remains an opt-in
+        // checkbox -- see `actions::resolve_selected_audio`.
+        let selected_audio = actions::resolve_selected_audio(&audio_devices, &config);
         // Curated entirely by config -- see `actions::build_app_audio_sources`'s
         // doc comment for why this doesn't auto-populate from whatever's
         // currently making sound. Every entry is registered by
