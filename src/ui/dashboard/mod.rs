@@ -73,6 +73,11 @@ pub struct App {
     app_audio_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     app_audio_only: bool,
     overlay_enabled: bool,
+    /// Whether Windows' own colored capture-border indicator shows around
+    /// the recorded window/monitor during a manual recording -- see
+    /// `Config::show_recording_border`'s doc comment. Toggled via the menu
+    /// bar button next to Overlay; persisted the same lazy, on-exit-only way.
+    show_recording_border: bool,
     show_quality_popup: bool,
     show_hotkeys_popup: bool,
     show_audio_popup: bool,
@@ -191,6 +196,7 @@ impl App {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         let overlay_enabled = config.overlay.enabled;
+        let show_recording_border = config.show_recording_border;
         let app_audio_only = config.default_app_audio_only;
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
@@ -243,6 +249,7 @@ impl App {
             app_audio_icon_textures: std::collections::HashMap::new(),
             app_audio_only,
             overlay_enabled,
+            show_recording_border,
             show_quality_popup: false,
             show_hotkeys_popup: false,
             show_audio_popup: false,

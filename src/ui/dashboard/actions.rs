@@ -357,6 +357,7 @@ impl App {
             selected_app_sources,
             selected_app_gains,
             self.app_audio_only,
+            self.show_recording_border,
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
             encode,

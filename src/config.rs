@@ -67,6 +67,17 @@ pub struct Config {
     /// failing.
     #[serde(default)]
     pub selected_audio_device_ids: Option<Vec<String>>,
+    /// Whether Windows' own colored capture-border indicator shows around the
+    /// recorded window/monitor during a manual recording (see
+    /// `capture::video::run_video_capture`'s `show_border` param and
+    /// `SetIsBorderRequired`) -- doesn't affect Highlight background
+    /// buffering, which always suppresses it regardless of this setting so
+    /// buffering isn't mistaken for an active recording. Defaults to `true`
+    /// (today's existing behavior) -- `#[serde(default = "default_true")]`
+    /// so a `config.toml` saved before this field existed still loads
+    /// instead of failing.
+    #[serde(default = "default_true")]
+    pub show_recording_border: bool,
 }
 
 fn default_true() -> bool {
@@ -271,6 +282,7 @@ impl Default for Config {
             window_position: None,
             registered_app_audio: Vec::new(),
             selected_audio_device_ids: None,
+            show_recording_border: true,
         }
     }
 }
@@ -910,6 +922,48 @@ mod tests {
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.selected_audio_device_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn show_recording_border_is_true_by_default() {
+        assert!(Config::default().show_recording_border);
+    }
+
+    #[test]
+    fn show_recording_border_missing_from_toml_falls_back_to_true() {
+        // Simulates a config.toml saved before this field existed.
+        let text = r#"
+            output_dir = "."
+            language = "en"
+            [hotkeys]
+            start_stop = "F9"
+            pause = "F8"
+            toggle_overlay = "F7"
+            [overlay]
+            enabled = false
+            opacity = 0.85
+            [encode]
+            codec = "h265"
+            fps = 60
+            resolution_mode = "native"
+            custom_width = 1920
+            custom_height = 1080
+            bitrate_mode = "auto"
+            manual_bitrate_mbps = 12
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert!(parsed.show_recording_border);
+    }
+
+    #[test]
+    fn show_recording_border_round_trips_toml_when_disabled() {
+        let original = Config {
+            show_recording_border: false,
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert!(!parsed.show_recording_border);
     }
 
     #[test]
