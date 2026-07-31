@@ -35,6 +35,21 @@ impl App {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
                     }
+                    // Same lazy on-exit persistence as the Overlay toggle
+                    // above -- no immediate config.save() here either.
+                    let border_label = if self.show_recording_border {
+                        s.border_on
+                    } else {
+                        s.border_off
+                    };
+                    if ui
+                        .add(accent_button(border_label, ACCENT_SECONDARY))
+                        .on_hover_text(s.border_toggle_tooltip)
+                        .clicked()
+                    {
+                        self.show_recording_border = !self.show_recording_border;
+                        self.config.show_recording_border = self.show_recording_border;
+                    }
                     let lang = self.config.lang();
                     if ui
                         .add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY))
