@@ -159,7 +159,7 @@ Make sure `cargo build --release`, `cargo clippy --all-targets`, and `cargo test
 
 ## Getting Help
 
-- 📖 **Documentation**: [README.md](README.md) covers usage, features, and requirements.
+- 📖 **Documentation**: [docs/USER_GUIDE.md](docs/USER_GUIDE.md) covers usage, features, and requirements.
 - 🐛 **Issues**: browse existing issues or open a new one.
 
 ## Pull Request Guidelines

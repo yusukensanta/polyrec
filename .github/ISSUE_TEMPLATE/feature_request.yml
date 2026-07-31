@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        PolyRec is a focused Windows screen/audio recorder. Features far outside that scope (e.g. video editing, live streaming, cloud upload) are more likely to be closed as out of scope — check the [README](../../README.md#features) first.
+        PolyRec is a focused Windows screen/audio recorder. Features far outside that scope (e.g. video editing, live streaming, cloud upload) are more likely to be closed as out of scope — check the [User Guide](../../docs/USER_GUIDE.md#features) first.
 
   - type: dropdown
     id: area
