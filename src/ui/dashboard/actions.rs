@@ -22,24 +22,45 @@ use std::time::Instant;
 /// isn't currently running gets a synthetic `process_ids: vec![]` entry
 /// (icon re-extracted from the path it was registered with) so it still
 /// shows and can still be un-registered even while idle.
-pub(super) fn build_app_audio_sources(config: &Config) -> Vec<AppAudioSource> {
+///
+/// Takes `&mut Config` (not just `&Config`) because the idle path can
+/// self-heal `RegisteredApp::exe_path`: a Squirrel-updated app (Discord,
+/// Slack, ...) moves itself into a new `app-<version>` folder and removes
+/// the old one, which otherwise leaves the path pinned at registration time
+/// permanently stale -- breaking icon extraction for as long as the app
+/// stays idle (see `sources::resolve_possibly_stale_exe_path`). When a
+/// fresher path is found, it's written back into `config` and saved
+/// immediately (best-effort -- logged, not surfaced to the UI, same as
+/// other non-interactive background saves in this codebase) so the walk
+/// that found it doesn't need repeating on every future idle rebuild.
+pub(super) fn build_app_audio_sources(config: &mut Config) -> Vec<AppAudioSource> {
     let live = enumerate_app_audio_sessions().unwrap_or_default();
-    config
+    let mut healed_any = false;
+    let sources = config
         .registered_app_audio
-        .iter()
+        .iter_mut()
         .map(|reg| {
             if let Some(matched) = live.iter().find(|s| s.exe_name == reg.exe_name) {
                 matched.clone()
             } else {
+                let resolved_path = crate::sources::resolve_possibly_stale_exe_path(&reg.exe_path);
+                if resolved_path != reg.exe_path {
+                    reg.exe_path = resolved_path.clone();
+                    healed_any = true;
+                }
                 AppAudioSource {
                     process_ids: Vec::new(),
                     exe_name: reg.exe_name.clone(),
                     display_name: crate::sources::display_name_from_exe_name(&reg.exe_name),
-                    icon_rgba: crate::sources::extract_exe_icon_rgba(&reg.exe_path),
+                    icon_rgba: crate::sources::extract_exe_icon_rgba(&resolved_path),
                 }
             }
         })
-        .collect()
+        .collect();
+    if healed_any && let Err(e) = config.save() {
+        tracing::error!("failed to save config after healing a stale registered app path: {e}");
+    }
+    sources
 }
 
 /// Which of `devices`' checkboxes should start checked -- `config`'s saved
@@ -233,7 +254,7 @@ impl App {
         // devices have -- being in the list at all already means "record
         // this", always. Only the live process_ids (idle vs running) can
         // change between refreshes.
-        let new_app_audio_sources = build_app_audio_sources(&self.config);
+        let new_app_audio_sources = build_app_audio_sources(&mut self.config);
         if app_audio_fingerprint(&new_app_audio_sources)
             != app_audio_fingerprint(&self.app_audio_sources)
         {
@@ -274,7 +295,7 @@ impl App {
     /// app that's still running doesn't change its live `process_ids`, the
     /// thing that poll's fingerprint actually watches for).
     pub(super) fn rebuild_app_audio_sources_now(&mut self) {
-        self.app_audio_sources = build_app_audio_sources(&self.config);
+        self.app_audio_sources = build_app_audio_sources(&mut self.config);
         self.selected_app_audio = vec![true; self.app_audio_sources.len()];
         self.app_audio_icon_textures.clear();
     }

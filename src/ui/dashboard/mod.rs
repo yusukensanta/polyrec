@@ -192,7 +192,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mut config: Config) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         let overlay_enabled = config.overlay.enabled;
@@ -215,7 +215,7 @@ impl App {
         // doc comment for why this doesn't auto-populate from whatever's
         // currently making sound. Every entry is registered by
         // construction, so it's always checked.
-        let app_audio_sources = actions::build_app_audio_sources(&config);
+        let app_audio_sources = actions::build_app_audio_sources(&mut config);
         let selected_app_audio = vec![true; app_audio_sources.len()];
         let export_track_selection = vec![true; n];
         let wake_ctx = cc.egui_ctx.clone();
