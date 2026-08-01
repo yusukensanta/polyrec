@@ -468,8 +468,10 @@ fn resolve_shortcut_target(lnk_path: &std::path::Path) -> Option<String> {
         .and_then(|f| f.to_str())
         .is_some_and(|f| f.eq_ignore_ascii_case("Update.exe"))
     {
-        return parse_process_start_arg(&arguments)
-            .and_then(|app_exe| resolve_squirrel_app_exe(&target_path, &app_exe));
+        return parse_process_start_arg(&arguments).and_then(|app_exe| {
+            let parent = std::path::Path::new(&target_path).parent()?;
+            resolve_squirrel_app_exe(parent, &app_exe)
+        });
     }
 
     Some(target_path)
@@ -488,14 +490,16 @@ fn parse_process_start_arg(arguments: &str) -> Option<String> {
 }
 
 /// Finds `<app_exe_name>` under whichever `app-<version>` sibling folder of
-/// `update_exe_path` has it most recently modified -- Squirrel keeps the
-/// live app in a versioned folder next to `Update.exe` and typically only
-/// the current version's folder survives an update, but picking by mtime
-/// rather than assuming exactly one folder or trying to parse/compare
-/// version strings handles both the common case and a stale leftover
-/// folder from an interrupted update.
-fn resolve_squirrel_app_exe(update_exe_path: &str, app_exe_name: &str) -> Option<String> {
-    let parent = std::path::Path::new(update_exe_path).parent()?;
+/// `parent` has it most recently modified -- Squirrel keeps the live app in
+/// a versioned folder next to `Update.exe` and typically only the current
+/// version's folder survives an update, but picking by mtime rather than
+/// assuming exactly one folder or trying to parse/compare version strings
+/// handles both the common case and a stale leftover folder from an
+/// interrupted update. Takes the parent directory directly (rather than
+/// deriving it from an `Update.exe` path) so `resolve_possibly_stale_exe_path`
+/// can reuse this same scan starting from an already-registered exe's own
+/// path instead of a shortcut's `Update.exe` target.
+fn resolve_squirrel_app_exe(parent: &std::path::Path, app_exe_name: &str) -> Option<String> {
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in std::fs::read_dir(parent).ok()?.flatten() {
         let dir = entry.path();
@@ -516,6 +520,32 @@ fn resolve_squirrel_app_exe(update_exe_path: &str, app_exe_name: &str) -> Option
         }
     }
     best.map(|(_, path)| path.to_string_lossy().into_owned())
+}
+
+/// `exe_path` if it still exists, otherwise a best-effort re-resolution for
+/// the common case that breaks it: a Squirrel-updated app (Discord, Slack,
+/// and other Electron apps using the same updater) moving itself into a new
+/// `app-<version>` sibling folder and removing the old one out from under an
+/// already-registered `RegisteredApp::exe_path` -- see
+/// `ui::dashboard::actions::build_app_audio_sources`'s doc comment for where
+/// this matters (a registered-but-not-currently-running app's icon has
+/// nothing else to extract from). Falls back to `exe_path` unchanged if
+/// re-resolution doesn't find anything -- same "best effort, never worse
+/// than before" convention as `extract_exe_icon_rgba`.
+pub(crate) fn resolve_possibly_stale_exe_path(exe_path: &str) -> String {
+    if std::path::Path::new(exe_path).exists() {
+        return exe_path.to_string();
+    }
+    let resolved = (|| {
+        let exe_name = std::path::Path::new(exe_path).file_name()?.to_str()?;
+        // `exe_path` is expected to look like `.../<App>/app-<old-version>/Foo.exe`
+        // -- its grandparent (`.../<App>/`) is where Squirrel's sibling
+        // `app-<version>` folders live, the same shape `resolve_squirrel_app_exe`
+        // already scans starting from `Update.exe`'s own parent.
+        let grandparent = std::path::Path::new(exe_path).parent()?.parent()?;
+        resolve_squirrel_app_exe(grandparent, exe_name)
+    })();
+    resolved.unwrap_or_else(|| exe_path.to_string())
 }
 
 #[cfg(test)]
@@ -654,5 +684,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn resolve_possibly_stale_exe_path_returns_existing_path_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe_path = dir.path().join("App.exe");
+        std::fs::write(&exe_path, b"stub").unwrap();
+        let exe_path_str = exe_path.to_string_lossy().into_owned();
+        assert_eq!(resolve_possibly_stale_exe_path(&exe_path_str), exe_path_str);
+    }
+
+    #[test]
+    fn resolve_possibly_stale_exe_path_finds_the_new_squirrel_version_folder() {
+        // Simulates a Squirrel-updated app: the registered path
+        // (.../App/app-1.0.0/App.exe) no longer exists on disk, having been
+        // replaced by a newer sibling version folder -- the same shape
+        // Discord/Slack/other Electron apps update themselves into.
+        let root = tempfile::tempdir().unwrap();
+        let old_dir = root.path().join("app-1.0.0");
+        let new_dir = root.path().join("app-1.0.1");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let new_exe = new_dir.join("App.exe");
+        std::fs::write(&new_exe, b"stub").unwrap();
+
+        let stale_path = old_dir.join("App.exe").to_string_lossy().into_owned();
+        let resolved = resolve_possibly_stale_exe_path(&stale_path);
+        assert_eq!(resolved, new_exe.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn resolve_possibly_stale_exe_path_falls_back_unchanged_when_unresolvable() {
+        // No sibling app-* folder contains the exe at all -- genuinely gone,
+        // not just moved -- so the best-effort fallback is the original
+        // (still-nonexistent) path, not a panic or an unrelated guess.
+        let root = tempfile::tempdir().unwrap();
+        let old_dir = root.path().join("app-1.0.0");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        let stale_path = old_dir.join("App.exe").to_string_lossy().into_owned();
+        assert_eq!(resolve_possibly_stale_exe_path(&stale_path), stale_path);
     }
 }

@@ -380,7 +380,18 @@ impl App {
                         {
                             ui.image((tex.id(), egui::vec2(16.0, 16.0)));
                         }
-                        if ui.button(&candidate.display_name).clicked() {
+                        // `.truncate()` -- an installed app's display name
+                        // (derived from its Start Menu shortcut's filename,
+                        // not curated) can be long enough to force this
+                        // button wider than the popup's fixed width (see
+                        // POPUP_WIDTH), pushing content past the window's
+                        // right edge instead of the window resizing to fit --
+                        // a plain `ui.button(text)` doesn't wrap or clip its
+                        // label to the available row width on its own.
+                        if ui
+                            .add(egui::Button::new(&candidate.display_name).truncate())
+                            .clicked()
+                        {
                             picked = Some((candidate.exe_name.clone(), candidate.source.clone()));
                         }
                         if candidate.is_running() {
