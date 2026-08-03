@@ -1001,12 +1001,22 @@ mod tests {
         let writer = RecordingWriter::new(&path, 64, 64, 30, "h264", 500_000, &[], false)
             .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");
-        writer
-            .write_video(VideoFrame {
-                pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
-            })
-            .expect("write_video");
+        // Several frames, not one -- a single WriteSample followed immediately
+        // by Finalize occasionally raced Media Foundation's async software
+        // encoder on CI's (virtualized, no real GPU) runner: Finalize decided
+        // the stream had processed zero samples (MF_E_SINK_NO_SAMPLES_PROCESSED,
+        // 0xC00D4A44) because the lone sample hadn't reached the encoder MFT
+        // yet. A real recording never hits this -- it always spans real
+        // wall-clock time across many frames -- so this only ever showed up in
+        // this exact "write once, finalize immediately" test shape.
+        for i in 0..3u32 {
+            writer
+                .write_video(VideoFrame {
+                    pts: Duration::from_millis(33 * i as u64),
+                    data: vec![0u8; 64 * 64 * 4],
+                })
+                .expect("write_video");
+        }
         let path = writer.finalize().expect("finalize");
 
         assert_eq!(
