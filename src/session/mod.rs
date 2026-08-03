@@ -416,17 +416,33 @@ impl SessionManager {
     /// before treating the output file as ready (see recorder-finalize-race design spec).
     pub fn stop_capture(&mut self) -> Option<JoinHandle<Result<PathBuf, AppError>>> {
         if let Some(active) = self.active.take() {
-            // Signal capture loops directly -- abort() below has no effect on the
-            // spawn_blocking closures actually running the loops (see stop_flag doc).
+            // Signal capture loops to exit -- `abort()` has no effect on the
+            // spawn_blocking closures actually running them (see stop_flag doc);
+            // they only stop by observing this flag on their next loop iteration.
             active.stop_flag.store(true, Ordering::SeqCst);
-            // Abort capture sources first (stops new frame production)
-            for h in active.capture_handles {
-                h.abort();
-            }
-            // Abort pump tasks (stops forwarding)
-            for h in active.pump_handles {
-                h.abort();
-            }
+            // Wait for every capture loop to actually return, and for the pump
+            // tasks forwarding their output to drain and exit in turn (a pump
+            // exits once its capture loop's sender is dropped, which happens
+            // when the loop returns) -- bounded by the capture loops' own
+            // shutdown time (at most on the order of one frame, not the
+            // recording's length), not blocking indefinitely.
+            //
+            // This must happen *before* `Stop` is sent below: `Stop` used to be
+            // sent immediately, which could reach the recorder and trigger
+            // `finalize()` before a still-in-flight frame had been forwarded by
+            // its pump, silently dropping it from the output. Video capture
+            // trails its last-captured frame by up to one iteration by design
+            // (see the ping-pong buffering in `capture::video`), so without
+            // this wait that final frame was frequently lost -- reproduced by a
+            // real short recording ending up with zero video frames.
+            tokio::runtime::Handle::current().block_on(async {
+                for h in active.capture_handles {
+                    let _ = h.await;
+                }
+                for h in active.pump_handles {
+                    let _ = h.await;
+                }
+            });
             // Deliver Stop to recorder; blocking_send is safe from non-async context
             let _ = active.recording_tx.blocking_send(RecordingCommand::Stop);
             Some(active.recorder_handle)
@@ -758,12 +774,18 @@ impl SessionManager {
     pub fn stop_highlight_buffering(&mut self, discard: bool) {
         if let Some(active) = self.highlight.take() {
             active.stop_flag.store(true, Ordering::SeqCst);
-            for h in active.capture_handles {
-                h.abort();
-            }
-            for h in active.pump_handles {
-                h.abort();
-            }
+            // See the matching comment in `stop_capture` -- waited on (not
+            // aborted) so the capture loops' final in-flight frames reach the
+            // highlight actor before `Stop` does, instead of being silently
+            // dropped by a `Stop` that got there first.
+            tokio::runtime::Handle::current().block_on(async {
+                for h in active.capture_handles {
+                    let _ = h.await;
+                }
+                for h in active.pump_handles {
+                    let _ = h.await;
+                }
+            });
             let _ = active.highlight_tx.blocking_send(RecordingCommand::Stop);
             if discard {
                 let _ = tokio::runtime::Handle::current().block_on(active.highlight_handle);

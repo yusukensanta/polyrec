@@ -11,10 +11,11 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_STAGING, ID3D11Resource, ID3D11Texture2D,
+    D3D11_CPU_ACCESS_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Resource, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAS_STILL_DRAWING;
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
@@ -139,6 +140,68 @@ fn scale_bgra(src: Vec<u8>, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> V
     dst
 }
 
+/// Which staging slot to copy the newly-captured frame into, and which slot to
+/// read back this iteration (the other one, copied ~1 iteration ago) -- pulled
+/// out of `run_video_capture` because the alternation itself is easy to get
+/// off-by-one on and is worth pinning down with a test independent of D3D11.
+fn ping_pong_indices(frame_counter: u64) -> (usize, usize) {
+    let write_idx = (frame_counter % 2) as usize;
+    (write_idx, 1 - write_idx)
+}
+
+/// Maps `staging` for CPU read and copies its contents out row-by-row (handles
+/// driver-added row padding via `RowPitch`). `map_flags` is normally
+/// `D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32` from the steady-state ping-pong loop
+/// in `run_video_capture` -- the GPU copy that filled `staging` was issued a
+/// full iteration ago, so it has almost always already finished, and this way
+/// a miss returns `Ok(None)` instead of blocking the capture thread on the
+/// GPU. Callers must not treat `Ok(None)` as "drop this frame" -- fall back to
+/// a blocking call (`map_flags = 0`) so the frame is never silently lost, only
+/// ever delayed (see the call site in `run_video_capture` for why: dropping
+/// instead of falling back previously produced near-empty recordings under
+/// sustained GPU contention).
+unsafe fn map_staging(
+    device: &D3dDevice,
+    staging: &ID3D11Resource,
+    width: u32,
+    height: u32,
+    map_flags: u32,
+) -> Result<Option<Vec<u8>>, AppError> {
+    unsafe {
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        match device
+            .d3d_context
+            .Map(staging, 0, D3D11_MAP_READ, map_flags, Some(&mut mapped))
+        {
+            Ok(()) => {}
+            Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => return Ok(None),
+            Err(e) => return Err(AppError::Capture(format!("Map: {e}"))),
+        }
+
+        let row_pitch = mapped.RowPitch as usize;
+        let packed_row = width as usize * 4;
+        let len = height as usize * packed_row;
+        // SAFETY: every byte of `pixel_data` is written by the row-copy loop
+        // below before it's ever read, so skipping `vec![0u8; len]`'s zero-init
+        // (a full extra `len`-byte write -- several MB at 1080p+, every frame)
+        // is sound.
+        #[allow(clippy::uninit_vec)]
+        let mut pixel_data: Vec<u8> = {
+            let mut v = Vec::with_capacity(len);
+            v.set_len(len);
+            v
+        };
+        for row in 0..height as usize {
+            let src = (mapped.pData as *const u8).add(row * row_pitch);
+            let dst = pixel_data.as_mut_ptr().add(row * packed_row);
+            std::ptr::copy_nonoverlapping(src, dst, packed_row);
+        }
+        device.d3d_context.Unmap(staging, 0);
+
+        Ok(Some(pixel_data))
+    }
+}
+
 // Each param here is independently resolved by the caller (capture vs. output
 // size are deliberately separate concepts, see scale_bgra) -- a param struct
 // would just rename this same list without adding clarity at this call boundary.
@@ -240,38 +303,50 @@ pub async fn run_video_capture(
     }))
     .map_err(|e| AppError::Capture(format!("GraphicsCaptureItem::Closed: {e}")))?;
 
-    // Staging texture — created once here and reused every frame via CopyResource.
-    // This used to be recreated inside the loop despite this comment already
-    // claiming otherwise: allocating a fresh GPU resource every frame (at 60fps)
-    // is a driver round-trip per frame for no reason, since CopyResource just
-    // overwrites the same staging texture's contents each time regardless.
-    let staging_desc = D3D11_TEXTURE2D_DESC {
-        Width: capture_width,
-        Height: capture_height,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_STAGING,
-        // BindFlags, CPUAccessFlags, MiscFlags are plain u32 in windows-rs 0.58
-        BindFlags: 0,
-        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-        MiscFlags: 0,
+    // Two staging textures, ping-ponged (see `ping_pong_indices`/`map_staging`),
+    // created once here and reused every frame via CopyResource. A single staging
+    // texture used to be Map()'d in the same iteration it was CopyResource'd into
+    // -- D3D11_MAP_READ forces the CPU to block until that GPU copy finishes,
+    // which stalls the GPU's command queue and was directly visible as stutter
+    // in whatever's being recorded (a game sharing that same GPU). Ping-ponging
+    // means the slot being read was copied a full iteration ago, so by the time
+    // we map it the GPU is essentially always already done -- combined with
+    // D3D11_MAP_FLAG_DO_NOT_WAIT below, this makes the capture thread never
+    // actually block on the GPU in the steady state.
+    let create_staging = |device: &D3dDevice| -> Result<ID3D11Resource, AppError> {
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Width: capture_width,
+            Height: capture_height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            // BindFlags, CPUAccessFlags, MiscFlags are plain u32 in windows-rs 0.58
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        unsafe {
+            let mut staging: Option<ID3D11Texture2D> = None;
+            device
+                .d3d_device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+                .map_err(|e| AppError::Capture(format!("CreateTexture2D staging: {e}")))?;
+            staging
+                .expect("CreateTexture2D succeeded but staging is None")
+                .cast()
+                .map_err(|e| AppError::Capture(format!("cast staging to ID3D11Resource: {e}")))
+        }
     };
-    let staging_res: ID3D11Resource = unsafe {
-        let mut staging: Option<ID3D11Texture2D> = None;
-        device
-            .d3d_device
-            .CreateTexture2D(&staging_desc, None, Some(&mut staging))
-            .map_err(|e| AppError::Capture(format!("CreateTexture2D staging: {e}")))?;
-        staging
-            .expect("CreateTexture2D succeeded but staging is None")
-            .cast()
-            .map_err(|e| AppError::Capture(format!("cast staging to ID3D11Resource: {e}")))?
-    };
+    let staging: [ID3D11Resource; 2] = [create_staging(&device)?, create_staging(&device)?];
+    // pending[slot] is the pts of the frame most recently copied into that slot
+    // and not yet read back -- None means there's nothing unread there.
+    let mut pending: [Option<std::time::Duration>; 2] = [None, None];
+    let mut frame_counter: u64 = 0;
 
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -312,44 +387,81 @@ pub async fn run_video_capture(
                 .map_err(|e| AppError::Capture(format!("GetInterface ID3D11Texture2D: {e}")))?
         };
 
-        let pts;
-        let data;
+        let (write_idx, read_idx) = ping_pong_indices(frame_counter);
+        frame_counter += 1;
+
         unsafe {
             let src_res: ID3D11Resource = texture
                 .cast()
                 .map_err(|e| AppError::Capture(format!("cast texture to ID3D11Resource: {e}")))?;
+            device.d3d_context.CopyResource(&staging[write_idx], &src_res);
+        }
+        pending[write_idx] = Some(clock.elapsed());
 
-            device.d3d_context.CopyResource(&staging_res, &src_res);
-
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            device
-                .d3d_context
-                .Map(&staging_res, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .map_err(|e| AppError::Capture(format!("Map: {e}")))?;
-
-            let row_pitch = mapped.RowPitch as usize;
-            let packed_row = capture_width as usize * 4;
-            let mut pixel_data = vec![0u8; capture_height as usize * packed_row];
-            for row in 0..capture_height as usize {
-                let src = (mapped.pData as *const u8).add(row * row_pitch);
-                let dst = pixel_data.as_mut_ptr().add(row * packed_row);
-                std::ptr::copy_nonoverlapping(src, dst, packed_row);
+        // Read back the slot copied last iteration -- see the ping-pong comment
+        // above the staging textures. Try non-blocking first (the GPU copy from
+        // last iteration has almost always finished by now); a `None` here means
+        // the GPU genuinely hasn't caught up yet -- e.g. under heavy GPU load
+        // from a demanding game, exactly the case this is meant to help with --
+        // so fall back to a blocking Map rather than silently dropping the
+        // frame. A dropped-and-never-recovered frame previously produced
+        // recordings that were almost entirely empty under sustained GPU
+        // contention (PTS still advanced in real time, but frame data did not).
+        // This fallback never blocks more than the original single-buffer
+        // implementation did on every frame; it only avoids the block when the
+        // GPU has already caught up.
+        if let Some(pts) = pending[read_idx].take() {
+            let mut pixel_data = unsafe {
+                map_staging(
+                    &device,
+                    &staging[read_idx],
+                    capture_width,
+                    capture_height,
+                    D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
+                )?
+            };
+            if pixel_data.is_none() {
+                pixel_data = unsafe {
+                    map_staging(&device, &staging[read_idx], capture_width, capture_height, 0)?
+                };
             }
-            device.d3d_context.Unmap(&staging_res, 0);
+            if let Some(pixel_data) = pixel_data {
+                let data = scale_bgra(
+                    pixel_data,
+                    capture_width,
+                    capture_height,
+                    output_width,
+                    output_height,
+                );
+                if tx.send(VideoFrame { pts, data }).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 
-            pts = clock.elapsed();
-            data = scale_bgra(
+    // The ping-pong readback above trails one iteration behind by design (see
+    // above), so the last frame copied before stopping was never read back in
+    // the loop -- flush it now. Blocking Map (map_flags=0) is fine here since
+    // we're already stopping, not racing a game's frame time.
+    let mut leftover: Vec<(std::time::Duration, usize)> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, pts)| pts.map(|pts| (pts, idx)))
+        .collect();
+    leftover.sort_by_key(|(pts, _)| *pts);
+    for (pts, idx) in leftover {
+        let pixel_data =
+            unsafe { map_staging(&device, &staging[idx], capture_width, capture_height, 0)? };
+        if let Some(pixel_data) = pixel_data {
+            let data = scale_bgra(
                 pixel_data,
                 capture_width,
                 capture_height,
                 output_width,
                 output_height,
             );
-        }
-
-        let video_frame = VideoFrame { pts, data };
-        if tx.send(video_frame).await.is_err() {
-            break;
+            let _ = tx.send(VideoFrame { pts, data }).await;
         }
     }
 
@@ -362,6 +474,29 @@ pub async fn run_video_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ping_pong_indices_alternate_and_never_collide() {
+        for frame_counter in 0..8u64 {
+            let (write_idx, read_idx) = ping_pong_indices(frame_counter);
+            assert_ne!(write_idx, read_idx, "must never write and read the same slot");
+            assert!(write_idx < 2 && read_idx < 2);
+            // write_idx alternates 0,1,0,1,...
+            assert_eq!(write_idx, (frame_counter % 2) as usize);
+        }
+    }
+
+    #[test]
+    fn ping_pong_indices_reads_the_slot_written_last_iteration() {
+        // Whatever slot iteration N writes to, iteration N+1 must read back --
+        // that's the entire point of the ping-pong (read what was copied ~1
+        // iteration ago, never the slot just written this iteration).
+        for frame_counter in 0..8u64 {
+            let (write_idx, _) = ping_pong_indices(frame_counter);
+            let (_, next_read_idx) = ping_pong_indices(frame_counter + 1);
+            assert_eq!(write_idx, next_read_idx);
+        }
+    }
 
     #[test]
     fn scale_bgra_identity_when_sizes_match() {
