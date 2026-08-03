@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::mpsc;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey,
     UnregisterHotKey, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9,
@@ -60,6 +62,20 @@ impl HotkeyListener {
 
         let handle = std::thread::spawn(move || {
             let tid = unsafe { GetCurrentThreadId() };
+            // WH_KEYBOARD_LL runs this thread's hook callback synchronously,
+            // system-wide, for every keystroke before it reaches the
+            // foreground app (including an exclusive-fullscreen game) --
+            // Windows needs to actually schedule this thread promptly to
+            // deliver that callback. At default priority, a CPU-heavy
+            // recording session (video/audio capture + encode, all
+            // competing for cores) can delay the scheduler getting to this
+            // thread, which reads to every application as system-wide
+            // keyboard input lag, not just polyrec's own hotkeys. The
+            // callback itself does negligible work (a hashset lookup and a
+            // few GetAsyncKeyState calls) and spends effectively all its
+            // time blocked in GetMessageW below, so running it at the
+            // highest priority is safe -- it can't starve anything else.
+            let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) };
             // Force Win32 message queue creation before signalling the ID.
             // PostThreadMessageW silently drops messages if the queue doesn't exist yet.
             unsafe {
