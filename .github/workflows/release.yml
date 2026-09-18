@@ -63,10 +63,10 @@ jobs:
       # dtolnay/rust-toolchain doesn't tag releases -- "stable" is a real,
       # continuously-updated branch in that repo (this is its documented
       # normal usage), so pinning here means the exact commit currently at
-      # the tip of that branch rather than a version.
+      # the tip of that branch rather than a version. No `toolchain:` input,
+      # same reasoning as ci.yml -- reads rust-toolchain.toml so a release
+      # build always uses the exact Rust version CI already verified against.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
-        with:
-          toolchain: stable
 
       # A tag push is its own cache scope, distinct from every other tag and
       # from main -- GitHub Actions only lets a run restore a cache from its
