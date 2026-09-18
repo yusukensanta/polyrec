@@ -257,142 +257,41 @@ impl SessionManager {
         });
         let video_pump_handle = spawn_video_pump(video_rx, recording_tx.clone(), frame_count);
 
-        // Spawn audio capture + pump (one per device)
+        // Spawn audio capture + pump (one per device), then per-app audio
+        // capture + pump -- see spawn_device_audio_tracks/spawn_app_audio_tracks
+        // for what each does and why sharing them with start_highlight_buffering
+        // is safe.
         let mut capture_handles = vec![video_capture_handle];
         let mut pump_handles = vec![video_pump_handle];
         let device_track_count = audio_devices.len();
 
-        for (i, dev) in audio_devices.into_iter().enumerate() {
-            let track_id = TrackId::new(i as u32);
-            let gain = audio_gains.get(i).copied().unwrap_or(1.0);
-            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-            let audio_clock = Arc::clone(&clock);
-            let audio_pause = Arc::clone(&pause_flag);
-            let audio_stop = Arc::clone(&stop_flag);
-            let dev_id = dev.id.clone();
-            let is_loopback = dev.is_loopback;
-            // A `Monitor` source has no owning process to scope loopback to
-            // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
-            // doc comment), so "App audio only" can never apply there regardless
-            // of the checkbox's own state.
-            let use_process_loopback =
-                is_loopback && app_audio_only && source.kind == CaptureKind::Window;
-            let target_pid = source.process_id;
-            let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("failed to build audio capture runtime: {e}");
-                        return;
-                    }
-                };
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, async move {
-                    let result = if use_process_loopback {
-                        run_process_loopback_capture(
-                            target_pid,
-                            true,
-                            track_id,
-                            audio_clock,
-                            audio_pause,
-                            audio_stop,
-                            audio_tx,
-                            gain,
-                        )
-                        .await
-                    } else {
-                        run_audio_capture(
-                            dev_id,
-                            track_id,
-                            is_loopback,
-                            audio_clock,
-                            audio_pause,
-                            audio_stop,
-                            audio_tx,
-                            gain,
-                        )
-                        .await
-                    };
-                    if let Err(e) = result {
-                        tracing::error!("AudioCapture[{track_id:?}] error: {e}");
-                    }
-                });
-            });
-            let pump_handle = spawn_audio_pump(audio_rx, recording_tx.clone());
-            capture_handles.push(capture_handle);
-            pump_handles.push(pump_handle);
-        }
+        let (device_capture_handles, device_pump_handles) = spawn_device_audio_tracks(
+            audio_devices,
+            &audio_gains,
+            app_audio_only,
+            source.kind,
+            source.process_id,
+            &clock,
+            &pause_flag,
+            &stop_flag,
+            &recording_tx,
+            "",
+        );
+        capture_handles.extend(device_capture_handles);
+        pump_handles.extend(device_pump_handles);
 
-        // Spawn per-app audio capture + pump -- independent of app_audio_only
-        // and of whichever process is the video source (source.process_id
-        // above); each selected app is its own explicit target, always via
-        // process loopback capture since that's the only way to isolate one
-        // app's audio (see AppAudioSource's doc comment). One app_source can
-        // still expand to several tracks: WASAPI's process-loopback capture
-        // only targets one process tree per stream, and genuinely mixing
-        // separately captured PCM streams into one track needs a real-time
-        // mixer this doesn't have -- so multiple genuinely independent
-        // top-level process trees of the same exe (see
-        // AppAudioSource::process_ids, and enumerate_app_audio_sessions's
-        // canonical_root_pid, which already collapses a single app's
-        // parent/child helper processes -- e.g. Discord's GPU/renderer/utility
-        // processes -- down to one entry) each get their own track instead. A
-        // registered-but-inactive entry (empty process_ids) contributes no
-        // tracks at all.
-        let mut next_app_track_id = device_track_count as u32;
-        for (i, app_source) in app_audio_sources.into_iter().enumerate() {
-            tracing::info!(
-                "AppAudio diagnostic: source={} process_ids={:?} (empty means no capture task spawns for it at all)",
-                app_source.exe_name,
-                app_source.process_ids
-            );
-            let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
-            for &target_pid in &app_source.process_ids {
-                let track_id = TrackId::new(next_app_track_id);
-                next_app_track_id += 1;
-                let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-                let audio_clock = Arc::clone(&clock);
-                let audio_pause = Arc::clone(&pause_flag);
-                let audio_stop = Arc::clone(&stop_flag);
-                let capture_handle = tokio::task::spawn_blocking(move || {
-                    let rt = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            tracing::error!("failed to build app audio capture runtime: {e}");
-                            return;
-                        }
-                    };
-                    let local = tokio::task::LocalSet::new();
-                    local.block_on(&rt, async move {
-                        if let Err(e) = run_process_loopback_capture(
-                            target_pid,
-                            true,
-                            track_id,
-                            audio_clock,
-                            audio_pause,
-                            audio_stop,
-                            audio_tx,
-                            gain,
-                        )
-                        .await
-                        {
-                            tracing::error!(
-                                "AppAudioCapture[{track_id:?}] pid={target_pid} error: {e}"
-                            );
-                        }
-                    });
-                });
-                let pump_handle = spawn_audio_pump(audio_rx, recording_tx.clone());
-                capture_handles.push(capture_handle);
-                pump_handles.push(pump_handle);
-            }
-        }
+        let (app_capture_handles, app_pump_handles) = spawn_app_audio_tracks(
+            app_audio_sources,
+            &app_audio_source_gains,
+            device_track_count as u32,
+            &clock,
+            &pause_flag,
+            &stop_flag,
+            &recording_tx,
+            "",
+        );
+        capture_handles.extend(app_capture_handles);
+        pump_handles.extend(app_pump_handles);
 
         self.active = Some(ActiveCapture {
             capture_handles,
@@ -611,127 +510,33 @@ impl SessionManager {
         let mut pump_handles = vec![video_pump_handle];
         let device_track_count = audio_devices.len();
 
-        for (i, dev) in audio_devices.into_iter().enumerate() {
-            let track_id = TrackId::new(i as u32);
-            let gain = audio_gains.get(i).copied().unwrap_or(1.0);
-            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-            let audio_clock = Arc::clone(&clock);
-            let audio_pause = Arc::clone(&pause_flag);
-            let audio_stop = Arc::clone(&stop_flag);
-            let dev_id = dev.id.clone();
-            let is_loopback = dev.is_loopback;
-            // A `Monitor` source has no owning process to scope loopback to
-            // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
-            // doc comment), so "App audio only" can never apply there regardless
-            // of the checkbox's own state.
-            let use_process_loopback =
-                is_loopback && app_audio_only && source.kind == CaptureKind::Window;
-            let target_pid = source.process_id;
-            let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("failed to build highlight audio capture runtime: {e}");
-                        return;
-                    }
-                };
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, async move {
-                    let result = if use_process_loopback {
-                        run_process_loopback_capture(
-                            target_pid,
-                            true,
-                            track_id,
-                            audio_clock,
-                            audio_pause,
-                            audio_stop,
-                            audio_tx,
-                            gain,
-                        )
-                        .await
-                    } else {
-                        run_audio_capture(
-                            dev_id,
-                            track_id,
-                            is_loopback,
-                            audio_clock,
-                            audio_pause,
-                            audio_stop,
-                            audio_tx,
-                            gain,
-                        )
-                        .await
-                    };
-                    if let Err(e) = result {
-                        tracing::error!("Highlight AudioCapture[{track_id:?}] error: {e}");
-                    }
-                });
-            });
-            let pump_handle = spawn_audio_pump(audio_rx, highlight_tx.clone());
-            capture_handles.push(capture_handle);
-            pump_handles.push(pump_handle);
-        }
+        let (device_capture_handles, device_pump_handles) = spawn_device_audio_tracks(
+            audio_devices,
+            &audio_gains,
+            app_audio_only,
+            source.kind,
+            source.process_id,
+            &clock,
+            &pause_flag,
+            &stop_flag,
+            &highlight_tx,
+            "Highlight ",
+        );
+        capture_handles.extend(device_capture_handles);
+        pump_handles.extend(device_pump_handles);
 
-        // One app_source can expand to several tracks -- see the identical
-        // comment in start_capture's per-app spawn loop for why (WASAPI
-        // process-loopback only targets one pid per stream; no real-time
-        // mixer here to merge separately captured PCM streams into one).
-        let mut next_app_track_id = device_track_count as u32;
-        for (i, app_source) in app_audio_sources.into_iter().enumerate() {
-            tracing::info!(
-                "AppAudio diagnostic: source={} process_ids={:?} (empty means no capture task spawns for it at all)",
-                app_source.exe_name,
-                app_source.process_ids
-            );
-            let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
-            for &target_pid in &app_source.process_ids {
-                let track_id = TrackId::new(next_app_track_id);
-                next_app_track_id += 1;
-                let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-                let audio_clock = Arc::clone(&clock);
-                let audio_pause = Arc::clone(&pause_flag);
-                let audio_stop = Arc::clone(&stop_flag);
-                let capture_handle = tokio::task::spawn_blocking(move || {
-                    let rt = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to build highlight app audio capture runtime: {e}"
-                            );
-                            return;
-                        }
-                    };
-                    let local = tokio::task::LocalSet::new();
-                    local.block_on(&rt, async move {
-                    if let Err(e) = run_process_loopback_capture(
-                        target_pid,
-                        true,
-                        track_id,
-                        audio_clock,
-                        audio_pause,
-                        audio_stop,
-                        audio_tx,
-                        gain,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            "Highlight AppAudioCapture[{track_id:?}] pid={target_pid} error: {e}"
-                        );
-                    }
-                });
-                });
-                let pump_handle = spawn_audio_pump(audio_rx, highlight_tx.clone());
-                capture_handles.push(capture_handle);
-                pump_handles.push(pump_handle);
-            }
-        }
+        let (app_capture_handles, app_pump_handles) = spawn_app_audio_tracks(
+            app_audio_sources,
+            &app_audio_source_gains,
+            device_track_count as u32,
+            &clock,
+            &pause_flag,
+            &stop_flag,
+            &highlight_tx,
+            "Highlight ",
+        );
+        capture_handles.extend(app_capture_handles);
+        pump_handles.extend(app_pump_handles);
 
         self.highlight = Some(ActiveHighlight {
             capture_handles,
@@ -939,6 +744,185 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
         .as_millis();
     let temp_path = polyrec_dir.join(format!("{app_name}_recording_{start_ts}.tmp.mp4"));
     (temp_path, polyrec_dir)
+}
+
+/// Spawns one capture thread + one pump task per selected audio device,
+/// forwarding each device's samples into `dest_tx` -- the per-device half of
+/// `start_capture`'s and `start_highlight_buffering`'s audio setup, which
+/// otherwise deliberately don't share their capture-thread setup (see
+/// `start_highlight_buffering`'s doc comment on why they're kept
+/// independent). Sharing this doesn't compromise that: every call spawns
+/// entirely new, independent threads/channels/handles, so what's shared is
+/// the *code*, not any *state* between the two callers -- the same reasoning
+/// `resolve_capture_and_output_dimensions` below already relies on for the
+/// pure-math half of setup, extended here to the actual spawn loop.
+/// `log_prefix` ("" for manual recording, "Highlight " for the highlight
+/// buffer) is the only thing that actually differs between the two calls.
+#[allow(clippy::too_many_arguments)]
+fn spawn_device_audio_tracks(
+    audio_devices: Vec<AudioDevice>,
+    audio_gains: &[f32],
+    app_audio_only: bool,
+    source_kind: CaptureKind,
+    source_process_id: u32,
+    clock: &Arc<RecordingClock>,
+    pause_flag: &Arc<AtomicBool>,
+    stop_flag: &Arc<AtomicBool>,
+    dest_tx: &mpsc::Sender<RecordingCommand>,
+    log_prefix: &'static str,
+) -> (Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+    let mut capture_handles = Vec::with_capacity(audio_devices.len());
+    let mut pump_handles = Vec::with_capacity(audio_devices.len());
+    for (i, dev) in audio_devices.into_iter().enumerate() {
+        let track_id = TrackId::new(i as u32);
+        let gain = audio_gains.get(i).copied().unwrap_or(1.0);
+        let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+        let audio_clock = Arc::clone(clock);
+        let audio_pause = Arc::clone(pause_flag);
+        let audio_stop = Arc::clone(stop_flag);
+        let dev_id = dev.id.clone();
+        let is_loopback = dev.is_loopback;
+        // A `Monitor` source has no owning process to scope loopback to
+        // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
+        // doc comment), so "App audio only" can never apply there regardless
+        // of the checkbox's own state.
+        let use_process_loopback =
+            is_loopback && app_audio_only && source_kind == CaptureKind::Window;
+        let target_pid = source_process_id;
+        let capture_handle = tokio::task::spawn_blocking(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("{log_prefix}failed to build audio capture runtime: {e}");
+                    return;
+                }
+            };
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let result = if use_process_loopback {
+                    run_process_loopback_capture(
+                        target_pid,
+                        true,
+                        track_id,
+                        audio_clock,
+                        audio_pause,
+                        audio_stop,
+                        audio_tx,
+                        gain,
+                    )
+                    .await
+                } else {
+                    run_audio_capture(
+                        dev_id,
+                        track_id,
+                        is_loopback,
+                        audio_clock,
+                        audio_pause,
+                        audio_stop,
+                        audio_tx,
+                        gain,
+                    )
+                    .await
+                };
+                if let Err(e) = result {
+                    tracing::error!("{log_prefix}AudioCapture[{track_id:?}] error: {e}");
+                }
+            });
+        });
+        let pump_handle = spawn_audio_pump(audio_rx, dest_tx.clone());
+        capture_handles.push(capture_handle);
+        pump_handles.push(pump_handle);
+    }
+    (capture_handles, pump_handles)
+}
+
+/// Spawns per-app audio capture + pump -- independent of `app_audio_only`
+/// and of whichever process is the video source; each selected app is its
+/// own explicit target, always via process loopback capture since that's
+/// the only way to isolate one app's audio (see `AppAudioSource`'s doc
+/// comment). One app_source can still expand to several tracks: WASAPI's
+/// process-loopback capture only targets one process tree per stream, and
+/// genuinely mixing separately captured PCM streams into one track needs a
+/// real-time mixer this doesn't have -- so multiple genuinely independent
+/// top-level process trees of the same exe (see `AppAudioSource::process_ids`,
+/// and `enumerate_app_audio_sessions`'s `canonical_root_pid`, which already
+/// collapses a single app's parent/child helper processes -- e.g. Discord's
+/// GPU/renderer/utility processes -- down to one entry) each get their own
+/// track instead. A registered-but-inactive entry (empty `process_ids`)
+/// contributes no tracks at all. Track IDs start at `first_track_id` so
+/// they continue on from whatever device tracks `spawn_device_audio_tracks`
+/// already assigned. Same sharing rationale as that function for why this
+/// is safe to call from both `start_capture` and `start_highlight_buffering`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_app_audio_tracks(
+    app_audio_sources: Vec<AppAudioSource>,
+    app_audio_source_gains: &[f32],
+    first_track_id: u32,
+    clock: &Arc<RecordingClock>,
+    pause_flag: &Arc<AtomicBool>,
+    stop_flag: &Arc<AtomicBool>,
+    dest_tx: &mpsc::Sender<RecordingCommand>,
+    log_prefix: &'static str,
+) -> (Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+    let mut capture_handles = Vec::new();
+    let mut pump_handles = Vec::new();
+    let mut next_track_id = first_track_id;
+    for (i, app_source) in app_audio_sources.into_iter().enumerate() {
+        tracing::info!(
+            "AppAudio diagnostic: source={} process_ids={:?} (empty means no capture task spawns for it at all)",
+            app_source.exe_name,
+            app_source.process_ids
+        );
+        let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
+        for &target_pid in &app_source.process_ids {
+            let track_id = TrackId::new(next_track_id);
+            next_track_id += 1;
+            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+            let audio_clock = Arc::clone(clock);
+            let audio_pause = Arc::clone(pause_flag);
+            let audio_stop = Arc::clone(stop_flag);
+            let capture_handle = tokio::task::spawn_blocking(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!(
+                            "{log_prefix}failed to build app audio capture runtime: {e}"
+                        );
+                        return;
+                    }
+                };
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    if let Err(e) = run_process_loopback_capture(
+                        target_pid,
+                        true,
+                        track_id,
+                        audio_clock,
+                        audio_pause,
+                        audio_stop,
+                        audio_tx,
+                        gain,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "{log_prefix}AppAudioCapture[{track_id:?}] pid={target_pid} error: {e}"
+                        );
+                    }
+                });
+            });
+            let pump_handle = spawn_audio_pump(audio_rx, dest_tx.clone());
+            capture_handles.push(capture_handle);
+            pump_handles.push(pump_handle);
+        }
+    }
+    (capture_handles, pump_handles)
 }
 
 /// Resolves the capture-side staging size, encoder output size, and bitrate --
