@@ -1,3 +1,4 @@
+use super::util::take_if_finished;
 use super::{App, ExportState, HighlightSaveState};
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
@@ -79,12 +80,7 @@ impl App {
 
         // Show export controls (inline in the status panel) once recorder has
         // finished writing the file
-        if self
-            .finalizing_handle
-            .as_ref()
-            .is_some_and(|h| h.is_finished())
-        {
-            let handle = self.finalizing_handle.take().unwrap();
+        if let Some(handle) = take_if_finished(&mut self.finalizing_handle) {
             self.finalizing_path = None;
             let disk_full = self
                 .finalizing_disk_full
@@ -172,14 +168,9 @@ impl App {
     }
 
     pub(super) fn poll_highlight_save_result(&mut self) {
-        if !self
-            .highlight_save_handle
-            .as_ref()
-            .is_some_and(|h| h.is_finished())
-        {
+        let Some(handle) = take_if_finished(&mut self.highlight_save_handle) else {
             return;
-        }
-        let handle = self.highlight_save_handle.take().unwrap();
+        };
         self.highlight_save_state = match tokio::runtime::Handle::current().block_on(handle) {
             Ok(Ok(path)) => HighlightSaveState::Done(path),
             Ok(Err(e)) => HighlightSaveState::Failed(e.to_string()),

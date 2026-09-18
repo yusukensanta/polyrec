@@ -1,7 +1,7 @@
 use super::theme::{
     ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
 };
-use super::util::open_url;
+use super::util::{open_url, take_if_finished};
 use super::widgets::{accent_button, section_header};
 use super::{App, SelfUpdateState};
 use crate::i18n::Strings;
@@ -308,14 +308,9 @@ impl App {
     /// until we do; the installed path also wants this process's file lock
     /// on polyrec.exe released as soon as possible for the installer).
     pub(super) fn poll_self_update_result(&mut self, ctx: &egui::Context) {
-        if !self
-            .self_update_handle
-            .as_ref()
-            .is_some_and(|h| h.is_finished())
-        {
+        let Some(handle) = take_if_finished(&mut self.self_update_handle) else {
             return;
-        }
-        let handle = self.self_update_handle.take().unwrap();
+        };
         match tokio::runtime::Handle::current().block_on(handle) {
             Ok(Ok(())) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Ok(Err(e)) => self.self_update_state = SelfUpdateState::Failed(e.to_string()),
