@@ -331,9 +331,26 @@ impl App {
         // what ends up in the file.
     }
 
-    pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
-        let source_title = source.window_title.clone();
-        let app_name = crate::session::app_name_from_exe(&source.exe_name);
+    /// Resolves the currently-checked audio devices/app-audio sources into
+    /// the exact shape both `start_recording_with_source` and
+    /// `start_highlight_buffering_for` pass into
+    /// `session::start_capture`/`start_highlight_buffering` -- identical
+    /// resolution for either caller, including sorting loopback devices
+    /// first. That sort matters: the MP4 container's physical track order
+    /// doesn't reliably follow AddStream() call order for a live
+    /// (real-time-encoded) recording -- see writer.rs/remux.rs -- but
+    /// process-loopback (app-audio) tracks still consistently land after
+    /// device tracks in practice, since activating one needs an async
+    /// WASAPI round-trip a plain device capture doesn't, so it starts
+    /// flushing samples later regardless of call order. That leaves
+    /// device-vs-device order as the one lever actually worth pulling:
+    /// putting loopback (system/game audio, what users overwhelmingly want
+    /// as "the" track) ahead of the mic improves the odds it's what a
+    /// player defaults to without explicit track selection, even though
+    /// nothing here can fully guarantee it.
+    fn resolve_capture_inputs(
+        &self,
+    ) -> (Vec<AudioDevice>, Vec<f32>, Vec<AppAudioSource>, Vec<f32>, EncodeSettings) {
         let mut selected_devices: Vec<_> = self
             .audio_devices
             .iter()
@@ -341,17 +358,6 @@ impl App {
             .filter(|&(_, &sel)| sel)
             .map(|(dev, _)| dev.clone())
             .collect();
-        // The MP4 container's physical track order doesn't reliably follow
-        // AddStream() call order for a live (real-time-encoded) recording --
-        // see writer.rs/remux.rs -- but process-loopback (app-audio) tracks
-        // still consistently land after device tracks in practice, since
-        // activating one needs an async WASAPI round-trip a plain device
-        // capture doesn't, so it starts flushing samples later regardless of
-        // call order. That leaves device-vs-device order as the one lever
-        // actually worth pulling: putting loopback (system/game audio, what
-        // users overwhelmingly want as "the" track) ahead of the mic
-        // improves the odds it's what a player defaults to without explicit
-        // track selection, even though nothing here can fully guarantee it.
         selected_devices.sort_by_key(|dev| !dev.is_loopback);
         let selected_gains: Vec<f32> = selected_devices
             .iter()
@@ -368,8 +374,6 @@ impl App {
             .iter()
             .map(|src| self.config.app_audio_gain(&src.exe_name))
             .collect();
-        let track_count = selected_devices.len() + selected_app_sources.len();
-        let audio_labels = build_audio_labels(&selected_devices, &selected_app_sources);
         let encode = EncodeSettings {
             codec: self.config.encode.codec.clone(),
             fps: self.config.encode.fps(),
@@ -377,6 +381,22 @@ impl App {
             bitrate_mode: self.config.encode.bitrate_mode(),
             encoder_mode: self.config.encode.encoder_mode(),
         };
+        (
+            selected_devices,
+            selected_gains,
+            selected_app_sources,
+            selected_app_gains,
+            encode,
+        )
+    }
+
+    pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
+        let source_title = source.window_title.clone();
+        let app_name = crate::session::app_name_from_exe(&source.exe_name);
+        let (selected_devices, selected_gains, selected_app_sources, selected_app_gains, encode) =
+            self.resolve_capture_inputs();
+        let track_count = selected_devices.len() + selected_app_sources.len();
+        let audio_labels = build_audio_labels(&selected_devices, &selected_app_sources);
         // Only transition to the Recording state once start_capture actually
         // succeeds -- otherwise a disk-full refusal would leave the UI showing
         // "Recording" for a capture that never started.
@@ -486,37 +506,8 @@ impl App {
     }
 
     pub(super) fn start_highlight_buffering_for(&mut self, source: CaptureSource) {
-        let mut selected_devices: Vec<_> = self
-            .audio_devices
-            .iter()
-            .zip(self.selected_audio.iter())
-            .filter(|&(_, &sel)| sel)
-            .map(|(dev, _)| dev.clone())
-            .collect();
-        // See start_recording_with_source's identical sort for why.
-        selected_devices.sort_by_key(|dev| !dev.is_loopback);
-        let selected_gains: Vec<f32> = selected_devices
-            .iter()
-            .map(|dev| self.config.audio_gain(&dev.id))
-            .collect();
-        let selected_app_sources: Vec<_> = self
-            .app_audio_sources
-            .iter()
-            .zip(self.selected_app_audio.iter())
-            .filter(|&(_, &sel)| sel)
-            .map(|(src, _)| src.clone())
-            .collect();
-        let selected_app_gains: Vec<f32> = selected_app_sources
-            .iter()
-            .map(|src| self.config.app_audio_gain(&src.exe_name))
-            .collect();
-        let encode = EncodeSettings {
-            codec: self.config.encode.codec.clone(),
-            fps: self.config.encode.fps(),
-            resolution_mode: self.config.encode.resolution_mode(),
-            bitrate_mode: self.config.encode.bitrate_mode(),
-            encoder_mode: self.config.encode.encoder_mode(),
-        };
+        let (selected_devices, selected_gains, selected_app_sources, selected_app_gains, encode) =
+            self.resolve_capture_inputs();
         let buffer_seconds = self.config.highlight.buffer_seconds.clamp(
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN,
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
