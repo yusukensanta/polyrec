@@ -1,18 +1,17 @@
+use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{RecordingCommand, RecordingWriter};
 use crate::error::AppError;
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// How often the recording loop re-checks free disk space. Checking every
-/// frame would mean a syscall 30-60+ times a second for no benefit -- a few
-/// seconds of lag between "disk went low" and "recording stops" is fine given
-/// the whole point is stopping before Media Foundation fails mid-write, not
-/// stopping at the exact byte it would have failed.
+/// How often the recording loop re-checks free disk space -- see
+/// `DiskSpaceGuard`'s doc comment for why this is on an interval, not every
+/// frame.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Spawns the RecordingActor on a dedicated blocking OS thread.
@@ -50,7 +49,7 @@ pub fn spawn_recording_actor(
         let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, allow_hardware_encode)?;
         writer.begin_writing()?;
 
-        let mut last_disk_check = Instant::now();
+        let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);
 
         while let Some(cmd) = rx.blocking_recv() {
             match cmd {
@@ -68,21 +67,8 @@ pub fn spawn_recording_actor(
                 RecordingCommand::Stop => break,
             }
 
-            if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                last_disk_check = Instant::now();
-                match crate::disk_space::free_bytes(&output_dir) {
-                    Ok(free) if free < crate::disk_space::MIN_FREE_BYTES => {
-                        tracing::warn!(
-                            "disk space low ({} MB free on {}) -- stopping recording early",
-                            free / (1024 * 1024),
-                            output_dir.display()
-                        );
-                        disk_full_flag.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("disk space check failed, continuing recording: {e}"),
-                }
+            if disk_guard.should_stop(&disk_full_flag, "recording") {
+                break;
             }
         }
 
