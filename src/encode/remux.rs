@@ -307,8 +307,8 @@ unsafe fn decode_track_to_pcm(
                 let frame_offset = (timestamp * mix_rate as i64 / 10_000_000).max(0) as usize;
                 first_frame_offset = Some(frame_offset);
             }
-            for chunk in bytes.chunks_exact(2) {
-                samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+            for chunk in bytes.as_chunks::<2>().0 {
+                samples.push(i16::from_le_bytes(*chunk));
             }
 
             buffer
