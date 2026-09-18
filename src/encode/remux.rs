@@ -97,6 +97,67 @@ const MF_SOURCE_READER_ANY_STREAM: u32 = 0xFFFF_FFFE;
 // 0xFFFFFFFE = MF_SOURCE_READER_ALL_STREAMS (same value)
 const MF_SOURCE_READER_ALL_STREAMS: u32 = 0xFFFF_FFFE;
 
+/// Copies compressed samples from every stream `reader` has selected into
+/// `writer`, mapping each source stream index to its sink stream index via
+/// `source_to_sink`, until all `total_streams` enabled source streams have
+/// reported end-of-stream. Shared by `do_remux`'s pure-passthrough copy and
+/// `do_export_grouped`'s video+passthrough-audio portion (its separately
+/// merged/transcoded audio groups are written afterward, in their own loop
+/// -- they're PCM chunks, not samples read from a reader, so they don't fit
+/// this shape). Not shared with `highlight_export::concat_and_trim`'s
+/// superficially similar loop -- that one rewrites each sample's timestamp
+/// for cross-segment PTS continuity and iterates multiple readers (one per
+/// segment file) with a carried-over time offset, neither of which this
+/// single-reader, samples-as-is copy needs to support.
+unsafe fn copy_passthrough_samples(
+    reader: &IMFSourceReader,
+    writer: &IMFSinkWriter,
+    source_to_sink: &HashMap<u32, u32>,
+    total_streams: usize,
+) -> Result<(), AppError> {
+    unsafe {
+        let mut done_streams: HashSet<u32> = HashSet::new();
+        loop {
+            let mut actual_idx: u32 = 0;
+            let mut stream_flags: u32 = 0;
+            let mut timestamp: i64 = 0;
+            let mut sample: Option<IMFSample> = None;
+
+            reader
+                .ReadSample(
+                    MF_SOURCE_READER_ANY_STREAM,
+                    0,
+                    Some(&mut actual_idx),
+                    Some(&mut stream_flags),
+                    Some(&mut timestamp),
+                    Some(&mut sample),
+                )
+                .map_err(|e| AppError::Encode(format!("ReadSample: {e}")))?;
+
+            if stream_flags & 1 != 0 {
+                return Err(AppError::Encode(format!(
+                    "ReadSample: stream {actual_idx} reported error"
+                )));
+            }
+
+            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                done_streams.insert(actual_idx);
+                if done_streams.len() >= total_streams {
+                    break;
+                }
+                continue;
+            }
+
+            if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
+                writer.WriteSample(sink_idx, &s).map_err(|e| {
+                    AppError::Encode(format!("WriteSample(stream {actual_idx}): {e}"))
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn remux(
     input: &Path,
     output: &Path,
@@ -476,40 +537,7 @@ unsafe fn do_export_grouped(
             source_to_sink.insert(src_idx, sink_idx);
         }
         let total_enabled = 1 + passthrough_sinks.len();
-        let mut done_streams: HashSet<u32> = HashSet::new();
-        loop {
-            let mut actual_idx: u32 = 0;
-            let mut stream_flags: u32 = 0;
-            let mut timestamp: i64 = 0;
-            let mut sample: Option<IMFSample> = None;
-            probe_reader
-                .ReadSample(
-                    MF_SOURCE_READER_ANY_STREAM,
-                    0,
-                    Some(&mut actual_idx),
-                    Some(&mut stream_flags),
-                    Some(&mut timestamp),
-                    Some(&mut sample),
-                )
-                .map_err(|e| AppError::Encode(format!("ReadSample: {e}")))?;
-            if stream_flags & 1 != 0 {
-                return Err(AppError::Encode(format!(
-                    "ReadSample: stream {actual_idx} reported error"
-                )));
-            }
-            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                done_streams.insert(actual_idx);
-                if done_streams.len() >= total_enabled {
-                    break;
-                }
-                continue;
-            }
-            if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
-                writer.WriteSample(sink_idx, &s).map_err(|e| {
-                    AppError::Encode(format!("WriteSample(stream {actual_idx}): {e}"))
-                })?;
-            }
-        }
+        copy_passthrough_samples(&probe_reader, &writer, &source_to_sink, total_enabled)?;
 
         // Merged audio, one group at a time, each written in ~100ms chunks.
         const CHUNK_FRAMES: usize = 4800;
@@ -620,47 +648,7 @@ unsafe fn do_remux(
 
         // ── Read / write loop ────────────────────────────────────────────────────
         let total_enabled = 1 + audio_track_indices.len();
-        let mut done_streams: HashSet<u32> = HashSet::new();
-
-        loop {
-            let mut actual_idx: u32 = 0;
-            let mut stream_flags: u32 = 0;
-            let mut timestamp: i64 = 0;
-            let mut sample: Option<IMFSample> = None;
-
-            reader
-                .ReadSample(
-                    MF_SOURCE_READER_ANY_STREAM,
-                    0,
-                    Some(&mut actual_idx),
-                    Some(&mut stream_flags),
-                    Some(&mut timestamp),
-                    Some(&mut sample),
-                )
-                .map_err(|e| AppError::Encode(format!("ReadSample: {e}")))?;
-
-            if stream_flags & 1 != 0 {
-                // MF_SOURCE_READERF_ERROR on this stream — abort
-                return Err(AppError::Encode(format!(
-                    "ReadSample: stream {actual_idx} reported error"
-                )));
-            }
-
-            // MF_SOURCE_READERF_ENDOFSTREAM = 2
-            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                done_streams.insert(actual_idx);
-                if done_streams.len() >= total_enabled {
-                    break;
-                }
-                continue;
-            }
-
-            if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
-                writer.WriteSample(sink_idx, &s).map_err(|e| {
-                    AppError::Encode(format!("WriteSample(stream {actual_idx}): {e}"))
-                })?;
-            }
-        }
+        copy_passthrough_samples(&reader, &writer, &source_to_sink, total_enabled)?;
 
         writer
             .Finalize()
