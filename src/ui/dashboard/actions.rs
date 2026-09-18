@@ -281,10 +281,19 @@ impl App {
             .map(|(d, _)| d.id.clone())
             .collect();
         self.config.selected_audio_device_ids = Some(ids);
-        if let Err(e) = self.config.save() {
-            tracing::error!("failed to save config: {e}");
-            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-        }
+        self.save_config_or_report(s);
+    }
+
+    /// Saves `self.config`, logging and surfacing `s.config_save_failed_prefix`
+    /// plus the error via `self.error_message` on failure. Forwards `self`'s
+    /// fields into `util::save_config_or_report`, which is the one place
+    /// this logic actually lives.
+    pub(super) fn save_config_or_report(&mut self, s: &Strings) {
+        super::util::save_config_or_report(
+            &mut self.config,
+            &mut self.error_message,
+            s.config_save_failed_prefix,
+        );
     }
 
     /// Rebuilds the Applications audio list from `self.config` immediately

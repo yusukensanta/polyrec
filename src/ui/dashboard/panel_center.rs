@@ -191,10 +191,7 @@ impl App {
                 );
                 if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
                     self.config.output_dir = PathBuf::from(&self.output_dir_input);
-                    if let Err(e) = self.config.save() {
-                        tracing::error!("failed to save config: {e}");
-                        self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-                    }
+                    self.save_config_or_report(s);
                 }
                 if ui
                     .add(accent_button(s.browse_button, ACCENT_SECONDARY))
@@ -205,10 +202,7 @@ impl App {
                 {
                     self.output_dir_input = path.to_string_lossy().into_owned();
                     self.config.output_dir = path;
-                    if let Err(e) = self.config.save() {
-                        tracing::error!("failed to save config: {e}");
-                        self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-                    }
+                    self.save_config_or_report(s);
                 }
             });
 

@@ -57,11 +57,7 @@ impl App {
                         .clicked()
                     {
                         self.config.language = lang.toggle().config_value().to_string();
-                        if let Err(e) = self.config.save() {
-                            tracing::error!("failed to save config: {e}");
-                            self.error_message =
-                                Some(format!("{}{e}", s.config_save_failed_prefix));
-                        }
+                        self.save_config_or_report(s);
                     }
                     if let Some(update) = self.update_available.clone() {
                         let clicked = ui
@@ -92,9 +88,7 @@ impl App {
                                 if self.session.is_highlighting() {
                                     self.session.stop_highlight_buffering(true);
                                     self.config.highlight.enabled = false;
-                                    if let Err(e) = self.config.save() {
-                                        tracing::error!("failed to save config: {e}");
-                                    }
+                                    self.save_config_or_report(s);
                                     self.error_message =
                                         Some(s.update_highlight_disabled_notice.to_string());
                                 }

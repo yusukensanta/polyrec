@@ -192,10 +192,7 @@ impl App {
             self.show_hotkeys_popup = false;
             self.recording_hotkey = None;
             self.hotkey_capture_warning = None;
-            if let Err(e) = self.config.save() {
-                tracing::error!("failed to save config: {e}");
-                self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-            }
+            self.save_config_or_report(s);
             // The listener registers its hotkeys once at spawn time, so a rebind
             // needs a fresh thread — stop() unregisters the old bindings before
             // the new listener registers the (possibly changed) ones, avoiding a

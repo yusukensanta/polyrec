@@ -161,10 +161,7 @@ impl App {
         // Escape as an emergency exit -- same effect as clicking Close.
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_quality_popup = false;
-            if let Err(e) = self.config.save() {
-                tracing::error!("failed to save config: {e}");
-                self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-            }
+            self.save_config_or_report(s);
         }
     }
 

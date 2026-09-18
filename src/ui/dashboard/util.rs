@@ -15,6 +15,26 @@ pub(super) fn take_if_finished<T>(
     }
 }
 
+/// Saves `config`, logging and setting `*error_message` to
+/// `format!("{prefix}{e}")` on failure -- the common reaction to the
+/// filesystem write itself failing (permissions, disk full, path gone)
+/// shared by every config-mutating action across the dashboard that wants
+/// immediate persistence. A free function taking individual field borrows
+/// (not `&mut App`) so it also works from contexts like
+/// `checkbox_with_volume_slider` that only have those borrows available;
+/// `App::save_config_or_report` is a thin `&mut self` wrapper over this for
+/// every other call site.
+pub(super) fn save_config_or_report(
+    config: &mut crate::config::Config,
+    error_message: &mut Option<String>,
+    prefix: &str,
+) {
+    if let Err(e) = config.save() {
+        tracing::error!("failed to save config: {e}");
+        *error_message = Some(format!("{prefix}{e}"));
+    }
+}
+
 /// Full path rather than a bare "explorer" name — avoids relying on Windows'
 /// executable search order (a directory ahead of System32 in PATH could
 /// otherwise shadow the real explorer.exe).
