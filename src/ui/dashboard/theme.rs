@@ -61,6 +61,17 @@ pub(super) const SPACE_NORMAL: f32 = 8.0;
 /// rendered, and never return to `default_width` afterward.
 pub(super) const POPUP_WIDTH: f32 = 320.0;
 
+/// egui's bundled default font only covers Latin + a small symbol set — window
+/// titles/exe names containing CJK or other multi-byte characters (and any
+/// future localized UI text) render as tofu boxes without a fallback font.
+/// Loads MS Gothic — a fixed-pitch (single-width per cell) CJK font bundled
+/// with every Windows release since the 9x/NT era, so it's a correct fit for
+/// the Monospace family (unlike a proportional font such as Yu Gothic) and
+/// more universally present than newer CJK fonts — and appends it after the
+/// default font in both families, so it's only used for glyphs the default
+/// font can't cover; Latin text keeps its existing appearance. Best-effort:
+/// if the font file isn't present on this Windows install, logs a warning
+/// and leaves the default (Latin-only) fonts in place.
 pub(super) fn setup_fonts(ctx: &egui::Context) {
     const CJK_FONT_PATH: &str = r"C:\Windows\Fonts\msgothic.ttc";
     const CJK_FONT_KEY: &str = "cjk_fallback";
