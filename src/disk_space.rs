@@ -5,7 +5,9 @@
 
 use crate::error::AppError;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
@@ -14,6 +16,52 @@ use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 /// `encode::writer::video_bitrate_bps`) — enough to finalize cleanly rather
 /// than fail mid-write.
 pub const MIN_FREE_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Rate-limited low-disk-space guard shared by every write loop that needs
+/// one (the manual-recording actor and the highlight-buffer actor) --
+/// checking every frame would mean a syscall 30-60+ times a second for no
+/// benefit; a few seconds of lag between "disk went low" and "stopped" is
+/// fine given the goal is stopping before Media Foundation fails mid-write,
+/// not stopping at the exact byte it would have failed.
+pub struct DiskSpaceGuard {
+    path: PathBuf,
+    interval: Duration,
+    last_check: Instant,
+}
+
+impl DiskSpaceGuard {
+    pub fn new(path: PathBuf, interval: Duration) -> Self {
+        Self { path, interval, last_check: Instant::now() }
+    }
+
+    /// A no-op unless `interval` has elapsed since the last real check.
+    /// Returns `true` (and sets `disk_full_flag`) once free space on `path`
+    /// drops below `MIN_FREE_BYTES` -- the caller should stop its write loop
+    /// in that case. `context` (e.g. "recording", "highlight buffering") is
+    /// folded into the log message so it's clear which loop stopped.
+    pub fn should_stop(&mut self, disk_full_flag: &AtomicBool, context: &str) -> bool {
+        if self.last_check.elapsed() < self.interval {
+            return false;
+        }
+        self.last_check = Instant::now();
+        match free_bytes(&self.path) {
+            Ok(free) if free < MIN_FREE_BYTES => {
+                tracing::warn!(
+                    "disk space low ({} MB free on {}) -- stopping {context} early",
+                    free / (1024 * 1024),
+                    self.path.display()
+                );
+                disk_full_flag.store(true, Ordering::Relaxed);
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                tracing::warn!("{context} disk space check failed, continuing: {e}");
+                false
+            }
+        }
+    }
+}
 
 /// Bytes free to the current user on the volume containing `path`. `path` must
 /// already exist (a directory, typically) — pass the actual output directory,

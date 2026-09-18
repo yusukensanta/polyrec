@@ -6,11 +6,12 @@
 //! exclusion with manual recording, foreground-window tracking) lives in
 //! `session::mod` and the dashboard.
 
+use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{RecordingCommand, RecordingWriter};
 use crate::error::AppError;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -22,8 +23,9 @@ use tokio::task::JoinHandle;
 /// least 3 segments of trim granularity even at the minimum 30s buffer.
 pub const HIGHLIGHT_SEGMENT_SECONDS: u32 = 10;
 
-/// How often the rotation loop re-checks free disk space -- same cadence and
-/// reasoning as `encode::actor`'s `DISK_CHECK_INTERVAL`.
+/// How often the rotation loop re-checks free disk space -- see
+/// `DiskSpaceGuard`'s doc comment for why this is on an interval, not every
+/// frame.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 const HIGHLIGHT_CHANNEL_CAPACITY: usize = 256;
@@ -79,7 +81,7 @@ pub fn spawn_highlight_actor(
 
     let handle = tokio::task::spawn_blocking(move || {
         let segment_duration = Duration::from_secs(segment_seconds.max(1) as u64);
-        let mut last_disk_check = Instant::now();
+        let mut disk_guard = DiskSpaceGuard::new(segment_dir.clone(), DISK_CHECK_INTERVAL);
 
         loop {
             let seg_id = std::time::SystemTime::now()
@@ -136,24 +138,9 @@ pub fn spawn_highlight_actor(
                 if seg_start.elapsed() >= segment_duration {
                     break;
                 }
-                if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                    last_disk_check = Instant::now();
-                    match crate::disk_space::free_bytes(&segment_dir) {
-                        Ok(free) if free < crate::disk_space::MIN_FREE_BYTES => {
-                            tracing::warn!(
-                                "disk space low ({} MB free on {}) -- stopping highlight buffering",
-                                free / (1024 * 1024),
-                                segment_dir.display()
-                            );
-                            disk_full_flag.store(true, Ordering::Relaxed);
-                            stop_requested = true;
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("highlight disk space check failed, continuing: {e}"),
-                    }
-                    if stop_requested {
-                        break;
-                    }
+                if disk_guard.should_stop(&disk_full_flag, "highlight buffering") {
+                    stop_requested = true;
+                    break;
                 }
             }
 
