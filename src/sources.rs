@@ -278,7 +278,7 @@ pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32
         }
 
         // GetDIBits fills BGRA (classic DIB order) — swap to RGBA.
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
 

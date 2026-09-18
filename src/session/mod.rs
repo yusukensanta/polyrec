@@ -1441,8 +1441,8 @@ mod tests {
                 let mut len = 0u32;
                 buffer.Lock(&mut data, None, Some(&mut len)).expect("Lock");
                 let bytes = std::slice::from_raw_parts(data, len as usize);
-                for chunk in bytes.chunks_exact(2) {
-                    let v = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                for chunk in bytes.as_chunks::<2>().0 {
+                    let v = i16::from_le_bytes(*chunk) as i32;
                     if v.abs() > peak {
                         peak = v.abs();
                     }
