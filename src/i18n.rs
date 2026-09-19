@@ -237,6 +237,13 @@ pub struct Strings {
     pub recording_failed_prefix: &'static str,
     pub recording_ended_unexpectedly_prefix: &'static str,
     pub couldnt_start_recording_prefix: &'static str,
+    /// Shown once per recording if the achieved frame rate falls
+    /// persistently short of the configured target (encode hardware
+    /// struggling to keep up) -- formatted as
+    /// "{fps_shortfall_prefix}{achieved}/{target}". Not an error the
+    /// recording needs to stop for, just a heads-up that quality/smoothness
+    /// may be degraded.
+    pub fps_shortfall_prefix: &'static str,
     /// Shown when the finished file has fewer audio tracks than were
     /// selected before recording -- a source that never produced a single
     /// real buffer (muted mic, disconnected device, silent app) gets
@@ -395,6 +402,7 @@ pub static EN: Strings = Strings {
     recording_failed_prefix: "Recording failed: ",
     recording_ended_unexpectedly_prefix: "Recording ended unexpectedly: ",
     couldnt_start_recording_prefix: "Couldn't start recording: ",
+    fps_shortfall_prefix: "Recording is running below target frame rate (hardware may be struggling to keep up) — ",
     audio_tracks_missing_template: "Only {actual} of {expected} selected audio sources made it into this recording — the rest produced no sound (check for a muted mic or a disconnected/silent device) and were left out.",
 
     recording_saved_label: "Recording saved:",
@@ -537,6 +545,7 @@ pub static JA: Strings = Strings {
     recording_failed_prefix: "録画に失敗しました: ",
     recording_ended_unexpectedly_prefix: "録画が予期せず終了しました: ",
     couldnt_start_recording_prefix: "録画を開始できませんでした: ",
+    fps_shortfall_prefix: "録画のフレームレートが目標を下回っています（ハードウェアの処理が追いついていない可能性があります） — ",
     audio_tracks_missing_template: "選択した音声ソースのうち {actual}/{expected} のみがこの録画に含まれました。残りは音声が検出されず（マイクのミュートやデバイスの切断・無音をご確認ください）除外されました。",
 
     recording_saved_label: "録画を保存しました:",
