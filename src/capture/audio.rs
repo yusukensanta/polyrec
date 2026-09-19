@@ -22,6 +22,7 @@ use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     STGM_READ,
 };
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Interface, implement};
 
@@ -496,6 +497,7 @@ pub async fn run_audio_capture(
             stop_flag,
             tx,
             gain,
+            None,
         )
         .await
     }
@@ -560,6 +562,7 @@ pub async fn run_process_loopback_capture(
             stop_flag,
             tx,
             gain,
+            Some(target_pid),
         )
         .await
     }
@@ -569,6 +572,29 @@ pub async fn run_process_loopback_capture(
 /// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
 /// encoder target, and forwards `AudioSamples` until the receiver drops or the client
 /// is stopped from outside (abort).
+/// Best-effort: `OpenProcess` succeeding is enough to call `pid` alive,
+/// doesn't need real query rights. A pid getting reused by an unrelated
+/// process right after the original exits is the standard, accepted caveat
+/// of any pid-based liveness check -- rare enough in the ~1s polling window
+/// this is checked on not to matter here.
+fn process_is_alive(pid: u32) -> bool {
+    unsafe {
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => {
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// `watch_pid` is `Some` only for process-loopback capture -- a target
+/// process simply exiting mid-recording isn't a WASAPI device error (unlike
+/// `AUDCLNT_E_DEVICE_INVALIDATED`, handled below), so `GetBuffer` just
+/// returns zero frames forever; without watching for the process's own exit
+/// separately, the capture thread spins for the rest of the recording
+/// producing a track of pure silence instead of ending cleanly.
 // Grouping these into a struct wouldn't add clarity here -- each param is an
 // independent piece the WASAPI setup already resolved (format fields, sync
 // primitives, output channel); a param struct would just add indirection at
@@ -585,6 +611,7 @@ async unsafe fn run_capture_loop(
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
+    watch_pid: Option<u32>,
 ) -> Result<(), AppError> {
     unsafe {
         let capture_client: IAudioCaptureClient = audio_client
@@ -614,6 +641,9 @@ async unsafe fn run_capture_loop(
         let mut diag_logged = false;
         let diag_start = std::time::Instant::now();
         let mut diag_zero_buffer_warned = false;
+        // Rate-limited like the disk-space guard elsewhere -- OpenProcess is
+        // a real syscall, not worth doing on every 10ms idle poll.
+        let mut last_pid_check = std::time::Instant::now();
         // Only f32 (4 bytes/sample) and i16 (2 bytes/sample) mix formats are
         // parsed below -- a device that negotiates something else (e.g. 24-bit,
         // real on some pro/USB audio interfaces) would otherwise silently write
@@ -719,6 +749,18 @@ async unsafe fn run_capture_loop(
                             diag_start.elapsed().as_secs_f32()
                         );
                     }
+                    if let Some(pid) = watch_pid
+                        && last_pid_check.elapsed() >= std::time::Duration::from_secs(1)
+                    {
+                        last_pid_check = std::time::Instant::now();
+                        if !process_is_alive(pid) {
+                            tracing::info!(
+                                "AudioCapture[{track_id:?}]: target process {pid} exited, stopping this track"
+                            );
+                            break;
+                        }
+                    }
+
                     // No data yet; yield to the async runtime
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }
