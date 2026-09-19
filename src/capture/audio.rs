@@ -614,6 +614,15 @@ async unsafe fn run_capture_loop(
         let mut diag_logged = false;
         let diag_start = std::time::Instant::now();
         let mut diag_zero_buffer_warned = false;
+        // Only f32 (4 bytes/sample) and i16 (2 bytes/sample) mix formats are
+        // parsed below -- a device that negotiates something else (e.g. 24-bit,
+        // real on some pro/USB audio interfaces) would otherwise silently write
+        // zeros for every sample: a genuinely connected, genuinely producing
+        // device that ends up indistinguishable from "just quiet" in the
+        // recording, with nothing in the existing "missing audio track"
+        // warning able to catch it (samples ARE written, just wrong). One-shot
+        // so it doesn't spam every sample of every buffer.
+        let mut warned_unrecognized_bit_depth = false;
 
         loop {
             if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -638,6 +647,13 @@ async unsafe fn run_capture_loop(
                         } else if bytes_per_sample == 2 {
                             *(sample_ptr as *const i16) as f32 / 32768.0
                         } else {
+                            if !warned_unrecognized_bit_depth {
+                                warned_unrecognized_bit_depth = true;
+                                tracing::warn!(
+                                    "AudioCapture[{track_id:?}]: unrecognized mix format ({} bytes/sample) -- writing silence for this track instead of garbage/OOB reads",
+                                    bytes_per_sample
+                                );
+                            }
                             0.0
                         };
                     }
