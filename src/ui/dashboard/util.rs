@@ -1,3 +1,20 @@
+/// Takes `handle` if it's finished, leaving `None` behind either way -- so a
+/// caller can `if let Some(h) = take_if_finished(&mut self.foo_handle) { ... }`
+/// once per frame instead of repeating the `is_some_and(|h| h.is_finished())`
+/// guard by hand. The guard matters, not just boilerplate: `.await`ing (or
+/// `block_on`-ing) a `JoinHandle` that hasn't finished yet blocks until it
+/// does, which on this render path means stalling the UI thread for as long
+/// as the background task takes.
+pub(super) fn take_if_finished<T>(
+    handle: &mut Option<tokio::task::JoinHandle<T>>,
+) -> Option<tokio::task::JoinHandle<T>> {
+    if handle.as_ref().is_some_and(|h| h.is_finished()) {
+        handle.take()
+    } else {
+        None
+    }
+}
+
 /// Full path rather than a bare "explorer" name — avoids relying on Windows'
 /// executable search order (a directory ahead of System32 in PATH could
 /// otherwise shadow the real explorer.exe).
