@@ -397,7 +397,16 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self).map_err(|e| AppError::Config(e.to_string()))?;
-        std::fs::write(&path, text)?;
+        // Write-to-temp-then-rename, the same technique the recording path
+        // already uses for its own output file -- a crash or power loss
+        // mid-write previously left a truncated/corrupt config.toml with no
+        // recovery path (`load()` just bubbles the resulting `toml::from_str`
+        // parse error up). The temp file lives in the same directory, so the
+        // rename is a same-volume move: config.toml is always either the old
+        // complete file or the new complete file, never a partial write.
+        let tmp_path = path.with_file_name("config.toml.tmp");
+        std::fs::write(&tmp_path, text)?;
+        std::fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 }
