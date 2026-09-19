@@ -158,13 +158,28 @@ pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
 pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
-        let mut buf = vec![0u16; 260];
-        let len = GetModuleFileNameExW(Some(handle), None, &mut buf);
+        // Starts at MAX_PATH (the common case) and doubles up to Windows'
+        // long-path limit if the return value suggests truncation --
+        // GetModuleFileNameExW returns the buffer length (not a distinct
+        // overflow signal) when the real path is >= the buffer, which is
+        // indistinguishable from a real path of exactly that length
+        // otherwise. Without this, an exe under a long node_modules-style or
+        // deeply-nested OneDrive path silently truncates, showing as
+        // "Unknown" with no icon instead of its real name.
+        let mut buf_len: usize = 260;
+        let path = loop {
+            let mut buf = vec![0u16; buf_len];
+            let len = GetModuleFileNameExW(Some(handle), None, &mut buf);
+            if len == 0 {
+                break None;
+            }
+            if (len as usize) < buf_len || buf_len >= 32768 {
+                break Some(String::from_utf16_lossy(&buf[..len as usize]));
+            }
+            buf_len *= 2;
+        };
         let _ = windows::Win32::Foundation::CloseHandle(handle);
-        if len == 0 {
-            return None;
-        }
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
+        path
     }
 }
 
