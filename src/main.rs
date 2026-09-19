@@ -8,6 +8,7 @@ mod error;
 mod highlight;
 mod hotkeys;
 mod i18n;
+mod recording_naming;
 mod self_update;
 mod session;
 mod sources;

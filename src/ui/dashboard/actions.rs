@@ -3,6 +3,7 @@ use super::{App, HighlightSaveState};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
+use crate::recording_naming::RecordingNaming;
 use crate::session::{EncodeSettings, state::SessionAction};
 use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
@@ -390,6 +391,19 @@ impl App {
         )
     }
 
+    /// Resolves `Config::use_process_name_for_recording` /
+    /// `custom_recording_prefix` into the `RecordingNaming` `start_capture`
+    /// and `save_highlight` need -- shared by both since a user's naming
+    /// choice applies the same way to a manual recording and a Highlight
+    /// save.
+    pub(super) fn resolve_recording_naming(&self) -> RecordingNaming {
+        if self.config.use_process_name_for_recording {
+            RecordingNaming::ProcessName
+        } else {
+            RecordingNaming::CustomPrefix(self.config.custom_recording_prefix.clone())
+        }
+    }
+
     pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
         let source_title = source.window_title.clone();
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
@@ -397,6 +411,7 @@ impl App {
             self.resolve_capture_inputs();
         let track_count = selected_devices.len() + selected_app_sources.len();
         let audio_labels = build_audio_labels(&selected_devices, &selected_app_sources);
+        let naming = self.resolve_recording_naming();
         // Only transition to the Recording state once start_capture actually
         // succeeds -- otherwise a disk-full refusal would leave the UI showing
         // "Recording" for a capture that never started.
@@ -411,6 +426,7 @@ impl App {
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
             encode,
+            naming,
         ) {
             Ok(path) => {
                 tracing::info!(
@@ -542,9 +558,10 @@ impl App {
         let real_hwnd = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
         let source = crate::sources::capture_source_for_hwnd(real_hwnd);
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
+        let naming = self.resolve_recording_naming();
         match self
             .session
-            .save_highlight(&self.config.output_dir, &app_name)
+            .save_highlight(&self.config.output_dir, &app_name, naming)
         {
             Ok(handle) => {
                 self.highlight_save_state = HighlightSaveState::Saving;

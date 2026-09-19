@@ -206,6 +206,29 @@ impl App {
                 }
             });
 
+            ui.add_space(6.0);
+            let checkbox_response = ui
+                .checkbox(
+                    &mut self.config.use_process_name_for_recording,
+                    s.use_process_name_label,
+                )
+                .on_hover_text(s.use_process_name_tooltip);
+            if checkbox_response.changed() {
+                self.save_config_or_report(s);
+            }
+            if !self.config.use_process_name_for_recording {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    let tf = ui.add(
+                        egui::TextEdit::singleline(&mut self.config.custom_recording_prefix)
+                            .hint_text(s.custom_recording_prefix_placeholder),
+                    );
+                    if tf.lost_focus() {
+                        self.save_config_or_report(s);
+                    }
+                });
+            }
+
             let show_free_space = self.free_space_bytes.is_some();
             let show_highlight_active = self.session.is_highlighting();
             let show_highlight_save =

@@ -78,6 +78,21 @@ pub struct Config {
     /// instead of failing.
     #[serde(default = "default_true")]
     pub show_recording_border: bool,
+    /// Whether a finished manual recording or Highlight save is named after
+    /// the recorded process (the historical default, `true`) or
+    /// `custom_recording_prefix` (see `crate::recording_naming::RecordingNaming`).
+    /// `#[serde(default = "default_true")]` so a `config.toml` saved before
+    /// this field existed still loads instead of failing.
+    #[serde(default = "default_true")]
+    pub use_process_name_for_recording: bool,
+    /// User-typed prefix used when `use_process_name_for_recording` is
+    /// `false` -- sanitized and given an auto-incrementing `_NNN` sequence
+    /// number at finish time (see `recording_naming::resolve_finished_recording_stem`).
+    /// `#[serde(default)]` so a `config.toml` saved before this field existed
+    /// still loads instead of failing (falls back to `""`, which
+    /// `sanitize_filename_component` turns into `"recording"`).
+    #[serde(default)]
+    pub custom_recording_prefix: String,
 }
 
 fn default_true() -> bool {
@@ -283,6 +298,8 @@ impl Default for Config {
             registered_app_audio: Vec::new(),
             selected_audio_device_ids: None,
             show_recording_border: true,
+            use_process_name_for_recording: true,
+            custom_recording_prefix: String::new(),
         }
     }
 }
@@ -973,6 +990,56 @@ mod tests {
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert!(!parsed.show_recording_border);
+    }
+
+    #[test]
+    fn use_process_name_for_recording_is_true_by_default() {
+        assert!(Config::default().use_process_name_for_recording);
+    }
+
+    #[test]
+    fn custom_recording_prefix_is_empty_by_default() {
+        assert_eq!(Config::default().custom_recording_prefix, "");
+    }
+
+    #[test]
+    fn recording_naming_fields_missing_from_toml_fall_back_to_defaults() {
+        // Simulates a config.toml saved before these fields existed.
+        let text = r#"
+            output_dir = "."
+            language = "en"
+            [hotkeys]
+            start_stop = "F9"
+            pause = "F8"
+            toggle_overlay = "F7"
+            [overlay]
+            enabled = false
+            opacity = 0.85
+            [encode]
+            codec = "h265"
+            fps = 60
+            resolution_mode = "native"
+            custom_width = 1920
+            custom_height = 1080
+            bitrate_mode = "auto"
+            manual_bitrate_mbps = 12
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert!(parsed.use_process_name_for_recording);
+        assert_eq!(parsed.custom_recording_prefix, "");
+    }
+
+    #[test]
+    fn recording_naming_fields_round_trip_toml_with_non_default_values() {
+        let original = Config {
+            use_process_name_for_recording: false,
+            custom_recording_prefix: "MyStream".into(),
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert!(!parsed.use_process_name_for_recording);
+        assert_eq!(parsed.custom_recording_prefix, "MyStream");
     }
 
     #[test]

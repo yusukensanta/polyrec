@@ -1,6 +1,7 @@
 use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{RecordingCommand, RecordingWriter};
 use crate::error::AppError;
+use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,9 +19,10 @@ const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// Recording is written to `temp_path` throughout (Media Foundation's sink writer needs
 /// a fixed destination from the moment it opens the file, before the finish time is
-/// known). Once `finalize()` closes the file, it's renamed to `<app_name>_<finish
-/// timestamp>.mp4` inside `output_dir` — the filename reflects when the recording
-/// actually finished, not when it started.
+/// known). Once `finalize()` closes the file, it's renamed to whatever `naming`
+/// resolves to (see `resolve_finished_recording_stem`) inside `output_dir` --
+/// resolved at finish time, not start time, since the default naming mode's
+/// timestamp should reflect when the recording actually finished.
 ///
 /// Returns (command_sender, handle_resolving_to_the_final_renamed_path).
 // Each param is an independently-resolved piece the caller already has on hand
@@ -31,6 +33,7 @@ pub fn spawn_recording_actor(
     temp_path: PathBuf,
     output_dir: PathBuf,
     app_name: String,
+    naming: RecordingNaming,
     width: u32,
     height: u32,
     fps: u32,
@@ -73,8 +76,8 @@ pub fn spawn_recording_actor(
         }
 
         let finished_temp_path = writer.finalize()?;
-        let finish_stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
-        let final_path = output_dir.join(format!("{app_name}_{finish_stamp}.mp4"));
+        let stem = resolve_finished_recording_stem(&naming, &app_name, &output_dir);
+        let final_path = output_dir.join(format!("{stem}.mp4"));
         std::fs::rename(&finished_temp_path, &final_path).map_err(|e| {
             AppError::Encode(format!(
                 "failed to rename {} to {}: {e}",

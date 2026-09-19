@@ -16,6 +16,7 @@ use crate::error::AppError;
 use crate::highlight::{
     HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
+use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
 use crate::session::clock::RecordingClock;
 use crate::types::{
     AppAudioSource, AudioDevice, CaptureKind, CaptureSource, SessionState, TrackId,
@@ -159,6 +160,7 @@ impl SessionManager {
         frame_count: Arc<AtomicU64>,
         output_dir: &std::path::Path,
         encode: EncodeSettings,
+        naming: RecordingNaming,
     ) -> Result<PathBuf, AppError> {
         let clock = RecordingClock::new();
         let pause_flag = Arc::new(AtomicBool::new(false));
@@ -193,6 +195,7 @@ impl SessionManager {
             output_path.clone(),
             polyrec_dir,
             app_name,
+            naming,
             output_width,
             output_height,
             encode.fps,
@@ -595,6 +598,7 @@ impl SessionManager {
         &self,
         output_dir: &Path,
         app_name: &str,
+        naming: RecordingNaming,
     ) -> Result<JoinHandle<Result<PathBuf, AppError>>, AppError> {
         let active = self
             .highlight
@@ -630,8 +634,8 @@ impl SessionManager {
             tokio::task::spawn_blocking(move || {
                 let saved_dir = highlight_saved_dir(&output_dir);
                 std::fs::create_dir_all(&saved_dir)?;
-                let finish_stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
-                let output_path = saved_dir.join(format!("{app_name}_{finish_stamp}.mp4"));
+                let stem = resolve_finished_recording_stem(&naming, &app_name, &saved_dir);
+                let output_path = saved_dir.join(format!("{stem}.mp4"));
                 highlight_export::concat_and_trim(&snapshot, buffer_seconds, &output_path)
             })
             .await
@@ -679,21 +683,7 @@ pub(crate) fn app_name_from_exe(exe_name: &str) -> String {
         } else {
             exe_name
         };
-    let sanitized: String = trimmed
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "recording".to_string()
-    } else {
-        sanitized
-    }
+    crate::recording_naming::sanitize_filename_component(trimmed)
 }
 
 /// Directory the Highlight buffer's rotating segment files live in -- kept
@@ -1196,6 +1186,7 @@ mod tests {
             Arc::clone(&frame_count),
             dir.path(),
             EncodeSettings::default(),
+            RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1270,6 +1261,7 @@ mod tests {
                 Arc::clone(&frame_count),
                 dir.path(),
                 EncodeSettings::default(),
+                RecordingNaming::ProcessName,
             )
             .expect("start_capture failed");
 
@@ -1311,6 +1303,87 @@ mod tests {
         assert!(export_meta.len() > 0, "exported file is empty");
     }
 
+    /// End-to-end: two real recordings in a row with `RecordingNaming::CustomPrefix`
+    /// through the same start_capture/stop_capture path the GUI uses, proving the
+    /// sequence number is resolved from what's actually on disk (not an in-memory
+    /// counter) across separate recordings -- needs a display, so it's ignored by
+    /// default -- run with `--ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn full_capture_with_custom_prefix_produces_sequential_files() {
+        use crate::sources::enumerate_sources;
+
+        let sources = enumerate_sources();
+        let source =
+            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let frame_count = Arc::new(AtomicU64::new(0));
+        let naming = RecordingNaming::CustomPrefix("e2e_stream".into());
+
+        let temp_path = sm
+            .start_capture(
+                source.clone(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                false,
+                true,
+                Arc::clone(&frame_count),
+                dir.path(),
+                EncodeSettings::default(),
+                naming.clone(),
+            )
+            .expect("start_capture failed (first recording)");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let handle = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+        let first_path = handle
+            .await
+            .expect("recorder task panicked/aborted")
+            .expect("finalize() returned an error");
+        assert_ne!(first_path, temp_path);
+        assert_eq!(
+            first_path.file_name().and_then(|n| n.to_str()),
+            Some("e2e_stream_001.mp4"),
+            "first custom-prefix recording should start the sequence at 001"
+        );
+        assert!(std::fs::metadata(&first_path).expect("first output missing").len() > 0);
+
+        let frame_count2 = Arc::new(AtomicU64::new(0));
+        let temp_path2 = sm
+            .start_capture(
+                source,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                false,
+                true,
+                Arc::clone(&frame_count2),
+                dir.path(),
+                EncodeSettings::default(),
+                naming,
+            )
+            .expect("start_capture failed (second recording)");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let handle2 = tokio::task::block_in_place(|| sm.stop_capture())
+            .expect("stop_capture returned None while active");
+        let second_path = handle2
+            .await
+            .expect("recorder task panicked/aborted")
+            .expect("finalize() returned an error");
+        assert_ne!(second_path, temp_path2);
+        assert_eq!(
+            second_path.file_name().and_then(|n| n.to_str()),
+            Some("e2e_stream_002.mp4"),
+            "second custom-prefix recording in the same dir should continue the sequence at 002, scanned from disk"
+        );
+        assert!(std::fs::metadata(&second_path).expect("second output missing").len() > 0);
+    }
+
     /// DIAGNOSTIC (temporary): records real window + default audio devices while a
     /// system WAV plays, then decodes the finalized MP4's audio track back to PCM via
     /// Media Foundation and reports the peak sample magnitude actually stored in the
@@ -1350,6 +1423,7 @@ mod tests {
             Arc::clone(&frame_count),
             dir.path(),
             EncodeSettings::default(),
+            RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
 
@@ -1487,6 +1561,7 @@ mod tests {
                 Arc::clone(&frame_count),
                 dir.path(),
                 EncodeSettings::default(),
+                RecordingNaming::ProcessName,
             )
             .expect("start_capture failed");
 
@@ -1554,6 +1629,7 @@ mod tests {
             Arc::clone(&frame_count),
             dir.path(),
             EncodeSettings::default(),
+            RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
 
@@ -1640,6 +1716,7 @@ mod tests {
             Arc::clone(&frame_count),
             dir.path(),
             EncodeSettings::default(),
+            RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
 
@@ -1723,6 +1800,7 @@ mod tests {
             Arc::clone(&frame_count),
             dir.path(),
             EncodeSettings::default(),
+            RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
 
@@ -1802,7 +1880,7 @@ mod tests {
         );
 
         let handle = sm
-            .save_highlight(dir.path(), "e2e_highlight_test")
+            .save_highlight(dir.path(), "e2e_highlight_test", RecordingNaming::ProcessName)
             .expect("save_highlight failed");
         let saved_path = handle
             .await
