@@ -60,6 +60,7 @@ impl App {
 
         self.refresh_highlight_buffering();
         self.poll_highlight_save_result();
+        self.check_fps_shortfall(s);
 
         // The recorder can stop itself early (disk full — see disk_space.rs)
         // without the user pressing stop. Detect that and run the normal stop
@@ -176,6 +177,41 @@ impl App {
             Ok(Err(e)) => HighlightSaveState::Failed(e.to_string()),
             Err(e) => HighlightSaveState::Failed(e.to_string()),
         };
+    }
+
+    /// One-shot-per-recording check: has the achieved frame rate
+    /// (frame_count / elapsed) fallen persistently short of the configured
+    /// target? The "frames" counter next to "tracks" in the status panel is
+    /// a real throughput signal -- it only increments once a frame clears
+    /// the whole pipeline through to the recording channel -- but nothing
+    /// previously surfaced a sustained shortfall to the user; it just
+    /// silently degraded. Waits past WARMUP_SECS before checking, so brief
+    /// startup/encoder-warmup noise (and the first few seconds of a normal
+    /// recording, where elapsed is small enough for count/elapsed to be
+    /// noisy) doesn't false-positive.
+    fn check_fps_shortfall(&mut self, s: &Strings) {
+        const WARMUP_SECS: f64 = 10.0;
+        const SHORTFALL_THRESHOLD: f64 = 0.75;
+
+        if self.fps_shortfall_warned || !self.session.is_recording() {
+            return;
+        }
+        let Some(start) = self.recording_start else {
+            return;
+        };
+        let elapsed_secs = start.elapsed().as_secs_f64();
+        if elapsed_secs < WARMUP_SECS {
+            return;
+        }
+        let achieved_fps = self.frame_count.load(Ordering::Relaxed) as f64 / elapsed_secs;
+        let target_fps = self.config.encode.fps() as f64;
+        if achieved_fps < target_fps * SHORTFALL_THRESHOLD {
+            self.fps_shortfall_warned = true;
+            self.error_message = Some(format!(
+                "{}{achieved_fps:.0}/{target_fps:.0} fps",
+                s.fps_shortfall_prefix
+            ));
+        }
     }
 }
 
