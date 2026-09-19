@@ -419,6 +419,7 @@ impl App {
                 );
                 self.session.apply(SessionAction::Start);
                 self.recording_start = Some(Instant::now());
+                self.fps_shortfall_warned = false;
                 self.last_recording_audio_labels = audio_labels;
                 self.last_recording_app_name = app_name;
             }

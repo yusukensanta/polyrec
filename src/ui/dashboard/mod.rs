@@ -119,6 +119,14 @@ pub struct App {
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
+    /// Set once per recording after the achieved fps (frame_count / elapsed)
+    /// has been checked against the configured target and found persistently
+    /// short -- the "frames" counter next to "tracks" is a real throughput
+    /// signal (it only increments once a frame clears the whole pipeline
+    /// through to the recording channel), but nothing previously surfaced a
+    /// sustained shortfall to the user; it just silently degraded. One-shot
+    /// per recording so it doesn't re-fire every frame once triggered.
+    fps_shortfall_warned: bool,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
     /// Free space on `config.output_dir`'s volume, refreshed periodically
@@ -261,6 +269,7 @@ impl App {
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
+            fps_shortfall_warned: false,
             last_output_path: None,
             output_dir_input,
             free_space_bytes: None,
