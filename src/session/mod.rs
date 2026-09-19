@@ -175,20 +175,14 @@ impl SessionManager {
         // All captured audio is downmixed/resampled (or, for app sources,
         // already produced) at this fixed target, regardless of each
         // device's native mix format -- so a per-app source's track needs
-        // the exact same spec entry as a device's. One entry per pid, not
-        // per app_source -- see AppAudioSource::process_ids's doc comment
-        // for why an app with multiple independent top-level processes
-        // gets one track per process rather than one shared/mixed track.
-        let audio_specs: Vec<(u32, u16)> = audio_devices
-            .iter()
-            .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
-            .chain(
-                app_audio_sources
-                    .iter()
-                    .flat_map(|s| s.process_ids.iter())
-                    .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS)),
-            )
-            .collect();
+        // the exact same spec entry as a device's. See
+        // total_audio_track_count's doc comment for why the count (not a
+        // per-track value) is the only thing that needs to match
+        // spawn_app_audio_tracks's track-ID assignment.
+        let audio_specs: Vec<(u32, u16)> = vec![
+            (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+            total_audio_track_count(&audio_devices, &app_audio_sources)
+        ];
 
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
             resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
@@ -419,20 +413,13 @@ impl SessionManager {
         let pause_flag = Arc::new(AtomicBool::new(false)); // never toggled -- no pause support
         let stop_flag = Arc::new(AtomicBool::new(false));
 
-        // One entry per pid, not per app_source -- see
-        // AppAudioSource::process_ids's doc comment for why an app with
-        // multiple independent top-level processes gets one track per
-        // process rather than one shared/mixed track.
-        let audio_specs: Vec<(u32, u16)> = audio_devices
-            .iter()
-            .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS))
-            .chain(
-                app_audio_sources
-                    .iter()
-                    .flat_map(|s| s.process_ids.iter())
-                    .map(|_| (TARGET_SAMPLE_RATE, TARGET_CHANNELS)),
-            )
-            .collect();
+        // See total_audio_track_count's doc comment for why the count (not
+        // a per-track value) is the only thing that needs to match
+        // spawn_app_audio_tracks's track-ID assignment.
+        let audio_specs: Vec<(u32, u16)> = vec![
+            (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+            total_audio_track_count(&audio_devices, &app_audio_sources)
+        ];
 
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
             resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
@@ -744,6 +731,26 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
         .as_millis();
     let temp_path = polyrec_dir.join(format!("{app_name}_recording_{start_ts}.tmp.mp4"));
     (temp_path, polyrec_dir)
+}
+
+/// How many audio tracks `spawn_device_audio_tracks` + `spawn_app_audio_tracks`
+/// will spawn for `audio_devices`/`app_audio_sources` -- one per device, one
+/// per process ID across every app-audio source (see
+/// `AppAudioSource::process_ids`'s doc comment for why). This is the single
+/// source of truth `audio_specs`' entry count is built from in both
+/// `start_capture` and `start_highlight_buffering`: every entry is the same
+/// `(TARGET_SAMPLE_RATE, TARGET_CHANNELS)` value regardless of which
+/// device/app-source it ends up assigned to, so all that actually needs to
+/// match `spawn_app_audio_tracks`'s track-ID assignment is this *count* --
+/// keeping both derived from the same function (rather than two
+/// independently-written iterations over the same data) is what keeps them
+/// from silently drifting apart if either one's filtering logic changes.
+fn total_audio_track_count(audio_devices: &[AudioDevice], app_audio_sources: &[AppAudioSource]) -> usize {
+    audio_devices.len()
+        + app_audio_sources
+            .iter()
+            .map(|s| s.process_ids.len())
+            .sum::<usize>()
 }
 
 /// Spawns one capture thread + one pump task per selected audio device,
