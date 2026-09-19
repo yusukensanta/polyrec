@@ -159,11 +159,7 @@ impl App {
                             // means "record this").
                             if was_checked && !self.selected_app_audio[i] {
                                 self.config.unregister_app_audio(&src.exe_name);
-                                if let Err(e) = self.config.save() {
-                                    tracing::error!("failed to save config: {e}");
-                                    self.error_message =
-                                        Some(format!("{}{e}", s.config_save_failed_prefix));
-                                }
+                                self.save_config_or_report(s);
                                 self.rebuild_app_audio_sources_now();
                                 break;
                             }
@@ -230,11 +226,7 @@ impl App {
                             // hotkey-started recording uses) -- same pattern as overlay_enabled.
                             if response.changed() {
                                 self.config.default_app_audio_only = self.app_audio_only;
-                                if let Err(e) = self.config.save() {
-                                    tracing::error!("failed to save config: {e}");
-                                    self.error_message =
-                                        Some(format!("{}{e}", s.config_save_failed_prefix));
-                                }
+                                self.save_config_or_report(s);
                             }
                         });
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
@@ -443,10 +435,7 @@ impl App {
     /// list, or via the "Browse for .exe instead…" fallback).
     fn register_app_and_close_picker(&mut self, exe_name: String, exe_path: String, s: &Strings) {
         self.config.register_app_audio(exe_name, exe_path);
-        if let Err(e) = self.config.save() {
-            tracing::error!("failed to save config: {e}");
-            self.error_message = Some(format!("{}{e}", s.config_save_failed_prefix));
-        }
+        self.save_config_or_report(s);
         self.rebuild_app_audio_sources_now();
         self.show_add_app_picker = false;
     }

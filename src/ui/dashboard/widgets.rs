@@ -137,10 +137,7 @@ pub(super) fn checkbox_with_volume_slider(
                 config
                     .audio_device_gain
                     .insert(gain_key.clone(), gain_percent as f32 / 100.0);
-                if let Err(e) = config.save() {
-                    tracing::error!("failed to save config: {e}");
-                    *error_message = Some(format!("{config_save_failed_prefix}{e}"));
-                }
+                super::util::save_config_or_report(config, error_message, config_save_failed_prefix);
             }
         });
     }
