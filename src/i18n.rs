@@ -186,6 +186,15 @@ pub struct Strings {
     pub stop_button: &'static str,
     pub rec_button: &'static str,
     pub pause_tooltip: &'static str,
+    /// Checkbox above the output-dir row -- checked (default) names each
+    /// finished recording/Highlight save after the recorded process, same as
+    /// before this setting existed; unchecked reveals a text field for
+    /// `custom_recording_prefix` instead (see `recording_naming::RecordingNaming`).
+    pub use_process_name_label: &'static str,
+    pub use_process_name_tooltip: &'static str,
+    /// Hint text for the custom-prefix field, shown only while
+    /// `use_process_name_label`'s checkbox is unchecked.
+    pub custom_recording_prefix_placeholder: &'static str,
 
     // Overlay HUD
     pub overlay_hud_stop_word: &'static str,
@@ -359,6 +368,9 @@ pub static EN: Strings = Strings {
     stop_button: "⏹ STOP",
     rec_button: "⏺ REC",
     pause_tooltip: "Pause",
+    use_process_name_label: "Use process name automatically",
+    use_process_name_tooltip: "Names each finished recording after the app being recorded (e.g. \"vivaldi_2026-09-19-14-30-00.mp4\"). Uncheck to use your own prefix instead.",
+    custom_recording_prefix_placeholder: "Recording prefix (e.g. MyStream) — saved as MyStream_001.mp4, MyStream_002.mp4, …",
 
     overlay_hud_stop_word: "stop",
 
@@ -502,6 +514,9 @@ pub static JA: Strings = Strings {
     stop_button: "⏹ 停止",
     rec_button: "⏺ 録画",
     pause_tooltip: "一時停止",
+    use_process_name_label: "プロセス名を自動的に使用",
+    use_process_name_tooltip: "録画対象のアプリ名でファイル名を付けます（例:「vivaldi_2026-09-19-14-30-00.mp4」）。チェックを外すと、独自の接頭辞を使用できます。",
+    custom_recording_prefix_placeholder: "録画の接頭辞（例: MyStream）— MyStream_001.mp4, MyStream_002.mp4 … として保存されます",
 
     overlay_hud_stop_word: "停止",
 
@@ -612,6 +627,8 @@ mod tests {
             assert!(!strings.update_working_message.is_empty());
             assert!(!strings.update_blocked_while_recording.is_empty());
             assert!(!strings.hotkey_save_highlight_header.is_empty());
+            assert!(!strings.use_process_name_label.is_empty());
+            assert!(!strings.custom_recording_prefix_placeholder.is_empty());
         }
     }
 }
