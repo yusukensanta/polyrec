@@ -779,10 +779,44 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandl
 
 /// Activate an `IAudioClient` scoped to `target_pid`'s audio only (Windows 10 2004+
 /// Process Loopback Capture API), instead of the whole default render device.
+/// Retries on a timed-out activation instead of giving up after one attempt
+/// -- under exactly the CPU/GPU contention this app is built to handle
+/// gracefully (a demanding game + hardware encode + capture all competing),
+/// a single slow activation previously dropped that track for the entire
+/// recording with no second chance.
 unsafe fn activate_process_loopback_audio_client(
     target_pid: u32,
     include_tree: bool,
 ) -> Result<IAudioClient, AppError> {
+    const ACTIVATION_ATTEMPTS: u32 = 3;
+    const ACTIVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    for attempt in 1..=ACTIVATION_ATTEMPTS {
+        let result = unsafe {
+            try_activate_process_loopback_audio_client(target_pid, include_tree, ACTIVATION_TIMEOUT)
+        }?;
+        if let Some(client) = result {
+            return Ok(client);
+        }
+        if attempt < ACTIVATION_ATTEMPTS {
+            tracing::warn!(
+                "process loopback activation timed out for pid={target_pid} (attempt {attempt}/{ACTIVATION_ATTEMPTS}), retrying"
+            );
+        }
+    }
+    Err(AppError::Windows(format!(
+        "ActivateAudioInterfaceAsync timed out after {ACTIVATION_ATTEMPTS} attempts for pid={target_pid}"
+    )))
+}
+
+/// One activation attempt -- `Ok(None)` means it timed out (the caller may
+/// retry), `Ok(Some(client))` is success, `Err` is a real failure not worth
+/// retrying (activation API call itself failing, the OS reporting activation
+/// failed, or the returned interface not actually being an `IAudioClient`).
+unsafe fn try_activate_process_loopback_audio_client(
+    target_pid: u32,
+    include_tree: bool,
+    timeout: std::time::Duration,
+) -> Result<Option<IAudioClient>, AppError> {
     unsafe {
         let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
             ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -844,14 +878,17 @@ unsafe fn activate_process_loopback_audio_client(
         core::mem::forget(variant);
         activate_result?;
 
-        let activated = result_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(|_| AppError::Windows("ActivateAudioInterfaceAsync timed out".into()))?
-            .map_err(|e| AppError::Windows(format!("process loopback activation failed: {e}")))?;
+        let activated = match result_rx.recv_timeout(timeout) {
+            Ok(r) => {
+                r.map_err(|e| AppError::Windows(format!("process loopback activation failed: {e}")))?
+            }
+            Err(_) => return Ok(None),
+        };
 
-        activated.cast::<IAudioClient>().map_err(|e| {
-            AppError::Windows(format!("cast activated interface to IAudioClient: {e}"))
-        })
+        activated
+            .cast::<IAudioClient>()
+            .map(Some)
+            .map_err(|e| AppError::Windows(format!("cast activated interface to IAudioClient: {e}")))
     }
 }
 
