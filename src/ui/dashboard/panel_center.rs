@@ -108,13 +108,25 @@ impl App {
                 });
 
                 if let Some(active) = self.session.active.as_ref() {
+                    let naming = active.naming.clone();
+                    let app_name = active.app_name.clone();
+                    let output_dir = active.output_dir.clone();
+                    // Recomputed only on a new elapsed second, not every
+                    // frame -- see `displayed_recording_name`'s doc comment.
+                    if self.displayed_recording_name.as_ref().map(|(s, _)| *s) != Some(secs) {
+                        let stem = crate::recording_naming::resolve_finished_recording_stem(
+                            &naming,
+                            &app_name,
+                            &output_dir,
+                        );
+                        self.displayed_recording_name = Some((secs, format!("{stem}.mp4")));
+                    }
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(
-                            active
-                                .output_path
-                                .file_name()
-                                .and_then(|n| n.to_str())
+                            self.displayed_recording_name
+                                .as_ref()
+                                .map(|(_, name)| name.as_str())
                                 .unwrap_or("recording.mp4"),
                         )
                         .size(TEXT_CAPTION)

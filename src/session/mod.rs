@@ -72,6 +72,15 @@ pub struct ActiveCapture {
     /// closure; see `stop_capture`.
     pub stop_flag: Arc<AtomicBool>,
     pub output_path: PathBuf,
+    /// Folder `output_path`'s finished file will be renamed into (see
+    /// `encode::actor::spawn_recording_actor`) -- along with `app_name` and
+    /// `naming` below, lets the UI preview the eventual saved filename
+    /// (`recording_naming::resolve_finished_recording_stem`) instead of
+    /// showing `output_path`'s own name, which is only ever the in-progress
+    /// `.tmp.mp4` file.
+    pub output_dir: PathBuf,
+    pub app_name: String,
+    pub naming: RecordingNaming,
     /// Set by the recorder actor if it stopped itself early because free disk
     /// space dropped below `disk_space::MIN_FREE_BYTES` — the file up to that
     /// point is still finalized normally, this just tells the caller *why* the
@@ -191,6 +200,9 @@ impl SessionManager {
 
         // Spawn RecordingActor
         let disk_full_flag = Arc::new(AtomicBool::new(false));
+        let active_output_dir = polyrec_dir.clone();
+        let active_app_name = app_name.clone();
+        let active_naming = naming.clone();
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
             polyrec_dir,
@@ -299,6 +311,9 @@ impl SessionManager {
             pause_flag,
             stop_flag,
             output_path: output_path.clone(),
+            output_dir: active_output_dir,
+            app_name: active_app_name,
+            naming: active_naming,
             disk_full_flag,
             hwnd: source.hwnd,
             kind: source.kind,

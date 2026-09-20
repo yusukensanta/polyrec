@@ -127,6 +127,13 @@ pub struct App {
     /// sustained shortfall to the user; it just silently degraded. One-shot
     /// per recording so it doesn't re-fire every frame once triggered.
     fps_shortfall_warned: bool,
+    /// Cached preview of the filename the active recording will be saved as
+    /// (elapsed-seconds it was computed at, and the name itself) -- recomputed
+    /// only when `elapsed` ticks over to a new second (see
+    /// `render_center_panel`), not every frame, since previewing
+    /// `RecordingNaming::CustomPrefix` does a directory listing
+    /// (`recording_naming::next_sequence_number`).
+    displayed_recording_name: Option<(u64, String)>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
     /// Free space on `config.output_dir`'s volume, refreshed periodically
@@ -270,6 +277,7 @@ impl App {
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             fps_shortfall_warned: false,
+            displayed_recording_name: None,
             last_output_path: None,
             output_dir_input,
             free_space_bytes: None,
