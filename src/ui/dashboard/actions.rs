@@ -436,6 +436,11 @@ impl App {
                 self.session.apply(SessionAction::Start);
                 self.recording_start = Some(Instant::now());
                 self.fps_shortfall_warned = false;
+                // Otherwise the previous recording's cached preview -- keyed
+                // on elapsed seconds, which this new recording also starts
+                // at 0 from -- would flash as this one's name until the
+                // first elapsed-second tick recomputes it.
+                self.displayed_recording_name = None;
                 self.last_recording_audio_labels = audio_labels;
                 self.last_recording_app_name = app_name;
             }
