@@ -91,7 +91,14 @@ pub fn spawn_highlight_actor(
             let seg_path = segment_dir.join(format!("highlight_seg_{seg_id}.mp4"));
 
             let writer = RecordingWriter::new(
-                &seg_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, allow_hardware_encode,
+                &seg_path,
+                width,
+                height,
+                fps,
+                &codec,
+                bitrate_bps,
+                &audio_device_specs,
+                allow_hardware_encode,
             )?;
             writer.begin_writing()?;
 
@@ -152,8 +159,13 @@ pub fn spawn_highlight_actor(
             // actor as errored.
             match writer.finalize() {
                 Ok(finished_path) => {
-                    let info = SegmentInfo { path: finished_path, duration: last_pts };
-                    let mut guard = segments.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let info = SegmentInfo {
+                        path: finished_path,
+                        duration: last_pts,
+                    };
+                    let mut guard = segments
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.push_back(info);
                     while guard.len() > max_segments {
                         if let Some(old) = guard.pop_front() {
@@ -185,7 +197,9 @@ pub fn spawn_highlight_actor(
 /// foreground window (segments from a different app/resolution can't be
 /// concatenated with new ones, see `encode::highlight_export::concat_and_trim`).
 pub fn discard_segments(segments: &Mutex<VecDeque<SegmentInfo>>) {
-    let mut guard = segments.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = segments
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for seg in guard.drain(..) {
         let _ = std::fs::remove_file(&seg.path);
     }
@@ -197,7 +211,10 @@ mod tests {
     use crate::types::VideoFrame;
 
     fn tiny_video_frame(pts: Duration) -> VideoFrame {
-        VideoFrame { pts, data: vec![0u8; 64 * 64 * 4] }
+        VideoFrame {
+            pts,
+            data: vec![0u8; 64 * 64 * 4],
+        }
     }
 
     #[tokio::test]
@@ -223,24 +240,40 @@ mod tests {
 
         // Send frames spaced out past several 1s segment boundaries.
         for i in 0..8u64 {
-            tx.send(RecordingCommand::WriteVideo(tiny_video_frame(Duration::from_millis(i * 400))))
-                .await
-                .unwrap();
+            tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
+                Duration::from_millis(i * 400),
+            )))
+            .await
+            .unwrap();
             tokio::time::sleep(Duration::from_millis(400)).await;
         }
         tx.send(RecordingCommand::Stop).await.unwrap();
-        handle.await.unwrap().expect("highlight actor returned an error");
+        handle
+            .await
+            .unwrap()
+            .expect("highlight actor returned an error");
 
         let guard = segments.lock().unwrap();
-        assert!(guard.len() <= 3, "expected at most 3 retained segments, got {}", guard.len());
+        assert!(
+            guard.len() <= 3,
+            "expected at most 3 retained segments, got {}",
+            guard.len()
+        );
         assert!(!guard.is_empty(), "expected at least one finalized segment");
         for seg in guard.iter() {
-            assert!(seg.path.exists(), "retained segment file should exist on disk");
+            assert!(
+                seg.path.exists(),
+                "retained segment file should exist on disk"
+            );
         }
         // Count segment files actually left in the directory -- old ones must
         // be deleted, not just dropped from the in-memory deque.
         let files_on_disk = std::fs::read_dir(dir.path()).unwrap().count();
-        assert_eq!(files_on_disk, guard.len(), "deleted segments must not survive on disk");
+        assert_eq!(
+            files_on_disk,
+            guard.len(),
+            "deleted segments must not survive on disk"
+        );
     }
 
     #[tokio::test]
@@ -263,14 +296,28 @@ mod tests {
             disk_full_flag,
             false,
         );
-        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(Duration::ZERO))).await.unwrap();
+        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
+            Duration::ZERO,
+        )))
+        .await
+        .unwrap();
         tx.send(RecordingCommand::Stop).await.unwrap();
-        handle.await.unwrap().expect("highlight actor returned an error");
+        handle
+            .await
+            .unwrap()
+            .expect("highlight actor returned an error");
 
-        assert!(!segments.lock().unwrap().is_empty(), "expected at least one segment before discarding");
+        assert!(
+            !segments.lock().unwrap().is_empty(),
+            "expected at least one segment before discarding"
+        );
         discard_segments(&segments);
         assert!(segments.lock().unwrap().is_empty());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "all segment files should be deleted");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "all segment files should be deleted"
+        );
     }
 
     #[tokio::test]
@@ -294,7 +341,11 @@ mod tests {
             false,
         );
 
-        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(Duration::ZERO))).await.unwrap();
+        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
+            Duration::ZERO,
+        )))
+        .await
+        .unwrap();
 
         let (reply_tx, reply_rx) = oneshot::channel();
         save_now_tx.send(reply_tx).unwrap();
@@ -303,15 +354,30 @@ mod tests {
             .expect("save_now reply timed out")
             .expect("save_now reply sender dropped");
 
-        assert_eq!(segments.lock().unwrap().len(), 1, "expected the forced segment to be finalized");
+        assert_eq!(
+            segments.lock().unwrap().len(),
+            1,
+            "expected the forced segment to be finalized"
+        );
 
         // Rotation must have already opened a fresh segment after the forced
         // save -- write to it before stopping so this second segment is a
         // real one to confirm rotation actually continued, not just that the
         // first segment closed correctly.
-        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(Duration::ZERO))).await.unwrap();
+        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
+            Duration::ZERO,
+        )))
+        .await
+        .unwrap();
         tx.send(RecordingCommand::Stop).await.unwrap();
-        handle.await.unwrap().expect("highlight actor returned an error");
-        assert_eq!(segments.lock().unwrap().len(), 2, "rotation should continue after a forced save");
+        handle
+            .await
+            .unwrap()
+            .expect("highlight actor returned an error");
+        assert_eq!(
+            segments.lock().unwrap().len(),
+            2,
+            "rotation should continue after a forced save"
+        );
     }
 }

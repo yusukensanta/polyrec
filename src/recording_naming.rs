@@ -149,7 +149,8 @@ mod tests {
     #[test]
     fn resolve_finished_recording_stem_process_name_uses_app_name_and_timestamp() {
         let dir = tempfile::tempdir().unwrap();
-        let stem = resolve_finished_recording_stem(&RecordingNaming::ProcessName, "vivaldi", dir.path());
+        let stem =
+            resolve_finished_recording_stem(&RecordingNaming::ProcessName, "vivaldi", dir.path());
         assert!(stem.starts_with("vivaldi_"));
     }
 

@@ -40,8 +40,7 @@ fn detect_install_kind_at(exe_path: &Path) -> InstallKind {
 }
 
 pub fn detect_install_kind() -> Result<InstallKind, AppError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| AppError::Update(format!("current_exe: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| AppError::Update(format!("current_exe: {e}")))?;
     Ok(detect_install_kind_at(&exe))
 }
 
@@ -109,8 +108,11 @@ async fn fetch_expected_sha256(version_tag: &str, filename: &str) -> Result<Stri
     let bytes = download_bytes(&sums_url).await?;
     let text = String::from_utf8(bytes)
         .map_err(|e| AppError::Update(format!("SHA256SUMS.txt wasn't valid UTF-8: {e}")))?;
-    parse_sha256sums(&text, filename)
-        .ok_or_else(|| AppError::Update(format!("no checksum entry for {filename} in SHA256SUMS.txt")))
+    parse_sha256sums(&text, filename).ok_or_else(|| {
+        AppError::Update(format!(
+            "no checksum entry for {filename} in SHA256SUMS.txt"
+        ))
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -137,20 +139,32 @@ struct AttestationsResponse {
 async fn check_build_attestation(digest_hex: &str) {
     let url = format!("https://api.github.com/repos/{REPO}/attestations/sha256:{digest_hex}");
     let Ok(client) = http_client() else { return };
-    match client.get(&url).header("Accept", "application/vnd.github+json").send().await {
+    match client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => match resp.json::<AttestationsResponse>().await {
             Ok(parsed) if parsed.attestations.is_empty() => {
                 tracing::warn!(
                     "no GitHub build-provenance attestation found for sha256:{digest_hex} -- proceeding on checksum verification alone"
                 );
             }
-            Ok(_) => tracing::info!("build-provenance attestation confirmed for sha256:{digest_hex}"),
+            Ok(_) => {
+                tracing::info!("build-provenance attestation confirmed for sha256:{digest_hex}")
+            }
             Err(e) => tracing::warn!("could not parse attestation lookup response: {e}"),
         },
         Ok(resp) => {
-            tracing::warn!("attestation lookup returned {}: proceeding on checksum verification alone", resp.status());
+            tracing::warn!(
+                "attestation lookup returned {}: proceeding on checksum verification alone",
+                resp.status()
+            );
         }
-        Err(e) => tracing::warn!("attestation lookup failed: {e} -- proceeding on checksum verification alone"),
+        Err(e) => tracing::warn!(
+            "attestation lookup failed: {e} -- proceeding on checksum verification alone"
+        ),
     }
 }
 
@@ -202,8 +216,12 @@ async fn update_portable(version_tag: &str) -> Result<(), AppError> {
     let exe_bytes = extract_exe_from_zip(&zip_bytes)?;
 
     let temp_path = std::env::temp_dir().join(format!("polyrec-update-{version_tag}.exe"));
-    std::fs::write(&temp_path, &exe_bytes)
-        .map_err(|e| AppError::Update(format!("writing downloaded exe to {}: {e}", temp_path.display())))?;
+    std::fs::write(&temp_path, &exe_bytes).map_err(|e| {
+        AppError::Update(format!(
+            "writing downloaded exe to {}: {e}",
+            temp_path.display()
+        ))
+    })?;
 
     self_replace::self_replace(&temp_path)
         .map_err(|e| AppError::Update(format!("self_replace failed: {e}")))?;
@@ -222,8 +240,9 @@ async fn update_installed(version_tag: &str) -> Result<(), AppError> {
     let setup_bytes = download_and_verify(version_tag, &setup_filename).await?;
 
     let temp_path = std::env::temp_dir().join(format!("polyrec-update-{version_tag}-setup.exe"));
-    std::fs::write(&temp_path, &setup_bytes)
-        .map_err(|e| AppError::Update(format!("writing installer to {}: {e}", temp_path.display())))?;
+    std::fs::write(&temp_path, &setup_bytes).map_err(|e| {
+        AppError::Update(format!("writing installer to {}: {e}", temp_path.display()))
+    })?;
 
     // /VERYSILENT+/SUPPRESSMSGBOXES suppress Inno's own wizard UI; they do
     // NOT suppress the OS-level UAC elevation prompt (independent, driven by
@@ -266,20 +285,29 @@ mod tests {
     #[test]
     fn parse_sha256sums_ignores_malformed_lines() {
         let text = "not-a-valid-line\n\nabc123  real-file.zip\n";
-        assert_eq!(parse_sha256sums(text, "real-file.zip"), Some("abc123".to_string()));
+        assert_eq!(
+            parse_sha256sums(text, "real-file.zip"),
+            Some("abc123".to_string())
+        );
     }
 
     #[test]
     fn parse_sha256sums_handles_binary_mode_asterisk_prefix() {
         // `sha256sum` prefixes the filename with "*" in binary mode.
         let text = "abc123  *real-file.zip\n";
-        assert_eq!(parse_sha256sums(text, "real-file.zip"), Some("abc123".to_string()));
+        assert_eq!(
+            parse_sha256sums(text, "real-file.zip"),
+            Some("abc123".to_string())
+        );
     }
 
     #[test]
     fn parse_sha256sums_is_case_insensitive_on_the_hash() {
         let text = "ABC123  real-file.zip\n";
-        assert_eq!(parse_sha256sums(text, "real-file.zip"), Some("abc123".to_string()));
+        assert_eq!(
+            parse_sha256sums(text, "real-file.zip"),
+            Some("abc123".to_string())
+        );
     }
 
     #[test]
@@ -299,7 +327,13 @@ mod tests {
     #[test]
     fn verify_sha256_rejects_mismatched_hash() {
         let data = b"hello world";
-        assert!(verify_sha256(data, "0000000000000000000000000000000000000000000000000000000000000").is_err());
+        assert!(
+            verify_sha256(
+                data,
+                "0000000000000000000000000000000000000000000000000000000000000"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -347,8 +381,15 @@ mod tests {
 
         let exe_bytes = extract_exe_from_zip(&zip_bytes).expect("extract_exe_from_zip failed");
         println!("extracted polyrec.exe: {} bytes", exe_bytes.len());
-        assert!(exe_bytes.len() > 1_000_000, "extracted exe suspiciously small");
+        assert!(
+            exe_bytes.len() > 1_000_000,
+            "extracted exe suspiciously small"
+        );
         // "MZ" -- the DOS header magic bytes every valid Windows PE starts with.
-        assert_eq!(&exe_bytes[0..2], b"MZ", "extracted file isn't a valid PE executable");
+        assert_eq!(
+            &exe_bytes[0..2],
+            b"MZ",
+            "extracted file isn't a valid PE executable"
+        );
     }
 }

@@ -921,16 +921,15 @@ unsafe fn try_activate_process_loopback_audio_client(
         activate_result?;
 
         let activated = match result_rx.recv_timeout(timeout) {
-            Ok(r) => {
-                r.map_err(|e| AppError::Windows(format!("process loopback activation failed: {e}")))?
-            }
+            Ok(r) => r.map_err(|e| {
+                AppError::Windows(format!("process loopback activation failed: {e}"))
+            })?,
             Err(_) => return Ok(None),
         };
 
-        activated
-            .cast::<IAudioClient>()
-            .map(Some)
-            .map_err(|e| AppError::Windows(format!("cast activated interface to IAudioClient: {e}")))
+        activated.cast::<IAudioClient>().map(Some).map_err(|e| {
+            AppError::Windows(format!("cast activated interface to IAudioClient: {e}"))
+        })
     }
 }
 

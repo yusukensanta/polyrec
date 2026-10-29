@@ -4,8 +4,8 @@ use crate::error::AppError;
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -49,7 +49,16 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(&temp_path, width, height, fps, &codec, bitrate_bps, &audio_device_specs, allow_hardware_encode)?;
+        let writer = RecordingWriter::new(
+            &temp_path,
+            width,
+            height,
+            fps,
+            &codec,
+            bitrate_bps,
+            &audio_device_specs,
+            allow_hardware_encode,
+        )?;
         writer.begin_writing()?;
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);

@@ -27,27 +27,42 @@ mod tests {
 
     #[test]
     fn idle_to_recording_on_start() {
-        assert_eq!(transition(&SessionState::Idle, &SessionAction::Start), Some(SessionState::Recording));
+        assert_eq!(
+            transition(&SessionState::Idle, &SessionAction::Start),
+            Some(SessionState::Recording)
+        );
     }
 
     #[test]
     fn recording_to_paused_on_pause() {
-        assert_eq!(transition(&SessionState::Recording, &SessionAction::Pause), Some(SessionState::Paused));
+        assert_eq!(
+            transition(&SessionState::Recording, &SessionAction::Pause),
+            Some(SessionState::Paused)
+        );
     }
 
     #[test]
     fn paused_to_recording_on_resume() {
-        assert_eq!(transition(&SessionState::Paused, &SessionAction::Resume), Some(SessionState::Recording));
+        assert_eq!(
+            transition(&SessionState::Paused, &SessionAction::Resume),
+            Some(SessionState::Recording)
+        );
     }
 
     #[test]
     fn recording_to_idle_on_stop() {
-        assert_eq!(transition(&SessionState::Recording, &SessionAction::Stop), Some(SessionState::Idle));
+        assert_eq!(
+            transition(&SessionState::Recording, &SessionAction::Stop),
+            Some(SessionState::Idle)
+        );
     }
 
     #[test]
     fn paused_to_idle_on_stop() {
-        assert_eq!(transition(&SessionState::Paused, &SessionAction::Stop), Some(SessionState::Idle));
+        assert_eq!(
+            transition(&SessionState::Paused, &SessionAction::Stop),
+            Some(SessionState::Idle)
+        );
     }
 
     #[test]
@@ -57,6 +72,9 @@ mod tests {
 
     #[test]
     fn cannot_start_from_recording() {
-        assert_eq!(transition(&SessionState::Recording, &SessionAction::Start), None);
+        assert_eq!(
+            transition(&SessionState::Recording, &SessionAction::Start),
+            None
+        );
     }
 }

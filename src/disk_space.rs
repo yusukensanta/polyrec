@@ -8,8 +8,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::core::PCWSTR;
 
 /// Below this, refuse to start a new recording and stop an in-progress one.
 /// 500 MB is a few seconds of buffer at typical recording bitrates (see
@@ -31,7 +31,11 @@ pub struct DiskSpaceGuard {
 
 impl DiskSpaceGuard {
     pub fn new(path: PathBuf, interval: Duration) -> Self {
-        Self { path, interval, last_check: Instant::now() }
+        Self {
+            path,
+            interval,
+            last_check: Instant::now(),
+        }
     }
 
     /// A no-op unless `interval` has elapsed since the last real check.
@@ -67,7 +71,11 @@ impl DiskSpaceGuard {
 /// already exist (a directory, typically) — pass the actual output directory,
 /// not a not-yet-created file path within it.
 pub fn free_bytes(path: &Path) -> Result<u64, AppError> {
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let mut free_bytes_available = 0u64;
     unsafe {
         GetDiskFreeSpaceExW(
@@ -88,8 +96,12 @@ mod tests {
     #[test]
     fn free_bytes_reports_a_positive_value_for_a_real_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let free = free_bytes(dir.path()).expect("free_bytes failed for a real, existing directory");
-        assert!(free > 0, "expected some free space on the temp dir's volume");
+        let free =
+            free_bytes(dir.path()).expect("free_bytes failed for a real, existing directory");
+        assert!(
+            free > 0,
+            "expected some free space on the temp dir's volume"
+        );
     }
 
     #[test]

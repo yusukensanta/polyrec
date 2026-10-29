@@ -81,7 +81,10 @@ impl App {
                             .audio_devices
                             .iter()
                             .map(|dev| {
-                                (format!("{} {}", audio_device_icon(dev), dev.name), dev.id.clone())
+                                (
+                                    format!("{} {}", audio_device_icon(dev), dev.name),
+                                    dev.id.clone(),
+                                )
                             })
                             .collect();
                         for (i, (label, dev_id)) in device_rows.into_iter().enumerate() {
