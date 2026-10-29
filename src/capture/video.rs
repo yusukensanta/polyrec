@@ -1,7 +1,7 @@
 use crate::capture::CaptureControl;
 use crate::capture::device::D3dDevice;
 use crate::error::{AppError, ResultExt};
-use crate::types::VideoFrame;
+use crate::types::{CaptureKind, VideoFrame};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use windows::Foundation::TypedEventHandler;
@@ -38,6 +38,17 @@ pub enum CaptureTarget {
 }
 
 impl CaptureTarget {
+    /// Rebuilds the typed handle from `CaptureSource`'s `(kind, hwnd)` pair,
+    /// which stores either an HWND or an HMONITOR as a plain `usize` so it can
+    /// cross threads (the raw handle types aren't `Send`).
+    pub fn from_raw(kind: CaptureKind, handle: usize) -> Self {
+        let ptr = handle as *mut core::ffi::c_void;
+        match kind {
+            CaptureKind::Window => CaptureTarget::Window(HWND(ptr)),
+            CaptureKind::Monitor => CaptureTarget::Monitor(HMONITOR(ptr)),
+        }
+    }
+
     unsafe fn create_item(
         self,
         interop: &IGraphicsCaptureItemInterop,

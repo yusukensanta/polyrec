@@ -36,7 +36,7 @@ impl App {
                     .session
                     .active
                     .as_ref()
-                    .map(|a| a.ctrl.clock.elapsed())
+                    .map(|a| a.elapsed())
                     .unwrap_or_default();
                 let secs = elapsed.as_secs();
 
