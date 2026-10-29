@@ -8,6 +8,109 @@ use crate::i18n::Strings;
 use eframe::egui;
 
 impl App {
+    /// Quality popup: fps, codec, encoder, resolution and bitrate.
+    fn render_encode_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        section_header(ui, s.fps_header);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.config.encode.fps, 30, "30");
+            ui.selectable_value(&mut self.config.encode.fps, 60, "60");
+        });
+
+        section_header(ui, s.codec_header);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.config.encode.codec, Codec::H264, "H264");
+            ui.selectable_value(&mut self.config.encode.codec, Codec::H265, "H265");
+        });
+
+        section_header(ui, s.encoder_mode_header);
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.config.encode.encoder_mode,
+                EncoderMode::Hardware,
+                s.encoder_mode_hardware,
+            )
+            .on_hover_text(s.encoder_mode_hardware_tooltip);
+            ui.selectable_value(
+                &mut self.config.encode.encoder_mode,
+                EncoderMode::Software,
+                s.encoder_mode_software,
+            )
+            .on_hover_text(s.encoder_mode_software_tooltip);
+        });
+
+        section_header(ui, s.resolution_header);
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.config.encode.resolution_mode,
+                ResolutionKind::Native,
+                s.resolution_native,
+            );
+            ui.selectable_value(
+                &mut self.config.encode.resolution_mode,
+                ResolutionKind::Display,
+                s.resolution_display,
+            );
+            ui.selectable_value(
+                &mut self.config.encode.resolution_mode,
+                ResolutionKind::Custom,
+                s.resolution_custom,
+            );
+        });
+        if self.config.encode.resolution_mode == ResolutionKind::Custom {
+            ui.horizontal(|ui| {
+                ui.label(s.width_label);
+                ui.add(egui::DragValue::new(&mut self.config.encode.custom_width).range(2..=7680));
+                ui.label(s.height_label);
+                ui.add(egui::DragValue::new(&mut self.config.encode.custom_height).range(2..=4320));
+            });
+        }
+
+        section_header(ui, s.bitrate_header);
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.config.encode.bitrate_mode,
+                BitrateKind::Auto,
+                s.bitrate_auto,
+            );
+            ui.selectable_value(
+                &mut self.config.encode.bitrate_mode,
+                BitrateKind::Manual,
+                s.bitrate_manual,
+            );
+        });
+        if self.config.encode.bitrate_mode == BitrateKind::Manual {
+            ui.horizontal(|ui| {
+                ui.label(s.mbps_label);
+                ui.add(
+                    egui::DragValue::new(&mut self.config.encode.manual_bitrate_mbps)
+                        .range(1..=100),
+                );
+            });
+        }
+    }
+
+    /// Quality popup: the Highlight section.
+    fn render_highlight_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        ui.add_space(4.0);
+        section_header(ui, s.highlight_header);
+        ui.checkbox(
+            &mut self.config.highlight.enabled,
+            s.highlight_enabled_label,
+        )
+        .on_hover_text(s.tooltip_highlight_enabled);
+        if self.config.highlight.enabled {
+            ui.horizontal(|ui| {
+                ui.label(s.highlight_buffer_seconds_label);
+                ui.add(
+                    egui::DragValue::new(&mut self.config.highlight.buffer_seconds).range(
+                        crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN
+                            ..=crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
+                    ),
+                );
+            });
+        }
+    }
+
     pub(super) fn render_quality_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
         if !self.show_quality_popup {
             return;
@@ -38,111 +141,9 @@ impl App {
                 egui::ScrollArea::vertical()
                     .max_height(520.0)
                     .show(ui, |ui| {
-                        section_header(ui, s.fps_header);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.config.encode.fps, 30, "30");
-                            ui.selectable_value(&mut self.config.encode.fps, 60, "60");
-                        });
+                        self.render_encode_settings(ui, s);
 
-                        section_header(ui, s.codec_header);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut self.config.encode.codec, Codec::H264, "H264");
-                            ui.selectable_value(&mut self.config.encode.codec, Codec::H265, "H265");
-                        });
-
-                        section_header(ui, s.encoder_mode_header);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.config.encode.encoder_mode,
-                                EncoderMode::Hardware,
-                                s.encoder_mode_hardware,
-                            )
-                            .on_hover_text(s.encoder_mode_hardware_tooltip);
-                            ui.selectable_value(
-                                &mut self.config.encode.encoder_mode,
-                                EncoderMode::Software,
-                                s.encoder_mode_software,
-                            )
-                            .on_hover_text(s.encoder_mode_software_tooltip);
-                        });
-
-                        section_header(ui, s.resolution_header);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.config.encode.resolution_mode,
-                                ResolutionKind::Native,
-                                s.resolution_native,
-                            );
-                            ui.selectable_value(
-                                &mut self.config.encode.resolution_mode,
-                                ResolutionKind::Display,
-                                s.resolution_display,
-                            );
-                            ui.selectable_value(
-                                &mut self.config.encode.resolution_mode,
-                                ResolutionKind::Custom,
-                                s.resolution_custom,
-                            );
-                        });
-                        if self.config.encode.resolution_mode == ResolutionKind::Custom {
-                            ui.horizontal(|ui| {
-                                ui.label(s.width_label);
-                                ui.add(
-                                    egui::DragValue::new(&mut self.config.encode.custom_width)
-                                        .range(2..=7680),
-                                );
-                                ui.label(s.height_label);
-                                ui.add(
-                                    egui::DragValue::new(&mut self.config.encode.custom_height)
-                                        .range(2..=4320),
-                                );
-                            });
-                        }
-
-                        section_header(ui, s.bitrate_header);
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.config.encode.bitrate_mode,
-                                BitrateKind::Auto,
-                                s.bitrate_auto,
-                            );
-                            ui.selectable_value(
-                                &mut self.config.encode.bitrate_mode,
-                                BitrateKind::Manual,
-                                s.bitrate_manual,
-                            );
-                        });
-                        if self.config.encode.bitrate_mode == BitrateKind::Manual {
-                            ui.horizontal(|ui| {
-                                ui.label(s.mbps_label);
-                                ui.add(
-                                    egui::DragValue::new(
-                                        &mut self.config.encode.manual_bitrate_mbps,
-                                    )
-                                    .range(1..=100),
-                                );
-                            });
-                        }
-
-                        ui.add_space(4.0);
-                        section_header(ui, s.highlight_header);
-                        ui.checkbox(
-                            &mut self.config.highlight.enabled,
-                            s.highlight_enabled_label,
-                        )
-                        .on_hover_text(s.tooltip_highlight_enabled);
-                        if self.config.highlight.enabled {
-                            ui.horizontal(|ui| {
-                                ui.label(s.highlight_buffer_seconds_label);
-                                ui.add(
-                                    egui::DragValue::new(&mut self.config.highlight.buffer_seconds)
-                                        .range(
-                                            crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN
-                                                ..=crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
-                                        ),
-                                );
-                            });
-                        }
+                        self.render_highlight_settings(ui, s);
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);

@@ -406,6 +406,94 @@ impl App {
         });
     }
 
+    /// The export's track checkboxes (one per app/device label, see
+    /// `group_tracks_by_label`) and the mix toggle. Returns the groups.
+    fn render_export_track_checkboxes(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &'static Strings,
+    ) -> Vec<(String, Vec<usize>)> {
+        section_header(ui, s.audio_tracks_header);
+        // Grouped by resolved label, not one checkbox per raw track -- a
+        // multi-process app (e.g. Discord with more than one live audio
+        // session at once) gets one checkbox covering all of its tracks
+        // instead of one per underlying process, matching how nobody
+        // thinks of "Discord" as multiple audio sources. Toggling a group
+        // checkbox sets every track in that group together, so they can
+        // never end up selected inconsistently.
+        let resolved_labels: Vec<String> = (0..self.export.track_selection.len())
+            .map(|i| match self.last_recording_audio_labels.get(i) {
+                Some(name) => name.clone(),
+                None => format!("{} {}", s.track_label_fallback, i + 1),
+            })
+            .collect();
+        let track_groups = group_tracks_by_label(&resolved_labels);
+        for (label, indices) in &track_groups {
+            let mut checked = indices.iter().all(|&i| self.export.track_selection[i]);
+            if ui.checkbox(&mut checked, label.clone()).changed() {
+                for &i in indices {
+                    self.export.track_selection[i] = checked;
+                }
+            }
+        }
+        ui.checkbox(&mut self.export.mix_tracks, s.export_mix_tracks_label)
+            .on_hover_text(s.export_mix_tracks_tooltip);
+        track_groups
+    }
+
+    /// Export clicked: asks where to save, then runs the selected
+    /// export (mix, or per-group passthrough/merge) on a worker thread.
+    fn start_export(&mut self, path: &std::path::Path, track_groups: &[(String, Vec<usize>)]) {
+        let default_dir = default_export_dir(&self.config.output_dir);
+        let _ = std::fs::create_dir_all(&default_dir);
+        let default_name =
+            default_export_file_name(&self.last_recording_app_name, chrono::Local::now());
+        if let Some(dest) = rfd::FileDialog::new()
+            .add_filter("MP4 video", &["mp4"])
+            .set_directory(&default_dir)
+            .set_file_name(&default_name)
+            .save_file()
+        {
+            let src = path.to_path_buf();
+            // Global "Mix into one track" (if checked) still
+            // mixes everything selected regardless of app
+            // grouping -- selected_groups (same-app tracks
+            // merged, everything else kept separate) is only
+            // used when that's off.
+            let indices: Vec<usize> = self
+                .export
+                .track_selection
+                .iter()
+                .enumerate()
+                .filter(|&(_, &sel)| sel)
+                .map(|(i, _)| i)
+                .collect();
+            let selected_groups: Vec<Vec<usize>> = track_groups
+                .iter()
+                .map(|(_, idxs)| {
+                    idxs.iter()
+                        .copied()
+                        .filter(|&i| self.export.track_selection[i])
+                        .collect::<Vec<usize>>()
+                })
+                .filter(|g: &Vec<usize>| !g.is_empty())
+                .collect();
+            let mix = self.export.mix_tracks;
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let result = if mix {
+                    mix_tracks(&src, &dest, &indices)
+                } else {
+                    export_grouped(&src, &dest, &selected_groups)
+                }
+                .map_err(|e| e.to_string());
+                let _ = tx.send(result);
+            });
+            self.export.result_rx = Some(rx);
+            self.export.state = ExportState::Running;
+        }
+    }
+
     pub(super) fn render_export_controls(
         &mut self,
         ui: &mut egui::Ui,
@@ -432,31 +520,7 @@ impl App {
             return;
         }
 
-        section_header(ui, s.audio_tracks_header);
-        // Grouped by resolved label, not one checkbox per raw track -- a
-        // multi-process app (e.g. Discord with more than one live audio
-        // session at once) gets one checkbox covering all of its tracks
-        // instead of one per underlying process, matching how nobody
-        // thinks of "Discord" as multiple audio sources. Toggling a group
-        // checkbox sets every track in that group together, so they can
-        // never end up selected inconsistently.
-        let resolved_labels: Vec<String> = (0..self.export.track_selection.len())
-            .map(|i| match self.last_recording_audio_labels.get(i) {
-                Some(name) => name.clone(),
-                None => format!("{} {}", s.track_label_fallback, i + 1),
-            })
-            .collect();
-        let track_groups = group_tracks_by_label(&resolved_labels);
-        for (label, indices) in &track_groups {
-            let mut checked = indices.iter().all(|&i| self.export.track_selection[i]);
-            if ui.checkbox(&mut checked, label.clone()).changed() {
-                for &i in indices {
-                    self.export.track_selection[i] = checked;
-                }
-            }
-        }
-        ui.checkbox(&mut self.export.mix_tracks, s.export_mix_tracks_label)
-            .on_hover_text(s.export_mix_tracks_tooltip);
+        let track_groups = self.render_export_track_checkboxes(ui, s);
 
         ui.add_space(8.0);
 
@@ -480,56 +544,7 @@ impl App {
                     .on_hover_text(s.export_tooltip)
                     .clicked()
                 {
-                    let default_dir = default_export_dir(&self.config.output_dir);
-                    let _ = std::fs::create_dir_all(&default_dir);
-                    let default_name = default_export_file_name(
-                        &self.last_recording_app_name,
-                        chrono::Local::now(),
-                    );
-                    if let Some(dest) = rfd::FileDialog::new()
-                        .add_filter("MP4 video", &["mp4"])
-                        .set_directory(&default_dir)
-                        .set_file_name(&default_name)
-                        .save_file()
-                    {
-                        let src = path.to_path_buf();
-                        // Global "Mix into one track" (if checked) still
-                        // mixes everything selected regardless of app
-                        // grouping -- selected_groups (same-app tracks
-                        // merged, everything else kept separate) is only
-                        // used when that's off.
-                        let indices: Vec<usize> = self
-                            .export
-                            .track_selection
-                            .iter()
-                            .enumerate()
-                            .filter(|&(_, &sel)| sel)
-                            .map(|(i, _)| i)
-                            .collect();
-                        let selected_groups: Vec<Vec<usize>> = track_groups
-                            .iter()
-                            .map(|(_, idxs)| {
-                                idxs.iter()
-                                    .copied()
-                                    .filter(|&i| self.export.track_selection[i])
-                                    .collect::<Vec<usize>>()
-                            })
-                            .filter(|g: &Vec<usize>| !g.is_empty())
-                            .collect();
-                        let mix = self.export.mix_tracks;
-                        let (tx, rx) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let result = if mix {
-                                mix_tracks(&src, &dest, &indices)
-                            } else {
-                                export_grouped(&src, &dest, &selected_groups)
-                            }
-                            .map_err(|e| e.to_string());
-                            let _ = tx.send(result);
-                        });
-                        self.export.result_rx = Some(rx);
-                        self.export.state = ExportState::Running;
-                    }
+                    self.start_export(path, &track_groups);
                 }
                 if ui
                     .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
