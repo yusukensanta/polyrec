@@ -6,6 +6,7 @@
 //! files into one sink, which needs its own PTS-rebasing logic across the
 //! seams that a single-input remux never has to do.
 
+use crate::encode::mf::MfSession;
 use crate::encode::remux::{StreamLayout, discover_stream_layout};
 use crate::error::AppError;
 use crate::highlight::SegmentInfo;
@@ -13,12 +14,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_VERSION, MFCreateSourceReaderFromURL, MFSTARTUP_FULL, MFShutdown, MFStartup,
+    MFCreateSourceReaderFromURL,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::System::Variant::VT_I8;
 use windows::core::{GUID, HSTRING};
 
@@ -30,14 +30,8 @@ pub fn concat_and_trim(
     target_seconds: u32,
     output: &Path,
 ) -> Result<PathBuf, AppError> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        MFStartup(MF_VERSION, MFSTARTUP_FULL)
-            .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
-        let result = do_concat_and_trim(segments, target_seconds, output);
-        let _ = MFShutdown();
-        result
-    }
+    let _mf = MfSession::start_mta()?;
+    unsafe { do_concat_and_trim(segments, target_seconds, output) }
 }
 
 /// Opens `path` for compressed passthrough (no decode/re-encode) on its video
