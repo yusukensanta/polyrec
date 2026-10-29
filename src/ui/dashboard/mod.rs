@@ -85,6 +85,9 @@ pub struct App {
     /// Last time `refresh_sources_and_audio_if_due` actually ran (see there
     /// for why this is throttled rather than run every frame).
     sources_checked_at: Option<Instant>,
+    /// The in-flight refresh's result channel, if one is running -- see
+    /// `refresh_sources_and_audio_if_due`.
+    refresh_rx: Option<mpsc::Receiver<actions::RefreshSnapshot>>,
     /// Display label for each audio track actually used in the last
     /// finished manual recording (devices, then app-audio sources, in the
     /// same order `start_recording_with_source` assigns track ids) --
@@ -202,6 +205,7 @@ impl App {
             last_output_path: None,
             output_dir_input,
             sources_checked_at: None,
+            refresh_rx: None,
             last_recording_audio_labels: Vec::new(),
             last_recording_app_name: String::new(),
             hotkey_listener: Some(hotkey_listener),

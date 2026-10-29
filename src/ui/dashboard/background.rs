@@ -11,7 +11,7 @@ impl App {
         let is_recording = self.session.is_recording();
 
         self.refresh_free_space();
-        self.refresh_sources_and_audio_if_due();
+        self.refresh_sources_and_audio_if_due(ctx);
         self.poll_self_update_result(ctx);
 
         // Poll update-check result (one-shot; None result also clears the receiver
