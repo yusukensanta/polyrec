@@ -4,7 +4,7 @@ pub mod state;
 
 pub use pipeline::CaptureInputs;
 
-use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
+use crate::config::{BitrateMode, Codec, EncoderMode, ResolutionMode};
 use crate::encode::RecordingCommand;
 use crate::encode::actor::spawn_recording_actor;
 use crate::encode::highlight_export;
@@ -28,7 +28,7 @@ use tokio::task::JoinHandle;
 /// from `Config::encode`) and passed into `start_capture`.
 #[derive(Debug, Clone)]
 pub struct EncodeSettings {
-    pub codec: String,
+    pub codec: Codec,
     pub fps: u32,
     pub resolution_mode: ResolutionMode,
     pub bitrate_mode: BitrateMode,
@@ -38,15 +38,12 @@ pub struct EncodeSettings {
 impl Default for EncodeSettings {
     fn default() -> Self {
         let d = crate::config::Config::default().encode;
-        let resolution_mode = d.resolution_mode();
-        let bitrate_mode = d.bitrate_mode();
-        let encoder_mode = d.encoder_mode();
         Self {
             codec: d.codec,
             fps: d.fps,
-            resolution_mode,
-            bitrate_mode,
-            encoder_mode,
+            resolution_mode: d.resolution_mode(),
+            bitrate_mode: d.bitrate_mode(),
+            encoder_mode: d.encoder_mode,
         }
     }
 }

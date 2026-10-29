@@ -1,3 +1,4 @@
+use crate::config::Codec;
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
 use crate::types::{AudioSamples, VideoFrame};
@@ -37,8 +38,8 @@ pub struct EncoderParams {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// "h265" (falls back to H264 if no HEVC encoder is available) or "h264".
-    pub codec: String,
+    /// H265 falls back to H264 if no HEVC encoder is available.
+    pub codec: Codec,
     pub bitrate_bps: u32,
     /// `(sample_rate, channels)` per audio track, in track-id order.
     pub audio_tracks: Vec<(u32, u16)>,
@@ -49,12 +50,12 @@ pub struct EncoderParams {
 impl EncoderParams {
     /// The tiny software-encoded 64x64@30fps configuration the writer,
     /// remux, export and highlight tests all use.
-    pub(crate) fn tiny_test(codec: &str, audio_tracks: &[(u32, u16)]) -> Self {
+    pub(crate) fn tiny_test(codec: Codec, audio_tracks: &[(u32, u16)]) -> Self {
         Self {
             width: 64,
             height: 64,
             fps: 30,
-            codec: codec.to_string(),
+            codec,
             bitrate_bps: 500_000,
             audio_tracks: audio_tracks.to_vec(),
             allow_hardware_encode: false,
@@ -79,7 +80,7 @@ impl RecordingWriter {
             width,
             height,
             fps,
-            ref codec,
+            codec,
             bitrate_bps,
             ref audio_tracks,
             allow_hardware_encode,
@@ -115,10 +116,9 @@ impl RecordingWriter {
             let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
                 .encode_ctx("MFCreateSinkWriterFromURL")?;
 
-            let requested_subtype = if codec == "h265" {
-                MFVideoFormat_HEVC
-            } else {
-                MFVideoFormat_H264
+            let requested_subtype = match codec {
+                Codec::H265 => MFVideoFormat_HEVC,
+                Codec::H264 => MFVideoFormat_H264,
             };
             let video_out =
                 make_video_output_type(width, height, fps, requested_subtype, bitrate_bps)?;
@@ -385,7 +385,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("h264_test.mp4");
-        let writer = RecordingWriter::new(&output, &EncoderParams::tiny_test("h264", &[]))
+        let writer = RecordingWriter::new(&output, &EncoderParams::tiny_test(Codec::H264, &[]))
             .expect("RecordingWriter::new with explicit bitrate failed");
         writer.begin_writing().expect("begin_writing failed");
         writer
@@ -409,7 +409,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("h265_test.mp4");
-        let writer = RecordingWriter::new(&output, &EncoderParams::tiny_test("h265", &[]))
+        let writer = RecordingWriter::new(&output, &EncoderParams::tiny_test(Codec::H265, &[]))
             .expect("RecordingWriter::new with h265 (or its fallback) failed");
         writer.begin_writing().expect("begin_writing failed");
         writer
@@ -452,8 +452,10 @@ mod tests {
 
         // 64×64 at 30fps, one stereo 48kHz audio track
         let audio_tracks = vec![(48000u32, 2u16)];
-        let writer =
-            RecordingWriter::new(&output, &EncoderParams::tiny_test("h264", &audio_tracks));
+        let writer = RecordingWriter::new(
+            &output,
+            &EncoderParams::tiny_test(Codec::H264, &audio_tracks),
+        );
         assert!(
             writer.is_ok(),
             "RecordingWriter::new failed: {:?}",
@@ -505,9 +507,11 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let audio_tracks = vec![(48000u32, 2u16), (48000u32, 2u16), (48000u32, 2u16)];
-            let writer =
-                RecordingWriter::new(&output, &EncoderParams::tiny_test("h264", &audio_tracks))
-                    .expect("RecordingWriter::new failed");
+            let writer = RecordingWriter::new(
+                &output,
+                &EncoderParams::tiny_test(Codec::H264, &audio_tracks),
+            )
+            .expect("RecordingWriter::new failed");
             writer.begin_writing().expect("begin_writing failed");
 
             writer

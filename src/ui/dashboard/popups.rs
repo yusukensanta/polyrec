@@ -4,6 +4,7 @@ use super::theme::{
 use super::util::{open_url, take_if_finished};
 use super::widgets::{accent_button, section_header};
 use super::{App, SelfUpdateState};
+use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
 use eframe::egui;
 
@@ -46,29 +47,21 @@ impl App {
 
                         section_header(ui, s.codec_header);
                         ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.config.encode.codec,
-                                "h264".into(),
-                                "H264",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.encode.codec,
-                                "h265".into(),
-                                "H265",
-                            );
+                            ui.selectable_value(&mut self.config.encode.codec, Codec::H264, "H264");
+                            ui.selectable_value(&mut self.config.encode.codec, Codec::H265, "H265");
                         });
 
                         section_header(ui, s.encoder_mode_header);
                         ui.horizontal(|ui| {
                             ui.selectable_value(
                                 &mut self.config.encode.encoder_mode,
-                                "hardware".into(),
+                                EncoderMode::Hardware,
                                 s.encoder_mode_hardware,
                             )
                             .on_hover_text(s.encoder_mode_hardware_tooltip);
                             ui.selectable_value(
                                 &mut self.config.encode.encoder_mode,
-                                "software".into(),
+                                EncoderMode::Software,
                                 s.encoder_mode_software,
                             )
                             .on_hover_text(s.encoder_mode_software_tooltip);
@@ -78,21 +71,21 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.selectable_value(
                                 &mut self.config.encode.resolution_mode,
-                                "native".into(),
+                                ResolutionKind::Native,
                                 s.resolution_native,
                             );
                             ui.selectable_value(
                                 &mut self.config.encode.resolution_mode,
-                                "display".into(),
+                                ResolutionKind::Display,
                                 s.resolution_display,
                             );
                             ui.selectable_value(
                                 &mut self.config.encode.resolution_mode,
-                                "custom".into(),
+                                ResolutionKind::Custom,
                                 s.resolution_custom,
                             );
                         });
-                        if self.config.encode.resolution_mode == "custom" {
+                        if self.config.encode.resolution_mode == ResolutionKind::Custom {
                             ui.horizontal(|ui| {
                                 ui.label(s.width_label);
                                 ui.add(
@@ -111,16 +104,16 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.selectable_value(
                                 &mut self.config.encode.bitrate_mode,
-                                "auto".into(),
+                                BitrateKind::Auto,
                                 s.bitrate_auto,
                             );
                             ui.selectable_value(
                                 &mut self.config.encode.bitrate_mode,
-                                "manual".into(),
+                                BitrateKind::Manual,
                                 s.bitrate_manual,
                             );
                         });
-                        if self.config.encode.bitrate_mode == "manual" {
+                        if self.config.encode.bitrate_mode == BitrateKind::Manual {
                             ui.horizontal(|ui| {
                                 ui.label(s.mbps_label);
                                 ui.add(

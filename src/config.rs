@@ -1,55 +1,52 @@
 use crate::error::AppError;
+use crate::i18n::Lang;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Persisted settings (`config.toml`).
+///
+/// Every struct here is `#[serde(default)]` at the container level: any
+/// field missing from the file -- a `config.toml` saved before that setting
+/// existed, or a hand-edited one -- falls back to that field's own default
+/// instead of failing the whole load, so adding a setting never needs a
+/// per-field `#[serde(default = ...)]` again.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Config {
     pub output_dir: PathBuf,
     pub hotkeys: HotkeyConfig,
     pub overlay: OverlayConfig,
     pub encode: EncodeConfig,
-    /// "en" | "ja" — see `crate::i18n::Lang`. Unknown values fall back to
-    /// English, same convention as the other mode fields in this file.
-    pub language: String,
+    /// Stored as "en" | "ja"; an unknown value loads as English.
+    pub language: Lang,
     /// The rolling "Highlight" background buffer — see `crate::highlight`.
-    /// `#[serde(default)]` so a `config.toml` saved before this field existed
-    /// still loads instead of failing (falls back to `HighlightConfig::default()`,
-    /// disabled).
-    #[serde(default)]
+    /// Disabled by default.
     pub highlight: HighlightConfig,
     /// Default state of the "App audio only" checkbox on launch (and thus
     /// what a hotkey-started recording uses, since the hotkey starts a
     /// recording with whatever the checkbox is currently set to). Defaults
-    /// to true — `#[serde(default = "default_true")]` so a `config.toml`
-    /// saved before this field existed still loads instead of failing.
-    #[serde(default = "default_true")]
+    /// to true.
     pub default_app_audio_only: bool,
     /// Per-device recording volume, keyed by the device's stable WASAPI
     /// endpoint id (`AudioDevice::id`) -- a linear multiplier applied to that
     /// device's captured samples before encoding (see
     /// `capture::audio::apply_gain`), independent of the device's actual
     /// system volume. A device with no entry here records at 1.0 (100%,
-    /// unboosted) -- see `Config::audio_gain`. `#[serde(default)]` so a
-    /// `config.toml` saved before this field existed still loads instead of
-    /// failing.
-    #[serde(default)]
+    /// unboosted) -- see `Config::audio_gain`.
     pub audio_device_gain: std::collections::HashMap<String, f32>,
     /// Top-left corner of the window, in screen coordinates, at the last
     /// clean exit (including the exit triggered by a self-update) -- restored
     /// on next launch via `ViewportBuilder::with_position` so the window
     /// reopens where it was left instead of the OS's default placement.
-    /// `None` (the default) leaves placement to the OS, same as before this
-    /// setting existed -- covers both a `config.toml` saved before this field
-    /// existed and the first-ever launch. See `Config::sane_window_position`
-    /// for why this isn't restored unconditionally.
-    #[serde(default)]
+    /// `None` (the default) leaves placement to the OS -- covers both an old
+    /// `config.toml` and the first-ever launch. See
+    /// `Config::sane_window_position` for why this isn't restored
+    /// unconditionally.
     pub window_position: Option<(f32, f32)>,
     /// Apps pinned to always appear in the Applications audio list, even
     /// while not currently producing sound (or not running at all) --
     /// see `AppAudioSource::process_ids`'s doc comment for how these merge
-    /// with live WASAPI sessions. `#[serde(default)]` so a `config.toml`
-    /// saved before this field existed still loads instead of failing.
-    #[serde(default)]
+    /// with live WASAPI sessions.
     pub registered_app_audio: Vec<RegisteredApp>,
     /// Which SYSTEM audio devices' checkboxes (mic, desktop/loopback, etc.)
     /// were checked as of the last time the user changed one -- keyed by the
@@ -57,46 +54,29 @@ pub struct Config {
     /// convention as `audio_device_gain`. `None` means this has never been
     /// saved (a fresh install, or a `config.toml` saved before this field
     /// existed) -- the UI falls back to its original default (loopback
-    /// devices checked, everything else unchecked) in that case, same as
-    /// before this setting existed. Once `Some`, it's used verbatim
-    /// regardless of that default, including an intentional "nothing
-    /// checked" (`Some(vec![])`) -- distinct from `None` precisely so an
-    /// explicit uncheck-everything sticks across a restart instead of
-    /// silently reverting to the loopback default. `#[serde(default)]` so a
-    /// `config.toml` saved before this field existed still loads instead of
-    /// failing.
-    #[serde(default)]
+    /// devices checked, everything else unchecked) in that case. Once
+    /// `Some`, it's used verbatim regardless of that default, including an
+    /// intentional "nothing checked" (`Some(vec![])`) -- distinct from `None`
+    /// precisely so an explicit uncheck-everything sticks across a restart
+    /// instead of silently reverting to the loopback default.
     pub selected_audio_device_ids: Option<Vec<String>>,
     /// Whether Windows' own colored capture-border indicator shows around the
     /// recorded window/monitor during a manual recording (see
     /// `capture::video::run_video_capture`'s `show_border` param and
     /// `SetIsBorderRequired`) -- doesn't affect Highlight background
     /// buffering, which always suppresses it regardless of this setting so
-    /// buffering isn't mistaken for an active recording. Defaults to `true`
-    /// (today's existing behavior) -- `#[serde(default = "default_true")]`
-    /// so a `config.toml` saved before this field existed still loads
-    /// instead of failing.
-    #[serde(default = "default_true")]
+    /// buffering isn't mistaken for an active recording. Defaults to `true`.
     pub show_recording_border: bool,
     /// Whether a finished manual recording or Highlight save is named after
     /// the recorded process (the historical default, `true`) or
     /// `custom_recording_prefix` (see `crate::recording_naming::RecordingNaming`).
-    /// `#[serde(default = "default_true")]` so a `config.toml` saved before
-    /// this field existed still loads instead of failing.
-    #[serde(default = "default_true")]
     pub use_process_name_for_recording: bool,
     /// User-typed prefix used when `use_process_name_for_recording` is
     /// `false` -- sanitized and given an auto-incrementing `_NNN` sequence
     /// number at finish time (see `recording_naming::resolve_finished_recording_stem`).
-    /// `#[serde(default)]` so a `config.toml` saved before this field existed
-    /// still loads instead of failing (falls back to `""`, which
-    /// `sanitize_filename_component` turns into `"recording"`).
-    #[serde(default)]
+    /// Defaults to `""`, which `sanitize_filename_component` turns into
+    /// `"recording"`.
     pub custom_recording_prefix: String,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// A user-pinned app for `Config::registered_app_audio` -- picked once via
@@ -116,19 +96,25 @@ pub struct RegisteredApp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct HotkeyConfig {
     pub start_stop: String,
     pub pause: String,
     pub toggle_overlay: String,
     /// Saves the last `highlight.buffer_seconds` of the Highlight buffer to a
-    /// file — only takes effect while Highlight buffering is active. Same
-    /// back-compat reasoning as `Config::highlight`.
-    #[serde(default = "default_save_highlight_hotkey")]
+    /// file — only takes effect while Highlight buffering is active.
     pub save_highlight: String,
 }
 
-fn default_save_highlight_hotkey() -> String {
-    "F10".into()
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self {
+            start_stop: "F9".into(),
+            pause: "F8".into(),
+            toggle_overlay: "F7".into(),
+            save_highlight: "F10".into(),
+        }
+    }
 }
 
 /// Minimum/maximum for `HighlightConfig::buffer_seconds`, enforced by the
@@ -138,6 +124,7 @@ pub const HIGHLIGHT_BUFFER_SECONDS_MIN: u32 = 30;
 pub const HIGHLIGHT_BUFFER_SECONDS_MAX: u32 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct HighlightConfig {
     pub enabled: bool,
     /// How much of the buffer to save on the Highlight hotkey — clamped to
@@ -157,37 +144,93 @@ impl Default for HighlightConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct OverlayConfig {
     pub enabled: bool,
     pub opacity: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EncodeConfig {
-    /// "h265" or "h264"
-    pub codec: String,
-    pub fps: u32,
-    /// "native" (window's own size, default) | "display" | "custom"
-    pub resolution_mode: String,
-    /// Only read when `resolution_mode == "custom"`.
-    pub custom_width: u32,
-    pub custom_height: u32,
-    /// "auto" (resolution-aware formula, default) | "manual"
-    pub bitrate_mode: String,
-    /// Only read when `bitrate_mode == "manual"`.
-    pub manual_bitrate_mbps: u32,
-    /// "hardware" (default, uses a GPU encoder like NVENC/QSV/AMF when one's
-    /// available) | "software" (forces Media Foundation's built-in software
-    /// H264/HEVC encoder -- frees up the GPU at the cost of higher CPU use,
-    /// useful while a demanding game/app is running). `#[serde(default)]` so
-    /// a `config.toml` saved before this field existed still loads instead
-    /// of failing (falls back to "hardware", today's behavior).
-    #[serde(default = "default_encoder_mode")]
-    pub encoder_mode: String,
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            opacity: 0.85,
+        }
+    }
 }
 
-fn default_encoder_mode() -> String {
-    "hardware".into()
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct EncodeConfig {
+    pub codec: Codec,
+    pub fps: u32,
+    pub resolution_mode: ResolutionKind,
+    /// Only read when `resolution_mode` is `Custom`.
+    pub custom_width: u32,
+    pub custom_height: u32,
+    pub bitrate_mode: BitrateKind,
+    /// Only read when `bitrate_mode` is `Manual`.
+    pub manual_bitrate_mbps: u32,
+    pub encoder_mode: EncoderMode,
+}
+
+impl Default for EncodeConfig {
+    fn default() -> Self {
+        Self {
+            codec: Codec::default(),
+            fps: 60,
+            resolution_mode: ResolutionKind::default(),
+            custom_width: 1920,
+            custom_height: 1080,
+            bitrate_mode: BitrateKind::default(),
+            manual_bitrate_mbps: 12,
+            encoder_mode: EncoderMode::default(),
+        }
+    }
+}
+
+/// Video codec, stored as "h265" | "h264". H265 (the default) falls back to
+/// H264 at encode time when no HEVC encoder is available (see
+/// `RecordingWriter::new`); an unknown stored value loads as H264.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Codec {
+    #[default]
+    H265,
+    #[serde(other)]
+    H264,
+}
+
+/// Stored form of the resolution setting, "native" | "display" | "custom" --
+/// see `EncodeConfig::resolution_mode()` for the resolved `ResolutionMode`.
+/// An unknown stored value loads as `Native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolutionKind {
+    /// The display's native resolution — explicit opt-in only, not the default.
+    Display,
+    /// `custom_width` x `custom_height`.
+    Custom,
+    /// The captured window's own native size (default — see the resolution-regression fix).
+    /// Last because serde's `other` fallback variant has to be.
+    #[default]
+    #[serde(other)]
+    Native,
+}
+
+/// Stored form of the bitrate setting, "auto" | "manual" -- see
+/// `EncodeConfig::bitrate_mode()` for the resolved `BitrateMode`. An unknown
+/// stored value loads as `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BitrateKind {
+    /// `manual_bitrate_mbps`.
+    Manual,
+    /// Resolution-aware formula (see `encode::writer::video_bitrate_bps`).
+    /// Last because serde's `other` fallback variant has to be.
+    #[default]
+    #[serde(other)]
+    Auto,
 }
 
 /// Resolved form of `EncodeConfig::resolution_mode` — see `EncodeConfig::resolution_mode()`.
@@ -210,40 +253,41 @@ pub enum BitrateMode {
     Manual(u32),
 }
 
-/// Resolved form of `EncodeConfig::encoder_mode` — see `EncodeConfig::encoder_mode()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stored as "hardware" | "software"; an unknown stored value loads as
+/// `Hardware` (the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EncoderMode {
+    /// Force Media Foundation's built-in software encoder, bypassing any
+    /// hardware transform even if one's available -- frees up the GPU at the
+    /// cost of higher CPU use, useful while a demanding game/app is running.
+    Software,
     /// Prefer a GPU hardware encoder (NVENC/QSV/AMF) when one's available --
     /// Media Foundation falls back to software transparently if not.
+    /// Last because serde's `other` fallback variant has to be.
+    #[default]
+    #[serde(other)]
     Hardware,
-    /// Force Media Foundation's built-in software encoder, bypassing any
-    /// hardware transform even if one's available.
-    Software,
 }
 
 impl EncodeConfig {
     pub fn resolution_mode(&self) -> ResolutionMode {
-        match self.resolution_mode.as_str() {
-            "display" => ResolutionMode::Display,
-            "custom" => ResolutionMode::Custom(
+        match self.resolution_mode {
+            ResolutionKind::Native => ResolutionMode::Native,
+            ResolutionKind::Display => ResolutionMode::Display,
+            ResolutionKind::Custom => ResolutionMode::Custom(
                 self.custom_width.clamp(2, 7680) & !1,
                 self.custom_height.clamp(2, 4320) & !1,
             ),
-            _ => ResolutionMode::Native,
         }
     }
 
     pub fn bitrate_mode(&self) -> BitrateMode {
-        match self.bitrate_mode.as_str() {
-            "manual" => BitrateMode::Manual(self.manual_bitrate_mbps.clamp(1, 100) * 1_000_000),
-            _ => BitrateMode::Auto,
-        }
-    }
-
-    pub fn encoder_mode(&self) -> EncoderMode {
-        match self.encoder_mode.as_str() {
-            "software" => EncoderMode::Software,
-            _ => EncoderMode::Hardware,
+        match self.bitrate_mode {
+            BitrateKind::Auto => BitrateMode::Auto,
+            BitrateKind::Manual => {
+                BitrateMode::Manual(self.manual_bitrate_mbps.clamp(1, 100) * 1_000_000)
+            }
         }
     }
 
@@ -270,27 +314,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             output_dir: dirs::video_dir().unwrap_or_else(|| PathBuf::from(".")),
-            hotkeys: HotkeyConfig {
-                start_stop: "F9".into(),
-                pause: "F8".into(),
-                toggle_overlay: "F7".into(),
-                save_highlight: default_save_highlight_hotkey(),
-            },
-            overlay: OverlayConfig {
-                enabled: false,
-                opacity: 0.85,
-            },
-            encode: EncodeConfig {
-                codec: "h265".into(),
-                fps: 60,
-                resolution_mode: "native".into(),
-                custom_width: 1920,
-                custom_height: 1080,
-                bitrate_mode: "auto".into(),
-                manual_bitrate_mbps: 12,
-                encoder_mode: "hardware".into(),
-            },
-            language: "en".into(),
+            hotkeys: HotkeyConfig::default(),
+            overlay: OverlayConfig::default(),
+            encode: EncodeConfig::default(),
+            language: Lang::default(),
             highlight: HighlightConfig::default(),
             default_app_audio_only: true,
             audio_device_gain: std::collections::HashMap::new(),
@@ -305,11 +332,8 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn lang(&self) -> crate::i18n::Lang {
-        match self.language.as_str() {
-            "ja" => crate::i18n::Lang::Ja,
-            _ => crate::i18n::Lang::En,
-        }
+    pub fn lang(&self) -> Lang {
+        self.language
     }
 
     /// Recording volume for `device_id` as a linear multiplier -- 1.0 (100%)
@@ -433,11 +457,17 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// An `[encode]` section parsed on its own -- every field it omits falls
+    /// back to `EncodeConfig::default()`.
+    fn encode_toml(text: &str) -> EncodeConfig {
+        toml::from_str(text).unwrap()
+    }
+
     #[test]
     fn default_config_has_sane_values() {
         let c = Config::default();
         assert_eq!(c.hotkeys.start_stop, "F9");
-        assert_eq!(c.encode.codec, "h265");
+        assert_eq!(c.encode.codec, Codec::H265);
         assert_eq!(c.encode.fps, 60);
         assert!(!c.overlay.enabled);
         assert!(!c.highlight.enabled, "Highlight buffering should be opt-in");
@@ -646,34 +676,34 @@ mod tests {
 
     #[test]
     fn resolution_mode_parses_known_strings() {
-        let mut c = Config::default();
-        c.encode.resolution_mode = "native".into();
-        assert!(matches!(c.encode.resolution_mode(), ResolutionMode::Native));
-        c.encode.resolution_mode = "display".into();
-        assert!(matches!(
-            c.encode.resolution_mode(),
+        assert_eq!(
+            encode_toml(r#"resolution_mode = "native""#).resolution_mode(),
+            ResolutionMode::Native
+        );
+        assert_eq!(
+            encode_toml(r#"resolution_mode = "display""#).resolution_mode(),
             ResolutionMode::Display
-        ));
-        c.encode.resolution_mode = "custom".into();
-        c.encode.custom_width = 2560;
-        c.encode.custom_height = 1440;
-        assert!(matches!(
-            c.encode.resolution_mode(),
-            ResolutionMode::Custom(2560, 1440)
-        ));
+        );
+        let custom = encode_toml(
+            r#"
+            resolution_mode = "custom"
+            custom_width = 2560
+            custom_height = 1440
+            "#,
+        );
+        assert_eq!(custom.resolution_mode(), ResolutionMode::Custom(2560, 1440));
     }
 
     #[test]
     fn resolution_mode_unknown_string_falls_back_to_native() {
-        let mut c = Config::default();
-        c.encode.resolution_mode = "not-a-real-mode".into();
-        assert!(matches!(c.encode.resolution_mode(), ResolutionMode::Native));
+        let c = encode_toml(r#"resolution_mode = "not-a-real-mode""#);
+        assert_eq!(c.resolution_mode(), ResolutionMode::Native);
     }
 
     #[test]
     fn resolution_mode_custom_clamps_to_even_and_bounds() {
         let mut c = Config::default();
-        c.encode.resolution_mode = "custom".into();
+        c.encode.resolution_mode = ResolutionKind::Custom;
         c.encode.custom_width = 1;
         c.encode.custom_height = 100_000;
         match c.encode.resolution_mode() {
@@ -689,28 +719,29 @@ mod tests {
 
     #[test]
     fn bitrate_mode_parses_known_strings() {
-        let mut c = Config::default();
-        c.encode.bitrate_mode = "auto".into();
-        assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Auto));
-        c.encode.bitrate_mode = "manual".into();
-        c.encode.manual_bitrate_mbps = 20;
-        assert!(matches!(
-            c.encode.bitrate_mode(),
-            BitrateMode::Manual(20_000_000)
-        ));
+        assert_eq!(
+            encode_toml(r#"bitrate_mode = "auto""#).bitrate_mode(),
+            BitrateMode::Auto
+        );
+        let manual = encode_toml(
+            r#"
+            bitrate_mode = "manual"
+            manual_bitrate_mbps = 20
+            "#,
+        );
+        assert_eq!(manual.bitrate_mode(), BitrateMode::Manual(20_000_000));
     }
 
     #[test]
     fn bitrate_mode_unknown_string_falls_back_to_auto() {
-        let mut c = Config::default();
-        c.encode.bitrate_mode = "not-a-real-mode".into();
-        assert!(matches!(c.encode.bitrate_mode(), BitrateMode::Auto));
+        let c = encode_toml(r#"bitrate_mode = "not-a-real-mode""#);
+        assert_eq!(c.bitrate_mode(), BitrateMode::Auto);
     }
 
     #[test]
     fn bitrate_mode_manual_clamps_to_1_100_mbps() {
         let mut c = Config::default();
-        c.encode.bitrate_mode = "manual".into();
+        c.encode.bitrate_mode = BitrateKind::Manual;
         c.encode.manual_bitrate_mbps = 0;
         assert!(matches!(
             c.encode.bitrate_mode(),
@@ -725,18 +756,66 @@ mod tests {
 
     #[test]
     fn encoder_mode_parses_known_strings() {
-        let mut c = Config::default();
-        c.encode.encoder_mode = "hardware".into();
-        assert!(matches!(c.encode.encoder_mode(), EncoderMode::Hardware));
-        c.encode.encoder_mode = "software".into();
-        assert!(matches!(c.encode.encoder_mode(), EncoderMode::Software));
+        assert_eq!(
+            encode_toml(r#"encoder_mode = "hardware""#).encoder_mode,
+            EncoderMode::Hardware
+        );
+        assert_eq!(
+            encode_toml(r#"encoder_mode = "software""#).encoder_mode,
+            EncoderMode::Software
+        );
     }
 
     #[test]
     fn encoder_mode_unknown_string_falls_back_to_hardware() {
+        let c = encode_toml(r#"encoder_mode = "not-a-real-mode""#);
+        assert_eq!(c.encoder_mode, EncoderMode::Hardware);
+    }
+
+    #[test]
+    fn codec_parses_known_strings_and_unknown_falls_back_to_h264() {
+        assert_eq!(encode_toml(r#"codec = "h265""#).codec, Codec::H265);
+        assert_eq!(encode_toml(r#"codec = "h264""#).codec, Codec::H264);
+        assert_eq!(encode_toml(r#"codec = "vp9""#).codec, Codec::H264);
+    }
+
+    #[test]
+    fn mode_enums_serialize_to_the_same_strings_older_versions_wrote() {
         let mut c = Config::default();
-        c.encode.encoder_mode = "not-a-real-mode".into();
-        assert!(matches!(c.encode.encoder_mode(), EncoderMode::Hardware));
+        c.encode.resolution_mode = ResolutionKind::Display;
+        c.encode.bitrate_mode = BitrateKind::Manual;
+        c.encode.encoder_mode = EncoderMode::Software;
+        c.language = Lang::Ja;
+        let text = toml::to_string_pretty(&c).unwrap();
+        for expected in [
+            r#"codec = "h265""#,
+            r#"resolution_mode = "display""#,
+            r#"bitrate_mode = "manual""#,
+            r#"encoder_mode = "software""#,
+            r#"language = "ja""#,
+        ] {
+            assert!(text.contains(expected), "missing {expected} in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_partially_missing_section_keeps_its_other_fields_instead_of_failing_the_load() {
+        // Before the container-level #[serde(default)], a section missing any
+        // non-defaulted field (here: hotkeys.pause/toggle_overlay, and every
+        // encode field but fps) failed the whole parse, resetting every
+        // setting back to its default.
+        let text = r#"
+            [hotkeys]
+            start_stop = "F2"
+            [encode]
+            fps = 30
+        "#;
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert_eq!(parsed.hotkeys.start_stop, "F2");
+        assert_eq!(parsed.hotkeys.pause, "F8");
+        assert_eq!(parsed.encode.fps, 30);
+        assert_eq!(parsed.encode.codec, Codec::H265);
+        assert_eq!(parsed.encode.custom_width, 1920);
     }
 
     #[test]
@@ -781,34 +860,25 @@ mod tests {
         assert!(parsed.default_app_audio_only);
         // Also confirms encoder_mode -- likewise absent from this pre-existing
         // TOML -- falls back to "hardware" instead of failing to parse.
-        assert!(matches!(
-            parsed.encode.encoder_mode(),
-            EncoderMode::Hardware
-        ));
+        assert_eq!(parsed.encode.encoder_mode, EncoderMode::Hardware);
     }
 
     #[test]
     fn default_language_is_english() {
-        assert_eq!(Config::default().language, "en");
-        assert!(matches!(Config::default().lang(), crate::i18n::Lang::En));
+        assert_eq!(Config::default().language, Lang::En);
+        assert_eq!(Config::default().lang(), Lang::En);
     }
 
     #[test]
     fn lang_recognizes_japanese() {
-        let c = Config {
-            language: "ja".into(),
-            ..Config::default()
-        };
-        assert!(matches!(c.lang(), crate::i18n::Lang::Ja));
+        let c: Config = toml::from_str(r#"language = "ja""#).unwrap();
+        assert_eq!(c.lang(), Lang::Ja);
     }
 
     #[test]
     fn lang_unknown_string_falls_back_to_english() {
-        let c = Config {
-            language: "fr".into(),
-            ..Config::default()
-        };
-        assert!(matches!(c.lang(), crate::i18n::Lang::En));
+        let c: Config = toml::from_str(r#"language = "fr""#).unwrap();
+        assert_eq!(c.lang(), Lang::En);
     }
 
     #[test]
@@ -1045,10 +1115,10 @@ mod tests {
     #[test]
     fn encode_config_new_fields_round_trip_toml() {
         let mut original = Config::default();
-        original.encode.resolution_mode = "custom".into();
+        original.encode.resolution_mode = ResolutionKind::Custom;
         original.encode.custom_width = 1280;
         original.encode.custom_height = 720;
-        original.encode.bitrate_mode = "manual".into();
+        original.encode.bitrate_mode = BitrateKind::Manual;
         original.encode.manual_bitrate_mbps = 15;
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();

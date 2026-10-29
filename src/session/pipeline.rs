@@ -140,7 +140,7 @@ impl CaptureDimensions {
             width: self.output.0,
             height: self.output.1,
             fps: inputs.encode.fps,
-            codec: inputs.encode.codec.clone(),
+            codec: inputs.encode.codec,
             bitrate_bps: self.bitrate_bps,
             audio_tracks: inputs.audio_track_specs(),
             allow_hardware_encode: matches!(inputs.encode.encoder_mode, EncoderMode::Hardware),

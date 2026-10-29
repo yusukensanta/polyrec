@@ -192,6 +192,7 @@ pub fn discard_segments(segments: &Mutex<VecDeque<SegmentInfo>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Codec;
     use crate::types::VideoFrame;
 
     fn tiny_video_frame(pts: Duration) -> VideoFrame {
@@ -209,7 +210,7 @@ mod tests {
 
         let (tx, _save_now_tx, handle) = spawn_highlight_actor(
             dir.path().to_path_buf(),
-            EncoderParams::tiny_test("h264", &[]),
+            EncoderParams::tiny_test(Codec::H264, &[]),
             1, // 1-second segments, so a handful of frames rolls over multiple times
             3, // keep at most 3 segments
             Arc::clone(&segments),
@@ -262,7 +263,7 @@ mod tests {
 
         let (tx, _save_now_tx, handle) = spawn_highlight_actor(
             dir.path().to_path_buf(),
-            EncoderParams::tiny_test("h264", &[]),
+            EncoderParams::tiny_test(Codec::H264, &[]),
             1,
             10,
             Arc::clone(&segments),
@@ -300,7 +301,7 @@ mod tests {
 
         let (tx, save_now_tx, handle) = spawn_highlight_actor(
             dir.path().to_path_buf(),
-            EncoderParams::tiny_test("h264", &[]),
+            EncoderParams::tiny_test(Codec::H264, &[]),
             60, // long segment -- save_now must finalize well before this elapses
             10,
             Arc::clone(&segments),

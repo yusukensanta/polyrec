@@ -631,6 +631,7 @@ unsafe fn do_remux(
 mod tests {
     use super::*;
 
+    use crate::config::Codec;
     use crate::encode::{EncoderParams, RecordingWriter};
     use crate::types::{AudioSamples, TrackId, VideoFrame};
     use std::time::Duration;
@@ -639,7 +640,7 @@ mod tests {
         let path = dir.join("source.mp4");
         let writer = RecordingWriter::new(
             &path,
-            &EncoderParams::tiny_test("h264", &[(48000u32, 2u16)]),
+            &EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16)]),
         )
         .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");
@@ -668,7 +669,7 @@ mod tests {
         let path = dir.join("two_track_source.mp4");
         let writer = RecordingWriter::new(
             &path,
-            &EncoderParams::tiny_test("h264", &[(48000u32, 2u16), (48000u32, 2u16)]),
+            &EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16), (48000u32, 2u16)]),
         )
         .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");
@@ -700,7 +701,7 @@ mod tests {
         let writer = RecordingWriter::new(
             &path,
             &EncoderParams::tiny_test(
-                "h264",
+                Codec::H264,
                 &[(48000u32, 2u16), (48000u32, 2u16), (48000u32, 2u16)],
             ),
         )
@@ -790,7 +791,7 @@ mod tests {
         let path = dir.path().join("longer_two_track_source.mp4");
         let writer = RecordingWriter::new(
             &path,
-            &EncoderParams::tiny_test("h264", &[(48000u32, 2u16), (48000u32, 2u16)]),
+            &EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16), (48000u32, 2u16)]),
         )
         .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");
@@ -934,7 +935,7 @@ mod tests {
     fn count_audio_tracks_is_zero_for_a_video_only_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("video_only_source.mp4");
-        let writer = RecordingWriter::new(&path, &EncoderParams::tiny_test("h264", &[]))
+        let writer = RecordingWriter::new(&path, &EncoderParams::tiny_test(Codec::H264, &[]))
             .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");
         // Several frames, not one -- a single WriteSample followed immediately
