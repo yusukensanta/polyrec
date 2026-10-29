@@ -22,9 +22,9 @@ jobs:
       # the toolchain file for why: a `stable` bump mid-project (1.96 -> 1.98)
       # silently enabled a brand-new clippy lint under -D warnings and broke
       # every open PR's CI with no warning.
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # Cheapest check first -- fails in seconds, before the multi-minute
       # build, when a PR forgot to run `cargo fmt`. rustfmt itself comes from
@@ -48,19 +48,22 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-audit
 
-      # RUSTSEC-2026-0194/0195 (quick-xml) and RUSTSEC-2026-0192 (ttf-parser,
-      # unmaintained) are pulled in only via winit's Linux/Wayland backend
-      # (sctk-adwaita -> smithay-client-toolkit / ab_glyph) -- this app is
-      # Windows-only, so that code path never compiles into the shipped
+      # RUSTSEC-2026-0192 (ttf-parser, unmaintained) is pulled in only via
+      # winit's Linux/Wayland backend (sctk-adwaita -> ab_glyph) -- this app
+      # is Windows-only, so that code path never compiles into the shipped
       # binary. Confirmed via `cargo tree --target all -i <crate>`. Ignored
       # here rather than left unscanned, so any NEW advisory against
       # something actually reachable on Windows still fails this step.
+      # Only ignore advisories that still match Cargo.lock: the old
+      # quick-xml ignores (RUSTSEC-2026-0194/0195) were dropped once
+      # quick-xml 0.41.0 (patched) landed, so a regression back to a
+      # vulnerable version fails here instead of being silently ignored.
       - name: Security audit
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0192
+        run: cargo audit --ignore RUSTSEC-2026-0192
 
   # Every release build is a `push: tags: v*.*.*` run -- its own cache scope,
   # distinct from every other tag and from main (GitHub Actions only lets a
@@ -80,9 +83,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-windows
 

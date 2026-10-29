@@ -66,7 +66,7 @@ jobs:
       # the tip of that branch rather than a version. No `toolchain:` input,
       # same reasoning as ci.yml -- reads rust-toolchain.toml so a release
       # build always uses the exact Rust version CI already verified against.
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
 
       # A tag push is its own cache scope, distinct from every other tag and
       # from main -- GitHub Actions only lets a run restore a cache from its
@@ -79,7 +79,7 @@ jobs:
       # branch's cache IS visible here -- so a release tag pushed shortly
       # after its version-bump commit lands on main restores that cache
       # instead of rebuilding ~250 crates from scratch.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-windows
 
