@@ -572,15 +572,13 @@ const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 2;
 /// the caller records as silence rather than garbage.
 fn decode_packet(packet: &[u8], sample_count: usize, bytes_per_sample: usize) -> Option<Vec<f32>> {
     let samples = match bytes_per_sample {
-        4 => packet
-            .chunks_exact(4)
-            .take(sample_count)
-            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+        4 => packet.as_chunks::<4>().0[..sample_count.min(packet.len() / 4)]
+            .iter()
+            .map(|&b| f32::from_ne_bytes(b))
             .collect(),
-        2 => packet
-            .chunks_exact(2)
-            .take(sample_count)
-            .map(|b| i16::from_ne_bytes([b[0], b[1]]) as f32 / 32768.0)
+        2 => packet.as_chunks::<2>().0[..sample_count.min(packet.len() / 2)]
+            .iter()
+            .map(|&b| i16::from_ne_bytes(b) as f32 / 32768.0)
             .collect(),
         _ => return None,
     };
