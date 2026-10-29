@@ -1,9 +1,9 @@
 use super::App;
 use super::theme::{
-    BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, TEXT_BODY, TEXT_CAPTION,
-    TEXT_MUTED, TEXT_PRIMARY,
+    BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, TEXT_BODY, TEXT_MUTED,
+    TEXT_PRIMARY,
 };
-use super::widgets::section_header;
+use super::widgets::{caption, section_header};
 use crate::i18n::Strings;
 use eframe::egui;
 
@@ -23,11 +23,7 @@ impl App {
                 ui.add_space(4.0);
 
                 if self.sources.is_empty() {
-                    ui.label(
-                        egui::RichText::new(s.no_windows_found)
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(caption(s.no_windows_found, TEXT_MUTED));
                 }
 
                 // Filters by index rather than cloning matches -- source_icon_textures
@@ -46,11 +42,7 @@ impl App {
                     .map(|(i, _)| i)
                     .collect();
                 if !self.sources.is_empty() && filtered_indices.is_empty() {
-                    ui.label(
-                        egui::RichText::new(s.no_matching_windows)
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(caption(s.no_matching_windows, TEXT_MUTED));
                 }
 
                 egui::ScrollArea::vertical()
@@ -121,11 +113,7 @@ impl App {
                                                     .color(TEXT_PRIMARY),
                                             );
                                             if !source.exe_name.is_empty() {
-                                                ui.label(
-                                                    egui::RichText::new(&source.exe_name)
-                                                        .size(TEXT_CAPTION)
-                                                        .color(TEXT_MUTED),
-                                                );
+                                                ui.label(caption(&source.exe_name, TEXT_MUTED));
                                             }
                                         });
                                     });

@@ -1,7 +1,7 @@
 use super::App;
-use super::theme::{ACCENT_IDLE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED};
+use super::theme::{ACCENT_IDLE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_MUTED};
 use super::widgets::{
-    accent_button, audio_device_icon, checkbox_with_volume_slider, section_header,
+    accent_button, audio_device_icon, caption, checkbox_with_volume_slider, section_header,
 };
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -65,11 +65,7 @@ impl App {
                     .show(ui, |ui| {
                         section_header(ui, s.system_audio_header);
                         if self.audio_devices.is_empty() {
-                            ui.label(
-                                egui::RichText::new(s.no_audio_devices)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_MUTED),
-                            );
+                            ui.label(caption(s.no_audio_devices, TEXT_MUTED));
                         }
                         // Iterated from cloned (label, id) pairs, not
                         // `self.audio_devices` directly -- persisting a
@@ -111,11 +107,7 @@ impl App {
                         ui.add_space(8.0);
                         section_header(ui, s.applications_header);
                         if self.app_audio_sources.is_empty() {
-                            ui.label(
-                                egui::RichText::new(s.no_app_audio_sources)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_MUTED),
-                            );
+                            ui.label(caption(s.no_app_audio_sources, TEXT_MUTED));
                         }
                         // Iterated from a clone, not `self.app_audio_sources`
                         // directly -- an uncheck below rebuilds that Vec
@@ -328,11 +320,7 @@ impl App {
         // -- distinct from "no matches", it's telling the user more
         // (installed-only) results may still be on the way.
         if self.add_app.installed_rx.is_some() {
-            ui.label(
-                egui::RichText::new(s.add_app_scanning)
-                    .size(TEXT_CAPTION)
-                    .color(TEXT_MUTED),
-            );
+            ui.label(caption(s.add_app_scanning, TEXT_MUTED));
         }
         if candidates.is_empty() && self.add_app.installed_rx.is_none() {
             let msg = if filter.is_empty() {
@@ -340,11 +328,7 @@ impl App {
             } else {
                 s.add_app_no_matches
             };
-            ui.label(
-                egui::RichText::new(msg)
-                    .size(TEXT_CAPTION)
-                    .color(TEXT_MUTED),
-            );
+            ui.label(caption(msg, TEXT_MUTED));
         }
         let mut picked: Option<(String, AddAppSource)> = None;
         egui::ScrollArea::vertical()
@@ -392,11 +376,7 @@ impl App {
                             picked = Some((candidate.exe_name.clone(), candidate.source.clone()));
                         }
                         if candidate.is_running() {
-                            ui.label(
-                                egui::RichText::new(s.add_app_running_tag)
-                                    .size(TEXT_CAPTION)
-                                    .color(ACCENT_IDLE),
-                            );
+                            ui.label(caption(s.add_app_running_tag, ACCENT_IDLE));
                         }
                     });
                 }

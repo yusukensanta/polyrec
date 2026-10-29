@@ -1,10 +1,8 @@
 use super::App;
 use super::state::SelfUpdateState;
-use super::theme::{
-    ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
-};
+use super::theme::{ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY};
 use super::util::{open_url, take_if_finished};
-use super::widgets::{accent_button, section_header};
+use super::widgets::{accent_button, caption, section_header};
 use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
 use eframe::egui;
@@ -210,11 +208,7 @@ impl App {
                             .color(TEXT_PRIMARY),
                         );
                         ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(s.update_confirm_uac_note)
-                                .size(TEXT_CAPTION)
-                                .color(TEXT_MUTED),
-                        );
+                        ui.label(caption(s.update_confirm_uac_note, TEXT_MUTED));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if ui

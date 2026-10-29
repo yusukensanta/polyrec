@@ -1,10 +1,10 @@
 use super::App;
 use super::state::SelfUpdateState;
-use super::widgets::accent_button;
+use super::widgets::{accent_button, caption};
 use crate::i18n::Strings;
 use eframe::egui;
 
-use super::theme::{ACCENT_PAUSE, ACCENT_SECONDARY, TEXT_CAPTION, TEXT_MUTED};
+use super::theme::{ACCENT_PAUSE, ACCENT_SECONDARY, TEXT_MUTED};
 
 impl App {
     pub(super) fn render_menu_bar(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
@@ -16,11 +16,7 @@ impl App {
                 // elsewhere — the release CI also checks the git tag against this
                 // same field before publishing, so this label always matches what
                 // update_check compares against.
-                ui.label(
-                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .size(TEXT_CAPTION)
-                        .color(TEXT_MUTED),
-                );
+                ui.label(caption(concat!("v", env!("CARGO_PKG_VERSION")), TEXT_MUTED));
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled {
