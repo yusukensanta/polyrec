@@ -18,7 +18,7 @@ use pipeline::{CaptureDimensions, CapturePipeline};
 use state::{SessionAction, transition};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -50,8 +50,8 @@ impl Default for EncodeSettings {
 
 pub struct ActiveCapture {
     pipeline: CapturePipeline,
-    pub recorder_handle: JoinHandle<Result<PathBuf, AppError>>,
-    pub recording_tx: mpsc::Sender<RecordingCommand>,
+    recorder_handle: JoinHandle<Result<PathBuf, AppError>>,
+    recording_tx: mpsc::Sender<RecordingCommand>,
     pub output_path: PathBuf,
     /// Folder `output_path`'s finished file will be renamed into (see
     /// `encode::actor::spawn_recording_actor`) -- along with `app_name` and
@@ -83,6 +83,12 @@ impl ActiveCapture {
     pub fn elapsed(&self) -> Duration {
         self.pipeline.ctrl.clock.elapsed()
     }
+
+    /// True once the recorder actor has exited on its own (e.g. its
+    /// disk-full check tripped) rather than via `SessionManager::stop_capture`.
+    pub fn recorder_finished(&self) -> bool {
+        self.recorder_handle.is_finished()
+    }
 }
 
 /// The rolling "Highlight" background buffer -- entirely separate from
@@ -102,19 +108,24 @@ pub struct ActiveHighlight {
     /// necessarily whatever `config.highlight.buffer_seconds` reads right now.
     buffer_seconds: u32,
     /// Set if the highlight actor stopped itself early because free disk
-    /// space on the segment directory's volume dropped too low -- checked by
-    /// the same poll loop that detects `active`'s `disk_full_flag`.
-    pub disk_full_flag: Arc<AtomicBool>,
+    /// space on the segment directory's volume dropped too low -- see
+    /// `SessionManager::highlight_stopped_for_disk_space`.
+    disk_full_flag: Arc<AtomicBool>,
     /// The window this buffer is currently following -- the dashboard's
     /// foreground-window poll compares against this to detect a switch and
     /// restart buffering for the new window (see lifecycle rule 2).
-    pub hwnd: usize,
+    hwnd: usize,
 }
 
+/// Owns the manual recording (`active`) and the Highlight buffer
+/// (`highlight`), plus the Idle/Recording/Paused state machine. Every state
+/// transition happens inside the method that changes what's running --
+/// `start_capture`, `pause_capture`, `resume_capture`, `stop_capture` -- so
+/// the state can never disagree with whether a recording actually exists.
 pub struct SessionManager {
     state: SessionState,
-    pub active: Option<ActiveCapture>,
-    pub highlight: Option<ActiveHighlight>,
+    active: Option<ActiveCapture>,
+    highlight: Option<ActiveHighlight>,
 }
 
 impl SessionManager {
@@ -130,7 +141,12 @@ impl SessionManager {
         &self.state
     }
 
-    pub fn apply(&mut self, action: SessionAction) -> bool {
+    /// The manual recording in progress (recording or paused), if any.
+    pub fn active(&self) -> Option<&ActiveCapture> {
+        self.active.as_ref()
+    }
+
+    fn apply(&mut self, action: SessionAction) -> bool {
         match transition(&self.state, &action) {
             Some(next) => {
                 self.state = next;
@@ -140,8 +156,11 @@ impl SessionManager {
         }
     }
 
-    /// Starts capture and recording actors.
-    /// `frame_count` is incremented by the video pump for each frame forwarded to the encoder.
+    /// Starts capture and recording actors and moves to `Recording` -- only
+    /// once everything is spawned, so a refusal (e.g. disk full) leaves the
+    /// session `Idle` instead of showing "Recording" for a capture that never
+    /// started. `frame_count` is incremented by the video pump for each frame
+    /// forwarded to the encoder.
     pub fn start_capture(
         &mut self,
         source: CaptureSource,
@@ -191,14 +210,17 @@ impl SessionManager {
             hwnd: source.hwnd,
             kind: source.kind,
         });
+        self.apply(SessionAction::Start);
 
         Ok(output_path)
     }
 
-    /// Stops all capture and recording actors. Sends Stop to the recorder so it finalizes.
-    /// Returns the recorder's `JoinHandle` so the caller can wait for finalization to complete
-    /// before treating the output file as ready (see recorder-finalize-race design spec).
+    /// Stops all capture and recording actors and moves back to `Idle`. Sends Stop to the
+    /// recorder so it finalizes. Returns the recorder's `JoinHandle` so the caller can wait
+    /// for finalization to complete before treating the output file as ready (see
+    /// recorder-finalize-race design spec).
     pub fn stop_capture(&mut self) -> Option<JoinHandle<Result<PathBuf, AppError>>> {
+        self.apply(SessionAction::Stop);
         let active = self.active.take()?;
         // The capture loops must have fully drained into the recorder
         // *before* `Stop` is sent below: `Stop` used to be sent immediately,
@@ -237,6 +259,14 @@ impl SessionManager {
         self.highlight
             .as_ref()
             .is_some_and(|h| h.highlight_handle.is_finished())
+    }
+
+    /// Whether the Highlight actor stopped itself because free disk space
+    /// on the segment directory's volume dropped too low.
+    pub fn highlight_stopped_for_disk_space(&self) -> bool {
+        self.highlight
+            .as_ref()
+            .is_some_and(|h| h.disk_full_flag.load(Ordering::Relaxed))
     }
 
     /// Starts (or restarts, for a different window) the Highlight background
@@ -485,7 +515,6 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
 mod tests {
     use super::*;
     use crate::types::{AppAudioSource, AudioDevice};
-    use std::sync::atomic::Ordering;
 
     /// Every device/app at unity gain with the default encode settings --
     /// what the e2e tests below record with.
@@ -540,6 +569,14 @@ mod tests {
         let mut sm = SessionManager::new();
         assert!(!sm.apply(SessionAction::Stop));
         assert!(matches!(sm.state(), SessionState::Idle));
+    }
+
+    #[test]
+    fn stop_capture_without_a_recording_stays_idle_and_returns_none() {
+        let mut sm = SessionManager::new();
+        assert!(sm.stop_capture().is_none());
+        assert!(matches!(sm.state(), SessionState::Idle));
+        assert!(sm.active().is_none());
     }
 
     #[test]
@@ -701,11 +738,13 @@ mod tests {
                 RecordingNaming::ProcessName,
             )
             .expect("start_capture failed");
+        assert!(sm.is_recording(), "start_capture should move to Recording");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let handle = tokio::task::block_in_place(|| sm.stop_capture())
             .expect("stop_capture returned None while active");
+        assert!(matches!(sm.state(), SessionState::Idle));
         let result = handle.await.expect("recorder task panicked/aborted");
         let finalized_path = result.expect("finalize() returned an error");
 

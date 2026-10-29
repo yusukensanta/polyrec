@@ -70,11 +70,7 @@ impl App {
         // a capture that already ended on its own.
         if (is_recording || self.session.is_paused())
             && self.finalizing_handle.is_none()
-            && self
-                .session
-                .active
-                .as_ref()
-                .is_some_and(|a| a.recorder_handle.is_finished())
+            && self.session.active().is_some_and(|a| a.recorder_finished())
         {
             self.stop_recording();
         }

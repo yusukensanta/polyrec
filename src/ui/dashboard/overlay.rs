@@ -18,8 +18,7 @@ impl App {
             + self.selected_app_audio.iter().filter(|&&b| b).count();
         let elapsed_secs = self
             .session
-            .active
-            .as_ref()
+            .active()
             .map(|a| a.elapsed().as_secs())
             .unwrap_or(0);
 
@@ -27,7 +26,7 @@ impl App {
         // back to the primary display (matching query_capture_size's existing
         // graceful-degradation convention) if the handle is gone, the monitor
         // query fails, or (for a `Window` source) the window closed.
-        let active_target = self.session.active.as_ref().map(|a| (a.hwnd, a.kind));
+        let active_target = self.session.active().map(|a| (a.hwnd, a.kind));
         let monitor_rect = active_target.and_then(|(hwnd_val, kind)| match kind {
             CaptureKind::Window => {
                 let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);

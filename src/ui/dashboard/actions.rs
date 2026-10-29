@@ -4,7 +4,7 @@ use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_device
 use crate::config::Config;
 use crate::i18n::Strings;
 use crate::recording_naming::RecordingNaming;
-use crate::session::{CaptureInputs, EncodeSettings, state::SessionAction};
+use crate::session::{CaptureInputs, EncodeSettings};
 use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use std::sync::Arc;
@@ -314,16 +314,11 @@ impl App {
     }
 
     pub(super) fn stop_recording(&mut self) {
-        let path = self.session.active.as_ref().map(|a| a.output_path.clone());
+        let path = self.session.active().map(|a| a.output_path.clone());
         if let Some(p) = &path {
             tracing::info!("recording stop requested, finalizing: {}", p.display());
         }
-        let disk_full = self
-            .session
-            .active
-            .as_ref()
-            .map(|a| Arc::clone(&a.disk_full_flag));
-        self.session.apply(SessionAction::Stop);
+        let disk_full = self.session.active().map(|a| Arc::clone(&a.disk_full_flag));
         self.finalizing_handle = self.session.stop_capture();
         self.finalizing_path = path;
         self.finalizing_disk_full = disk_full;
@@ -405,9 +400,6 @@ impl App {
             inputs.app_sources.iter().map(|(src, _)| src),
         );
         let naming = self.resolve_recording_naming();
-        // Only transition to the Recording state once start_capture actually
-        // succeeds -- otherwise a disk-full refusal would leave the UI showing
-        // "Recording" for a capture that never started.
         match self.session.start_capture(
             source,
             inputs,
@@ -421,7 +413,6 @@ impl App {
                     "recording started: source={source_title:?} audio_tracks={track_count} output={}",
                     path.display()
                 );
-                self.session.apply(SessionAction::Start);
                 self.recording_start = Some(Instant::now());
                 self.fps_shortfall_warned = false;
                 // Otherwise the previous recording's cached preview -- keyed
@@ -450,11 +441,7 @@ impl App {
         // mirrors how poll_background_work detects manual recording's
         // recorder stopping itself early via `recorder_handle.is_finished()`.
         if self.session.highlight_actor_finished() {
-            let disk_full = self
-                .session
-                .highlight
-                .as_ref()
-                .is_some_and(|h| h.disk_full_flag.load(Ordering::Relaxed));
+            let disk_full = self.session.highlight_stopped_for_disk_space();
             self.session.stop_highlight_buffering(true);
             if disk_full {
                 let strings = self.config.lang().strings();

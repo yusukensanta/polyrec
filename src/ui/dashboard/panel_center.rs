@@ -34,8 +34,7 @@ impl App {
             if is_recording || is_paused {
                 let elapsed = self
                     .session
-                    .active
-                    .as_ref()
+                    .active()
                     .map(|a| a.elapsed())
                     .unwrap_or_default();
                 let secs = elapsed.as_secs();
@@ -107,7 +106,7 @@ impl App {
                     );
                 });
 
-                if let Some(active) = self.session.active.as_ref() {
+                if let Some(active) = self.session.active() {
                     let naming = active.naming.clone();
                     let app_name = active.app_name.clone();
                     let output_dir = active.output_dir.clone();
