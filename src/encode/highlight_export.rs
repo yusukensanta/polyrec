@@ -275,20 +275,14 @@ impl StreamLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::RecordingWriter;
+    use crate::encode::{EncoderParams, RecordingWriter};
     use crate::types::{AudioSamples, TrackId, VideoFrame};
 
     fn make_segment(dir: &std::path::Path, name: &str, frames: u32) -> SegmentInfo {
         let path = dir.join(name);
         let writer = RecordingWriter::new(
             &path,
-            64,
-            64,
-            30,
-            "h264",
-            500_000,
-            &[(48000u32, 2u16)],
-            false,
+            &EncoderParams::tiny_test("h264", &[(48000u32, 2u16)]),
         )
         .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");

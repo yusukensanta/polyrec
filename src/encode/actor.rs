@@ -1,5 +1,5 @@
 use crate::disk_space::DiskSpaceGuard;
-use crate::encode::{RecordingCommand, RecordingWriter};
+use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter};
 use crate::error::{AppError, ResultExt};
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
 use crate::types::{AudioSamples, VideoFrame};
@@ -25,23 +25,13 @@ const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// timestamp should reflect when the recording actually finished.
 ///
 /// Returns (command_sender, handle_resolving_to_the_final_renamed_path).
-// Each param is an independently-resolved piece the caller already has on hand
-// (paths, encoder settings, audio specs) -- a param struct would just move this
-// same list into a type definition without changing what start_capture passes.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_recording_actor(
     temp_path: PathBuf,
     output_dir: PathBuf,
     app_name: String,
     naming: RecordingNaming,
-    width: u32,
-    height: u32,
-    fps: u32,
-    codec: String,
-    bitrate_bps: u32,
-    audio_device_specs: Vec<(u32, u16)>,
+    params: EncoderParams,
     disk_full_flag: Arc<AtomicBool>,
-    allow_hardware_encode: bool,
 ) -> (
     mpsc::Sender<RecordingCommand>,
     JoinHandle<Result<PathBuf, AppError>>,
@@ -49,16 +39,7 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(
-            &temp_path,
-            width,
-            height,
-            fps,
-            &codec,
-            bitrate_bps,
-            &audio_device_specs,
-            allow_hardware_encode,
-        )?;
+        let writer = RecordingWriter::new(&temp_path, &params)?;
         writer.begin_writing()?;
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);

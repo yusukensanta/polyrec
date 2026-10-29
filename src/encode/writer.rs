@@ -28,6 +28,40 @@ pub(crate) fn video_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
     raw.round() as u32
 }
 
+/// Everything `RecordingWriter::new` needs to configure its sink writer --
+/// built once per recording (or Highlight buffering session) and handed to
+/// the actor that owns the writer; the Highlight actor reuses the same
+/// params for every segment it rotates through.
+#[derive(Debug, Clone)]
+pub struct EncoderParams {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// "h265" (falls back to H264 if no HEVC encoder is available) or "h264".
+    pub codec: String,
+    pub bitrate_bps: u32,
+    /// `(sample_rate, channels)` per audio track, in track-id order.
+    pub audio_tracks: Vec<(u32, u16)>,
+    pub allow_hardware_encode: bool,
+}
+
+#[cfg(test)]
+impl EncoderParams {
+    /// The tiny software-encoded 64x64@30fps configuration the writer,
+    /// remux, export and highlight tests all use.
+    pub(crate) fn tiny_test(codec: &str, audio_tracks: &[(u32, u16)]) -> Self {
+        Self {
+            width: 64,
+            height: 64,
+            fps: 30,
+            codec: codec.to_string(),
+            bitrate_bps: 500_000,
+            audio_tracks: audio_tracks.to_vec(),
+            allow_hardware_encode: false,
+        }
+    }
+}
+
 pub struct RecordingWriter {
     writer: IMFSinkWriter,
     video_stream: u32,
@@ -40,17 +74,16 @@ pub struct RecordingWriter {
 }
 
 impl RecordingWriter {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        output_path: &Path,
-        width: u32,
-        height: u32,
-        fps: u32,
-        codec: &str,
-        bitrate_bps: u32,
-        audio_tracks: &[(u32, u16)],
-        allow_hardware_encode: bool,
-    ) -> Result<Self, AppError> {
+    pub fn new(output_path: &Path, params: &EncoderParams) -> Result<Self, AppError> {
+        let EncoderParams {
+            width,
+            height,
+            fps,
+            ref codec,
+            bitrate_bps,
+            ref audio_tracks,
+            allow_hardware_encode,
+        } = *params;
         let mf = MfSession::start()?;
         unsafe {
             let path_str = output_path
@@ -352,7 +385,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("h264_test.mp4");
-        let writer = RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &[], false)
+        let writer = RecordingWriter::new(&output, &EncoderParams::tiny_test("h264", &[]))
             .expect("RecordingWriter::new with explicit bitrate failed");
         writer.begin_writing().expect("begin_writing failed");
         writer
@@ -376,7 +409,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("h265_test.mp4");
-        let writer = RecordingWriter::new(&output, 64, 64, 30, "h265", 500_000, &[], false)
+        let writer = RecordingWriter::new(&output, &EncoderParams::tiny_test("h265", &[]))
             .expect("RecordingWriter::new with h265 (or its fallback) failed");
         writer.begin_writing().expect("begin_writing failed");
         writer
@@ -420,7 +453,7 @@ mod tests {
         // 64×64 at 30fps, one stereo 48kHz audio track
         let audio_tracks = vec![(48000u32, 2u16)];
         let writer =
-            RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &audio_tracks, false);
+            RecordingWriter::new(&output, &EncoderParams::tiny_test("h264", &audio_tracks));
         assert!(
             writer.is_ok(),
             "RecordingWriter::new failed: {:?}",
@@ -473,7 +506,7 @@ mod tests {
         std::thread::spawn(move || {
             let audio_tracks = vec![(48000u32, 2u16), (48000u32, 2u16), (48000u32, 2u16)];
             let writer =
-                RecordingWriter::new(&output, 64, 64, 30, "h264", 500_000, &audio_tracks, false)
+                RecordingWriter::new(&output, &EncoderParams::tiny_test("h264", &audio_tracks))
                     .expect("RecordingWriter::new failed");
             writer.begin_writing().expect("begin_writing failed");
 

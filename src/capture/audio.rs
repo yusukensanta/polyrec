@@ -1,7 +1,6 @@
+use crate::capture::CaptureControl;
 use crate::error::{AppError, ResultExt};
-use crate::session::clock::RecordingClock;
 use crate::types::{AppAudioSource, AudioDevice, AudioSamples, TrackId};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
@@ -419,14 +418,11 @@ fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) ->
 /// `device_id` — empty string selects the system default endpoint.
 /// `is_loopback` — when true the stream uses `AUDCLNT_STREAMFLAGS_LOOPBACK`
 ///                 (system audio mix) on the render endpoint.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_audio_capture(
     device_id: String,
     track_id: TrackId,
     is_loopback: bool,
-    clock: Arc<RecordingClock>,
-    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ctrl: CaptureControl,
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
 ) -> Result<(), AppError> {
@@ -480,13 +476,13 @@ pub async fn run_audio_capture(
 
         run_capture_loop(
             audio_client,
-            sample_rate,
-            channels,
-            bytes_per_frame,
+            StreamFormat {
+                sample_rate,
+                channels,
+                bytes_per_frame,
+            },
             track_id,
-            clock,
-            pause_flag,
-            stop_flag,
+            ctrl,
             tx,
             gain,
             None,
@@ -498,14 +494,11 @@ pub async fn run_audio_capture(
 /// Capture only the audio produced by `target_pid` (and, if `include_tree`, its child
 /// processes) via the Windows 10 2004+ Process Loopback Capture API, instead of the
 /// full desktop audio mix. Forwards PCM f32 samples to `tx`, same as `run_audio_capture`.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_process_loopback_capture(
     target_pid: u32,
     include_tree: bool,
     track_id: TrackId,
-    clock: Arc<RecordingClock>,
-    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ctrl: CaptureControl,
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
 ) -> Result<(), AppError> {
@@ -543,13 +536,13 @@ pub async fn run_process_loopback_capture(
 
         run_capture_loop(
             audio_client,
-            TARGET_SAMPLE_RATE,
-            TARGET_CHANNELS,
-            block_align as usize,
+            StreamFormat {
+                sample_rate: TARGET_SAMPLE_RATE,
+                channels: TARGET_CHANNELS,
+                bytes_per_frame: block_align as usize,
+            },
             track_id,
-            clock,
-            pause_flag,
-            stop_flag,
+            ctrl,
             tx,
             gain,
             Some(target_pid),
@@ -579,26 +572,30 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
+/// The negotiated stream format `run_capture_loop` unpacks each WASAPI
+/// buffer with, before downmixing/resampling to the fixed encoder target.
+#[derive(Clone, Copy)]
+struct StreamFormat {
+    sample_rate: u32,
+    channels: u16,
+    bytes_per_frame: usize,
+}
+
 /// `watch_pid` is `Some` only for process-loopback capture -- a target
 /// process simply exiting mid-recording isn't a WASAPI device error (unlike
 /// `AUDCLNT_E_DEVICE_INVALIDATED`, handled below), so `GetBuffer` just
 /// returns zero frames forever; without watching for the process's own exit
 /// separately, the capture thread spins for the rest of the recording
 /// producing a track of pure silence instead of ending cleanly.
-// Grouping these into a struct wouldn't add clarity here -- each param is an
-// independent piece the WASAPI setup already resolved (format fields, sync
-// primitives, output channel); a param struct would just add indirection at
-// this thread-spawn boundary without changing what the caller has to pass.
-#[allow(clippy::too_many_arguments)]
 async unsafe fn run_capture_loop(
     audio_client: IAudioClient,
-    sample_rate: u32,
-    channels: u16,
-    bytes_per_frame: usize,
+    StreamFormat {
+        sample_rate,
+        channels,
+        bytes_per_frame,
+    }: StreamFormat,
     track_id: TrackId,
-    clock: Arc<RecordingClock>,
-    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ctrl: CaptureControl,
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
     watch_pid: Option<u32>,
@@ -643,7 +640,7 @@ async unsafe fn run_capture_loop(
         let mut warned_unrecognized_bit_depth = false;
 
         loop {
-            if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            if ctrl.is_stopped() {
                 break;
             }
 
@@ -697,11 +694,11 @@ async unsafe fn run_capture_loop(
                     }
 
                     // Always release buffer first (above), then discard if paused.
-                    if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    if ctrl.is_paused() {
                         continue;
                     }
 
-                    let pts = clock.elapsed();
+                    let pts = ctrl.clock.elapsed();
                     let stereo = to_stereo(&samples, channels);
                     let mut resampled = resampler.process(&stereo);
                     apply_gain(&mut resampled, gain);
@@ -932,9 +929,7 @@ mod tests {
     #[ignore]
     async fn process_loopback_capture_produces_samples() {
         let (tx, mut rx) = mpsc::channel::<AudioSamples>(64);
-        let clock = RecordingClock::new();
-        let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ctrl = CaptureControl::new();
         let pid = std::process::id();
 
         // COM objects (IAudioClient etc.) aren't Send, so this must run on its own
@@ -946,17 +941,8 @@ mod tests {
                 .expect("capture runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let _ = run_process_loopback_capture(
-                    pid,
-                    true,
-                    TrackId::new(0),
-                    clock,
-                    pause_flag,
-                    stop_flag,
-                    tx,
-                    1.0,
-                )
-                .await;
+                let _ =
+                    run_process_loopback_capture(pid, true, TrackId::new(0), ctrl, tx, 1.0).await;
             });
         });
 
@@ -979,9 +965,7 @@ mod tests {
     #[ignore]
     async fn diag_default_loopback_captures_real_signal() {
         let (tx, mut rx) = mpsc::channel::<AudioSamples>(256);
-        let clock = RecordingClock::new();
-        let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ctrl = CaptureControl::new();
 
         let handle = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -990,17 +974,8 @@ mod tests {
                 .expect("capture runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let _ = run_audio_capture(
-                    String::new(),
-                    TrackId::new(0),
-                    true,
-                    clock,
-                    pause_flag,
-                    stop_flag,
-                    tx,
-                    1.0,
-                )
-                .await;
+                let _ =
+                    run_audio_capture(String::new(), TrackId::new(0), true, ctrl, tx, 1.0).await;
             });
         });
 

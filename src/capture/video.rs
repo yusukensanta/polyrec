@@ -1,6 +1,6 @@
+use crate::capture::CaptureControl;
 use crate::capture::device::D3dDevice;
 use crate::error::{AppError, ResultExt};
-use crate::session::clock::RecordingClock;
 use crate::types::VideoFrame;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -199,19 +199,11 @@ unsafe fn map_staging(
     }
 }
 
-// Each param here is independently resolved by the caller (capture vs. output
-// size are deliberately separate concepts, see scale_bgra) -- a param struct
-// would just rename this same list without adding clarity at this call boundary.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_video_capture(
     target: CaptureTarget,
-    capture_width: u32,
-    capture_height: u32,
-    output_width: u32,
-    output_height: u32,
-    clock: Arc<RecordingClock>,
-    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    (capture_width, capture_height): (u32, u32),
+    (output_width, output_height): (u32, u32),
+    ctrl: CaptureControl,
     tx: mpsc::Sender<VideoFrame>,
     show_border: bool,
 ) -> Result<(), AppError> {
@@ -342,7 +334,7 @@ pub async fn run_video_capture(
     let mut frame_counter: u64 = 0;
 
     loop {
-        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        if ctrl.is_stopped() {
             break;
         }
         if item_closed.load(std::sync::atomic::Ordering::Relaxed) {
@@ -361,7 +353,7 @@ pub async fn run_video_capture(
         };
 
         // Discard frame when paused — skip GPU readback to save CPU/memory bandwidth.
-        if pause_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        if ctrl.is_paused() {
             tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
             continue;
         }
@@ -389,7 +381,7 @@ pub async fn run_video_capture(
                 .d3d_context
                 .CopyResource(&staging[write_idx], &src_res);
         }
-        pending[write_idx] = Some(clock.elapsed());
+        pending[write_idx] = Some(ctrl.clock.elapsed());
 
         // Read back the slot copied last iteration -- see the ping-pong comment
         // above the staging textures. Try non-blocking first (the GPU copy from
