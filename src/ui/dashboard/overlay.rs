@@ -20,7 +20,7 @@ impl App {
             .session
             .active
             .as_ref()
-            .map(|a| a.clock.elapsed().as_secs())
+            .map(|a| a.ctrl.clock.elapsed().as_secs())
             .unwrap_or(0);
 
         // Position on whichever monitor the recording is actually on -- falls

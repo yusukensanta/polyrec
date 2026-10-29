@@ -3,7 +3,7 @@ pub mod highlight_export;
 pub(crate) mod mf;
 pub mod remux;
 pub mod writer;
-pub use writer::RecordingWriter;
+pub use writer::{EncoderParams, RecordingWriter};
 
 use crate::types::{AudioSamples, VideoFrame};
 

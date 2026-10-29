@@ -7,7 +7,7 @@
 //! `session::mod` and the dashboard.
 
 use crate::disk_space::DiskSpaceGuard;
-use crate::encode::{RecordingCommand, RecordingWriter};
+use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter};
 use crate::error::AppError;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -57,20 +57,13 @@ pub type SaveNowRequest = oneshot::Sender<()>;
 /// first) when `RecordingCommand::Stop` arrives or free disk space on
 /// `segment_dir`'s volume drops below `disk_space::MIN_FREE_BYTES` (setting
 /// `disk_full_flag` in that case).
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_highlight_actor(
     segment_dir: PathBuf,
-    width: u32,
-    height: u32,
-    fps: u32,
-    codec: String,
-    bitrate_bps: u32,
-    audio_device_specs: Vec<(u32, u16)>,
+    params: EncoderParams,
     segment_seconds: u32,
     max_segments: usize,
     segments: Arc<Mutex<VecDeque<SegmentInfo>>>,
     disk_full_flag: Arc<AtomicBool>,
-    allow_hardware_encode: bool,
 ) -> (
     mpsc::Sender<RecordingCommand>,
     mpsc::UnboundedSender<SaveNowRequest>,
@@ -90,16 +83,7 @@ pub fn spawn_highlight_actor(
                 .as_nanos();
             let seg_path = segment_dir.join(format!("highlight_seg_{seg_id}.mp4"));
 
-            let writer = RecordingWriter::new(
-                &seg_path,
-                width,
-                height,
-                fps,
-                &codec,
-                bitrate_bps,
-                &audio_device_specs,
-                allow_hardware_encode,
-            )?;
+            let writer = RecordingWriter::new(&seg_path, &params)?;
             writer.begin_writing()?;
 
             let seg_start = Instant::now();
@@ -225,17 +209,11 @@ mod tests {
 
         let (tx, _save_now_tx, handle) = spawn_highlight_actor(
             dir.path().to_path_buf(),
-            64,
-            64,
-            30,
-            "h264".to_string(),
-            500_000,
-            vec![],
+            EncoderParams::tiny_test("h264", &[]),
             1, // 1-second segments, so a handful of frames rolls over multiple times
             3, // keep at most 3 segments
             Arc::clone(&segments),
             disk_full_flag,
-            false,
         );
 
         // Send frames spaced out past several 1s segment boundaries.
@@ -284,17 +262,11 @@ mod tests {
 
         let (tx, _save_now_tx, handle) = spawn_highlight_actor(
             dir.path().to_path_buf(),
-            64,
-            64,
-            30,
-            "h264".to_string(),
-            500_000,
-            vec![],
+            EncoderParams::tiny_test("h264", &[]),
             1,
             10,
             Arc::clone(&segments),
             disk_full_flag,
-            false,
         );
         tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
             Duration::ZERO,
@@ -328,17 +300,11 @@ mod tests {
 
         let (tx, save_now_tx, handle) = spawn_highlight_actor(
             dir.path().to_path_buf(),
-            64,
-            64,
-            30,
-            "h264".to_string(),
-            500_000,
-            vec![],
+            EncoderParams::tiny_test("h264", &[]),
             60, // long segment -- save_now must finalize well before this elapses
             10,
             Arc::clone(&segments),
             disk_full_flag,
-            false,
         );
 
         tx.send(RecordingCommand::WriteVideo(tiny_video_frame(

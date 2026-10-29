@@ -1,6 +1,7 @@
 pub mod clock;
 pub mod state;
 
+use crate::capture::CaptureControl;
 use crate::capture::audio::{
     TARGET_CHANNELS, TARGET_SAMPLE_RATE, run_audio_capture, run_process_loopback_capture,
 };
@@ -8,23 +9,22 @@ use crate::capture::video::{
     CaptureTarget, query_capture_size, query_display_size, run_video_capture,
 };
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
-use crate::encode::RecordingCommand;
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::highlight_export;
 use crate::encode::writer::video_bitrate_bps;
+use crate::encode::{EncoderParams, RecordingCommand};
 use crate::error::{AppError, ResultExt};
 use crate::highlight::{
     HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
-use crate::session::clock::RecordingClock;
 use crate::types::{
     AppAudioSource, AudioDevice, CaptureKind, CaptureSource, SessionState, TrackId,
 };
 use state::{SessionAction, transition};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -64,13 +64,12 @@ pub struct ActiveCapture {
     pump_handles: Vec<JoinHandle<()>>,
     pub recorder_handle: JoinHandle<Result<PathBuf, AppError>>,
     pub recording_tx: mpsc::Sender<RecordingCommand>,
-    pub clock: Arc<RecordingClock>,
-    pub pause_flag: Arc<AtomicBool>,
-    /// Signals capture loops (running on their own `spawn_blocking` OS threads) to
-    /// exit their loop on the next iteration. `capture_handles.abort()` alone does
-    /// NOT stop these -- `abort()` has no effect on an already-running blocking
-    /// closure; see `stop_capture`.
-    pub stop_flag: Arc<AtomicBool>,
+    /// Clock + pause/stop signals shared by every capture loop of this
+    /// recording. The capture loops run on their own `spawn_blocking` OS
+    /// threads, so `capture_handles.abort()` alone does NOT stop them --
+    /// `abort()` has no effect on an already-running blocking closure; they
+    /// only exit once `ctrl.request_stop()` is observed (see `stop_capture`).
+    pub ctrl: CaptureControl,
     pub output_path: PathBuf,
     /// Folder `output_path`'s finished file will be renamed into (see
     /// `encode::actor::spawn_recording_actor`) -- along with `app_name` and
@@ -109,7 +108,7 @@ pub struct ActiveHighlight {
     highlight_handle: JoinHandle<Result<(), AppError>>,
     highlight_tx: mpsc::Sender<RecordingCommand>,
     save_now_tx: mpsc::UnboundedSender<SaveNowRequest>,
-    stop_flag: Arc<AtomicBool>,
+    ctrl: CaptureControl,
     segments: Arc<Mutex<VecDeque<SegmentInfo>>>,
     /// How much of the buffer `save_highlight` should try to save -- captured
     /// at start time since it's this buffering session's own setting, not
@@ -171,9 +170,7 @@ impl SessionManager {
         encode: EncodeSettings,
         naming: RecordingNaming,
     ) -> Result<PathBuf, AppError> {
-        let clock = RecordingClock::new();
-        let pause_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag = Arc::new(AtomicBool::new(false));
+        let ctrl = CaptureControl::new();
 
         let app_name = app_name_from_exe(&source.exe_name);
         let (output_path, polyrec_dir) = prepare_recording_paths(output_dir, &app_name);
@@ -209,23 +206,21 @@ impl SessionManager {
             polyrec_dir,
             app_name,
             naming,
-            output_width,
-            output_height,
-            encode.fps,
-            encode.codec.clone(),
-            bitrate_bps,
-            audio_specs,
+            encoder_params(
+                output_width,
+                output_height,
+                bitrate_bps,
+                audio_specs,
+                &encode,
+            ),
             Arc::clone(&disk_full_flag),
-            matches!(encode.encoder_mode, EncoderMode::Hardware),
         );
 
         // Spawn video capture + pump
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
         let hwnd_val = source.hwnd;
         let source_kind = source.kind;
-        let video_clock = Arc::clone(&clock);
-        let video_pause = Arc::clone(&pause_flag);
-        let video_stop = Arc::clone(&stop_flag);
+        let video_ctrl = ctrl.clone();
         let video_capture_handle = tokio::task::spawn_blocking(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -249,13 +244,9 @@ impl SessionManager {
                 };
                 if let Err(e) = run_video_capture(
                     target,
-                    capture_width,
-                    capture_height,
-                    output_width,
-                    output_height,
-                    video_clock,
-                    video_pause,
-                    video_stop,
+                    (capture_width, capture_height),
+                    (output_width, output_height),
+                    video_ctrl,
                     video_tx,
                     show_border,
                 )
@@ -281,9 +272,7 @@ impl SessionManager {
             app_audio_only,
             source.kind,
             source.process_id,
-            &clock,
-            &pause_flag,
-            &stop_flag,
+            &ctrl,
             &recording_tx,
             "",
         );
@@ -294,9 +283,7 @@ impl SessionManager {
             app_audio_sources,
             &app_audio_source_gains,
             device_track_count as u32,
-            &clock,
-            &pause_flag,
-            &stop_flag,
+            &ctrl,
             &recording_tx,
             "",
         );
@@ -308,9 +295,7 @@ impl SessionManager {
             pump_handles,
             recorder_handle,
             recording_tx,
-            clock,
-            pause_flag,
-            stop_flag,
+            ctrl,
             output_path: output_path.clone(),
             output_dir: active_output_dir,
             app_name: active_app_name,
@@ -331,7 +316,7 @@ impl SessionManager {
             // Signal capture loops to exit -- `abort()` has no effect on the
             // spawn_blocking closures actually running them (see stop_flag doc);
             // they only stop by observing this flag on their next loop iteration.
-            active.stop_flag.store(true, Ordering::SeqCst);
+            active.ctrl.request_stop();
             // Wait for every capture loop to actually return, and for the pump
             // tasks forwarding their output to drain and exit in turn (a pump
             // exits once its capture loop's sender is dropped, which happens
@@ -428,9 +413,7 @@ impl SessionManager {
             return Err(AppError::DiskFull(segment_dir));
         }
 
-        let clock = RecordingClock::new();
-        let pause_flag = Arc::new(AtomicBool::new(false)); // never toggled -- no pause support
-        let stop_flag = Arc::new(AtomicBool::new(false));
+        let ctrl = CaptureControl::new(); // never paused -- no pause support
 
         // See total_audio_track_count's doc comment for why the count (not
         // a per-track value) is the only thing that needs to match
@@ -452,25 +435,23 @@ impl SessionManager {
         let disk_full_flag = Arc::new(AtomicBool::new(false));
         let (highlight_tx, save_now_tx, highlight_handle) = spawn_highlight_actor(
             segment_dir,
-            output_width,
-            output_height,
-            encode.fps,
-            encode.codec.clone(),
-            bitrate_bps,
-            audio_specs,
+            encoder_params(
+                output_width,
+                output_height,
+                bitrate_bps,
+                audio_specs,
+                &encode,
+            ),
             HIGHLIGHT_SEGMENT_SECONDS,
             max_segments,
             Arc::clone(&segments),
             Arc::clone(&disk_full_flag),
-            matches!(encode.encoder_mode, EncoderMode::Hardware),
         );
 
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
         let hwnd_val = source.hwnd;
         let source_kind = source.kind;
-        let video_clock = Arc::clone(&clock);
-        let video_pause = Arc::clone(&pause_flag);
-        let video_stop = Arc::clone(&stop_flag);
+        let video_ctrl = ctrl.clone();
         let video_capture_handle = tokio::task::spawn_blocking(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -494,13 +475,9 @@ impl SessionManager {
                 };
                 if let Err(e) = run_video_capture(
                     target,
-                    capture_width,
-                    capture_height,
-                    output_width,
-                    output_height,
-                    video_clock,
-                    video_pause,
-                    video_stop,
+                    (capture_width, capture_height),
+                    (output_width, output_height),
+                    video_ctrl,
                     video_tx,
                     false,
                 )
@@ -523,9 +500,7 @@ impl SessionManager {
             app_audio_only,
             source.kind,
             source.process_id,
-            &clock,
-            &pause_flag,
-            &stop_flag,
+            &ctrl,
             &highlight_tx,
             "Highlight ",
         );
@@ -536,9 +511,7 @@ impl SessionManager {
             app_audio_sources,
             &app_audio_source_gains,
             device_track_count as u32,
-            &clock,
-            &pause_flag,
-            &stop_flag,
+            &ctrl,
             &highlight_tx,
             "Highlight ",
         );
@@ -551,7 +524,7 @@ impl SessionManager {
             highlight_handle,
             highlight_tx,
             save_now_tx,
-            stop_flag,
+            ctrl,
             segments,
             buffer_seconds,
             disk_full_flag,
@@ -585,7 +558,7 @@ impl SessionManager {
     /// end-to-end run, not just the isolated unit tests).
     pub fn stop_highlight_buffering(&mut self, discard: bool) {
         if let Some(active) = self.highlight.take() {
-            active.stop_flag.store(true, Ordering::SeqCst);
+            active.ctrl.request_stop();
             // See the matching comment in `stop_capture` -- waited on (not
             // aborted) so the capture loops' final in-flight frames reach the
             // highlight actor before `Stop` does, instead of being silently
@@ -664,16 +637,14 @@ impl SessionManager {
 
     pub fn pause_capture(&mut self) {
         if let Some(active) = &self.active {
-            active.pause_flag.store(true, Ordering::SeqCst);
-            active.clock.pause();
+            active.ctrl.pause();
         }
         self.apply(SessionAction::Pause);
     }
 
     pub fn resume_capture(&mut self) {
         if let Some(active) = &self.active {
-            active.pause_flag.store(false, Ordering::SeqCst);
-            active.clock.resume();
+            active.ctrl.resume();
         }
         self.apply(SessionAction::Resume);
     }
@@ -782,9 +753,7 @@ fn spawn_device_audio_tracks(
     app_audio_only: bool,
     source_kind: CaptureKind,
     source_process_id: u32,
-    clock: &Arc<RecordingClock>,
-    pause_flag: &Arc<AtomicBool>,
-    stop_flag: &Arc<AtomicBool>,
+    ctrl: &CaptureControl,
     dest_tx: &mpsc::Sender<RecordingCommand>,
     log_prefix: &'static str,
 ) -> (Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
@@ -794,9 +763,7 @@ fn spawn_device_audio_tracks(
         let track_id = TrackId::new(i as u32);
         let gain = audio_gains.get(i).copied().unwrap_or(1.0);
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-        let audio_clock = Arc::clone(clock);
-        let audio_pause = Arc::clone(pause_flag);
-        let audio_stop = Arc::clone(stop_flag);
+        let audio_ctrl = ctrl.clone();
         let dev_id = dev.id.clone();
         let is_loopback = dev.is_loopback;
         // A `Monitor` source has no owning process to scope loopback to
@@ -821,28 +788,12 @@ fn spawn_device_audio_tracks(
             local.block_on(&rt, async move {
                 let result = if use_process_loopback {
                     run_process_loopback_capture(
-                        target_pid,
-                        true,
-                        track_id,
-                        audio_clock,
-                        audio_pause,
-                        audio_stop,
-                        audio_tx,
-                        gain,
+                        target_pid, true, track_id, audio_ctrl, audio_tx, gain,
                     )
                     .await
                 } else {
-                    run_audio_capture(
-                        dev_id,
-                        track_id,
-                        is_loopback,
-                        audio_clock,
-                        audio_pause,
-                        audio_stop,
-                        audio_tx,
-                        gain,
-                    )
-                    .await
+                    run_audio_capture(dev_id, track_id, is_loopback, audio_ctrl, audio_tx, gain)
+                        .await
                 };
                 if let Err(e) = result {
                     tracing::error!("{log_prefix}AudioCapture[{track_id:?}] error: {e}");
@@ -878,9 +829,7 @@ fn spawn_app_audio_tracks(
     app_audio_sources: Vec<AppAudioSource>,
     app_audio_source_gains: &[f32],
     first_track_id: u32,
-    clock: &Arc<RecordingClock>,
-    pause_flag: &Arc<AtomicBool>,
-    stop_flag: &Arc<AtomicBool>,
+    ctrl: &CaptureControl,
     dest_tx: &mpsc::Sender<RecordingCommand>,
     log_prefix: &'static str,
 ) -> (Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
@@ -898,9 +847,7 @@ fn spawn_app_audio_tracks(
             let track_id = TrackId::new(next_track_id);
             next_track_id += 1;
             let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-            let audio_clock = Arc::clone(clock);
-            let audio_pause = Arc::clone(pause_flag);
-            let audio_stop = Arc::clone(stop_flag);
+            let audio_ctrl = ctrl.clone();
             let capture_handle = tokio::task::spawn_blocking(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -917,14 +864,7 @@ fn spawn_app_audio_tracks(
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
                     if let Err(e) = run_process_loopback_capture(
-                        target_pid,
-                        true,
-                        track_id,
-                        audio_clock,
-                        audio_pause,
-                        audio_stop,
-                        audio_tx,
-                        gain,
+                        target_pid, true, track_id, audio_ctrl, audio_tx, gain,
                     )
                     .await
                     {
@@ -1020,6 +960,26 @@ fn resolve_capture_and_output_dimensions(
     )
 }
 
+/// Assembles the writer config both `start_capture` and
+/// `start_highlight_buffering` hand to their actor.
+fn encoder_params(
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    audio_tracks: Vec<(u32, u16)>,
+    encode: &EncodeSettings,
+) -> EncoderParams {
+    EncoderParams {
+        width,
+        height,
+        fps: encode.fps,
+        codec: encode.codec.clone(),
+        bitrate_bps,
+        audio_tracks,
+        allow_hardware_encode: matches!(encode.encoder_mode, EncoderMode::Hardware),
+    }
+}
+
 /// Pure resolution-mode resolution — no I/O, so it's directly unit-testable without
 /// touching real monitor/capture APIs. `display_size` is `None` when the caller didn't
 /// query it (mode != Display) or the query failed.
@@ -1038,6 +998,7 @@ fn resolve_output_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     /// `enumerate_sources()` can return transient shell popups (e.g. volume/brightness
     /// OSD "PopupHost" windows) with a degenerate client rect that breaks H264 setup —
