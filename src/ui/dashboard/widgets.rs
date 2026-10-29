@@ -104,7 +104,7 @@ pub(super) fn checkbox_with_volume_slider(
     config_save_failed_prefix: &str,
     checked: &mut bool,
     label: String,
-    gain_key: String,
+    gain_key: &str,
     checkbox_tooltip: Option<&str>,
 ) {
     ui.horizontal(|ui| {
@@ -119,7 +119,7 @@ pub(super) fn checkbox_with_volume_slider(
     // Only meaningful (and shown) once checked -- an unselected source's
     // volume has nothing to apply to.
     if *checked {
-        let mut gain_percent = (config.audio_gain(&gain_key) * 100.0).round() as i32;
+        let mut gain_percent = (config.audio_gain(gain_key) * 100.0).round() as i32;
         ui.horizontal(|ui| {
             ui.add_space(20.0);
             let response = ui.add(
@@ -142,7 +142,7 @@ pub(super) fn checkbox_with_volume_slider(
             if response.changed() {
                 config
                     .audio_device_gain
-                    .insert(gain_key.clone(), gain_percent as f32 / 100.0);
+                    .insert(gain_key.to_string(), gain_percent as f32 / 100.0);
                 super::util::save_config_or_report(
                     config,
                     error_message,

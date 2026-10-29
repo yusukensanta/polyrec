@@ -1,9 +1,9 @@
 use super::App;
 use super::state::{ExportState, HighlightSaveState};
 use super::theme::{
-    ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_STOP, BG_FAINT,
-    BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY,
-    TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
+    ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
+    BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT,
+    TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
 };
 use super::util::open_folder;
 use super::widgets::{
@@ -382,7 +382,7 @@ impl App {
                     let pause_btn = egui::Button::new(
                         egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
                     )
-                    .fill(egui::Color32::from_rgb(30, 30, 46))
+                    .fill(BG_BTN_PAUSE)
                     .min_size(egui::Vec2::new(44.0, 52.0));
                     if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
                         self.handle_pause_button();

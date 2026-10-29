@@ -37,7 +37,7 @@ use std::time::Instant;
 /// other non-interactive background saves in this codebase) so the walk
 /// that found it doesn't need repeating on every future idle rebuild.
 pub(super) fn build_app_audio_sources(config: &mut Config) -> Vec<AppAudioSource> {
-    build_app_audio_sources_from(enumerate_app_audio_sessions().unwrap_or_default(), config)
+    build_app_audio_sources_from(&enumerate_app_audio_sessions().unwrap_or_default(), config)
 }
 
 /// `build_app_audio_sources` over an already-taken `live` session list --
@@ -45,7 +45,7 @@ pub(super) fn build_app_audio_sources(config: &mut Config) -> Vec<AppAudioSource
 /// `take_refresh_snapshot`) while the `config`-mutating merge below stays on
 /// the UI thread that owns `config`.
 fn build_app_audio_sources_from(
-    live: Vec<AppAudioSource>,
+    live: &[AppAudioSource],
     config: &mut Config,
 ) -> Vec<AppAudioSource> {
     let mut healed_any = false;
@@ -365,7 +365,7 @@ impl App {
         // this", always. Only the live process_ids (idle vs running) can
         // change between refreshes.
         let new_app_audio_sources =
-            build_app_audio_sources_from(snapshot.live_app_audio, &mut self.config);
+            build_app_audio_sources_from(&snapshot.live_app_audio, &mut self.config);
         if app_audio_fingerprint(&new_app_audio_sources)
             != app_audio_fingerprint(&self.app_audio_sources)
         {
@@ -606,18 +606,18 @@ impl App {
             .bytes
             .is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
         if !self.session.is_highlighting() && has_room {
-            self.start_highlight_buffering_for(source);
+            self.start_highlight_buffering_for(&source);
         }
     }
 
-    pub(super) fn start_highlight_buffering_for(&mut self, source: CaptureSource) {
+    pub(super) fn start_highlight_buffering_for(&mut self, source: &CaptureSource) {
         let inputs = self.resolve_capture_inputs();
         let buffer_seconds = self.config.highlight.buffer_seconds.clamp(
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN,
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
         );
         if let Err(e) = self.session.start_highlight_buffering(
-            &source,
+            source,
             inputs,
             &self.config.output_dir,
             buffer_seconds,
