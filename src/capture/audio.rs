@@ -562,6 +562,104 @@ struct StreamFormat {
     bytes_per_frame: usize,
 }
 
+/// `AUDCLNT_BUFFERFLAGS_SILENT` -- WASAPI's "this packet is silence" flag.
+const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 2;
+
+/// One WASAPI packet as f32 samples: `sample_count` interleaved samples,
+/// each `bytes_per_sample` wide, read from `packet`. f32 (4 bytes/sample) and
+/// i16 (2 bytes/sample) mix formats are the only ones understood; `None` for
+/// anything else (e.g. 24-bit, real on some pro/USB audio interfaces), which
+/// the caller records as silence rather than garbage.
+fn decode_packet(packet: &[u8], sample_count: usize, bytes_per_sample: usize) -> Option<Vec<f32>> {
+    let samples = match bytes_per_sample {
+        4 => packet.as_chunks::<4>().0[..sample_count.min(packet.len() / 4)]
+            .iter()
+            .map(|&b| f32::from_ne_bytes(b))
+            .collect(),
+        2 => packet.as_chunks::<2>().0[..sample_count.min(packet.len() / 2)]
+            .iter()
+            .map(|&b| i16::from_ne_bytes(b) as f32 / 32768.0)
+            .collect(),
+        _ => return None,
+    };
+    Some(samples)
+}
+
+/// One-shot diagnostic for a report of app-audio tracks recording as
+/// silence despite the source app audibly producing sound (mic/device
+/// tracks unaffected) -- distinguishes "WASAPI itself reports this
+/// buffer as silent" (AUDCLNT_BUFFERFLAGS_SILENT, meaning the process-
+/// loopback session genuinely isn't seeing the target's real audio
+/// graph -- a Windows/targeting issue, not something fixable here)
+/// from "WASAPI handed us a real, non-silent buffer but every sample
+/// we read out is still zero" (a parsing bug in this loop). Logged
+/// once per track after ~1s of buffers so it doesn't spam.
+struct PacketDiagnostics {
+    buffers_seen: u32,
+    any_silent_flag: bool,
+    max_abs_sample: f32,
+    logged: bool,
+    start: std::time::Instant,
+    zero_buffer_warned: bool,
+}
+
+impl PacketDiagnostics {
+    fn new() -> Self {
+        Self {
+            buffers_seen: 0,
+            any_silent_flag: false,
+            max_abs_sample: 0.0,
+            logged: false,
+            start: std::time::Instant::now(),
+            zero_buffer_warned: false,
+        }
+    }
+
+    /// Called for every non-empty packet, with its WASAPI flags and decoded
+    /// samples.
+    fn record_packet(&mut self, track_id: TrackId, flags: u32, samples: &[f32]) {
+        if self.logged {
+            return;
+        }
+        if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
+            self.any_silent_flag = true;
+        }
+        for &s in samples {
+            self.max_abs_sample = self.max_abs_sample.max(s.abs());
+        }
+        self.buffers_seen += 1;
+        if self.buffers_seen >= 100 {
+            self.logged = true;
+            tracing::info!(
+                "AudioCapture[{track_id:?}] diagnostic (first ~{} buffers): any_silent_flag={} max_abs_sample={:.6}",
+                self.buffers_seen,
+                self.any_silent_flag,
+                self.max_abs_sample
+            );
+        }
+    }
+
+    /// Companion to `record_packet`, called on every empty poll: if this
+    /// track has gone 5+ seconds without GetBuffer ever reporting
+    /// frames_available > 0 even once, WriteSample is never called for it at
+    /// all -- which (per the export-dialog report this is chasing) means the
+    /// track can end up entirely absent from the finished file, not just
+    /// silent. One-shot so it doesn't spam a track that's just between
+    /// sounds.
+    fn check_no_packets_yet(&mut self, track_id: TrackId) {
+        if !self.zero_buffer_warned
+            && self.buffers_seen == 0
+            && self.start.elapsed() >= std::time::Duration::from_secs(5)
+        {
+            self.zero_buffer_warned = true;
+            tracing::warn!(
+                "AudioCapture[{track_id:?}] diagnostic: no buffer with frames_available > 0 in {:.1}s -- this track may end up with zero samples written",
+                self.start.elapsed().as_secs_f32()
+            );
+        }
+    }
+}
+
 /// Shared buffer-read loop: starts the (already-initialized) client, unpacks each
 /// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
 /// encoder target, and forwards `AudioSamples` until the receiver drops, the
@@ -596,33 +694,17 @@ async unsafe fn run_capture_loop(
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
-        // One-shot diagnostic for a report of app-audio tracks recording as
-        // silence despite the source app audibly producing sound (mic/device
-        // tracks unaffected) -- distinguishes "WASAPI itself reports this
-        // buffer as silent" (AUDCLNT_BUFFERFLAGS_SILENT, meaning the process-
-        // loopback session genuinely isn't seeing the target's real audio
-        // graph -- a Windows/targeting issue, not something fixable here)
-        // from "WASAPI handed us a real, non-silent buffer but every sample
-        // we read out is still zero" (a parsing bug in this loop). Logged
-        // once per track after ~1s of buffers so it doesn't spam.
-        const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 2;
-        let mut diag_buffers_seen: u32 = 0;
-        let mut diag_any_silent_flag = false;
-        let mut diag_max_abs_sample: f32 = 0.0;
-        let mut diag_logged = false;
-        let diag_start = std::time::Instant::now();
-        let mut diag_zero_buffer_warned = false;
+        let mut diagnostics = PacketDiagnostics::new();
         // Rate-limited like the disk-space guard elsewhere -- OpenProcess is
         // a real syscall, not worth doing on every 10ms idle poll.
         let mut last_pid_check = std::time::Instant::now();
-        // Only f32 (4 bytes/sample) and i16 (2 bytes/sample) mix formats are
-        // parsed below -- a device that negotiates something else (e.g. 24-bit,
-        // real on some pro/USB audio interfaces) would otherwise silently write
-        // zeros for every sample: a genuinely connected, genuinely producing
-        // device that ends up indistinguishable from "just quiet" in the
-        // recording, with nothing in the existing "missing audio track"
-        // warning able to catch it (samples ARE written, just wrong). One-shot
-        // so it doesn't spam every sample of every buffer.
+        // A device that negotiates a mix format `decode_packet` doesn't
+        // understand would otherwise silently write zeros for every sample:
+        // a genuinely connected, genuinely producing device that ends up
+        // indistinguishable from "just quiet" in the recording, with nothing
+        // in the existing "missing audio track" warning able to catch it
+        // (samples ARE written, just wrong). One-shot so it doesn't spam
+        // every packet.
         let mut warned_unrecognized_bit_depth = false;
 
         loop {
@@ -638,16 +720,15 @@ async unsafe fn run_capture_loop(
             {
                 Ok(()) if frames_available > 0 => {
                     let sample_count = frames_available as usize * channels as usize;
-                    let mut samples = vec![0.0f32; sample_count];
-
-                    for (i, sample) in samples.iter_mut().enumerate() {
-                        let byte_offset = i * bytes_per_sample;
-                        let sample_ptr = data.add(byte_offset);
-                        *sample = if bytes_per_sample == 4 {
-                            *(sample_ptr as *const f32)
-                        } else if bytes_per_sample == 2 {
-                            *(sample_ptr as *const i16) as f32 / 32768.0
-                        } else {
+                    // SAFETY: GetBuffer just handed us `frames_available`
+                    // frames of `bytes_per_frame` bytes each at `data`,
+                    // valid until the ReleaseBuffer below.
+                    let packet = std::slice::from_raw_parts(
+                        data,
+                        frames_available as usize * bytes_per_frame,
+                    );
+                    let samples = decode_packet(packet, sample_count, bytes_per_sample)
+                        .unwrap_or_else(|| {
                             if !warned_unrecognized_bit_depth {
                                 warned_unrecognized_bit_depth = true;
                                 tracing::warn!(
@@ -655,29 +736,14 @@ async unsafe fn run_capture_loop(
                                     bytes_per_sample
                                 );
                             }
-                            0.0
-                        };
-                    }
+                            vec![0.0f32; sample_count]
+                        });
 
                     capture_client
                         .ReleaseBuffer(frames_available)
                         .windows_ctx("ReleaseBuffer")?;
 
-                    if !diag_logged {
-                        if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
-                            diag_any_silent_flag = true;
-                        }
-                        for &s in &samples {
-                            diag_max_abs_sample = diag_max_abs_sample.max(s.abs());
-                        }
-                        diag_buffers_seen += 1;
-                        if diag_buffers_seen >= 100 {
-                            diag_logged = true;
-                            tracing::info!(
-                                "AudioCapture[{track_id:?}] diagnostic (first ~{diag_buffers_seen} buffers): any_silent_flag={diag_any_silent_flag} max_abs_sample={diag_max_abs_sample:.6}"
-                            );
-                        }
-                    }
+                    diagnostics.record_packet(track_id, flags, &samples);
 
                     // Always release buffer first (above), then discard if paused.
                     if ctrl.is_paused() {
@@ -702,24 +768,7 @@ async unsafe fn run_capture_loop(
                     }
                 }
                 Ok(()) => {
-                    // Companion to the diagnostic above: if this track has
-                    // gone 5+ seconds without GetBuffer ever reporting
-                    // frames_available > 0 even once, WriteSample is never
-                    // called for it at all -- which (per the export-dialog
-                    // report this is chasing) means the track can end up
-                    // entirely absent from the finished file, not just
-                    // silent. One-shot so it doesn't spam a track that's
-                    // just between sounds.
-                    if !diag_zero_buffer_warned
-                        && diag_buffers_seen == 0
-                        && diag_start.elapsed() >= std::time::Duration::from_secs(5)
-                    {
-                        diag_zero_buffer_warned = true;
-                        tracing::warn!(
-                            "AudioCapture[{track_id:?}] diagnostic: no buffer with frames_available > 0 in {:.1}s -- this track may end up with zero samples written",
-                            diag_start.elapsed().as_secs_f32()
-                        );
-                    }
+                    diagnostics.check_no_packets_yet(track_id);
                     if let Some(pid) = watch_pid
                         && last_pid_check.elapsed() >= std::time::Duration::from_secs(1)
                     {
@@ -1236,5 +1285,125 @@ mod tests {
         // Must return promptly (no infinite loop) -- which pid it lands on
         // isn't load-bearing for a case that shouldn't occur in practice.
         let _ = canonical_root_pid_with(1, "Loop.exe", &parent_of, exe_name_of);
+    }
+
+    /// The per-sample pointer reads `run_capture_loop` used before
+    /// `decode_packet` existed -- kept here as the reference it must match.
+    fn decode_packet_reference(
+        packet: &[u8],
+        sample_count: usize,
+        bytes_per_sample: usize,
+    ) -> Vec<f32> {
+        let mut samples = vec![0.0f32; sample_count];
+        for (i, sample) in samples.iter_mut().enumerate() {
+            let p = unsafe { packet.as_ptr().add(i * bytes_per_sample) };
+            *sample = if bytes_per_sample == 4 {
+                unsafe { (p as *const f32).read_unaligned() }
+            } else if bytes_per_sample == 2 {
+                (unsafe { (p as *const i16).read_unaligned() }) as f32 / 32768.0
+            } else {
+                0.0
+            };
+        }
+        samples
+    }
+
+    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
+        let mut x: u32 = 0x1234_5678;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decode_packet_matches_the_old_per_sample_reads_for_f32_and_i16() {
+        for bytes_per_sample in [4usize, 2] {
+            let sample_count = 480 * 2;
+            // Finite f32 bit patterns only, so NaN != NaN can't confuse the
+            // comparison: build f32 packets from real values.
+            let packet: Vec<u8> = if bytes_per_sample == 4 {
+                (0..sample_count)
+                    .flat_map(|i| ((i as f32 * 0.37).sin()).to_ne_bytes())
+                    .collect()
+            } else {
+                pseudo_random_bytes(sample_count * 2)
+            };
+            let decoded = decode_packet(&packet, sample_count, bytes_per_sample).unwrap();
+            assert_eq!(
+                decoded,
+                decode_packet_reference(&packet, sample_count, bytes_per_sample),
+                "{bytes_per_sample} bytes/sample"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_packet_converts_i16_to_unit_range() {
+        let packet: Vec<u8> = [16384i16, -32768, 0]
+            .iter()
+            .flat_map(|s| s.to_ne_bytes())
+            .collect();
+        assert_eq!(decode_packet(&packet, 3, 2), Some(vec![0.5, -1.0, 0.0]));
+    }
+
+    #[test]
+    fn decode_packet_reads_only_sample_count_samples() {
+        let packet: Vec<u8> = [0.5f32, 0.25, 0.125]
+            .iter()
+            .flat_map(|s| s.to_ne_bytes())
+            .collect();
+        assert_eq!(decode_packet(&packet, 2, 4), Some(vec![0.5, 0.25]));
+    }
+
+    #[test]
+    fn decode_packet_rejects_unrecognized_sample_widths_without_panicking() {
+        let packet = vec![1u8; 12];
+        assert_eq!(decode_packet(&packet, 4, 3), None); // 24-bit
+        assert_eq!(decode_packet(&packet, 4, 0), None); // degenerate format
+    }
+
+    #[test]
+    fn packet_diagnostics_log_once_after_100_packets_and_track_the_silent_flag() {
+        let mut diag = PacketDiagnostics::new();
+        let track = TrackId::new(0);
+        diag.record_packet(track, AUDCLNT_BUFFERFLAGS_SILENT, &[0.0; 4]);
+        diag.record_packet(track, 0, &[0.25, -0.75]);
+        assert!(diag.any_silent_flag);
+        assert_eq!(diag.max_abs_sample, 0.75);
+        for _ in 2..100 {
+            diag.record_packet(track, 0, &[0.1]);
+        }
+        assert!(diag.logged);
+        assert_eq!(diag.buffers_seen, 100);
+        // Frozen once logged.
+        diag.record_packet(track, 0, &[0.9]);
+        assert_eq!(diag.buffers_seen, 100);
+        assert_eq!(diag.max_abs_sample, 0.75);
+    }
+
+    #[test]
+    fn packet_diagnostics_warn_about_no_packets_only_after_5s_and_only_once() {
+        let track = TrackId::new(0);
+        let mut diag = PacketDiagnostics::new();
+        diag.check_no_packets_yet(track);
+        assert!(!diag.zero_buffer_warned, "too early");
+
+        diag.start = std::time::Instant::now() - std::time::Duration::from_secs(6);
+        diag.check_no_packets_yet(track);
+        assert!(diag.zero_buffer_warned);
+
+        let mut had_packets = PacketDiagnostics::new();
+        had_packets.start = std::time::Instant::now() - std::time::Duration::from_secs(6);
+        had_packets.record_packet(track, 0, &[0.1]);
+        had_packets.check_no_packets_yet(track);
+        assert!(
+            !had_packets.zero_buffer_warned,
+            "a track that produced packets"
+        );
     }
 }
