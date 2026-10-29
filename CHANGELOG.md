@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.78] - 2026-10-29
+
 ### Fixed
 
 - Windows and app-audio sources belonging to elevated or protected processes (e.g. a game running under anti-cheat, Task Manager, the Windows audio engine) showed up as "Unknown" with no icon -- their exe path is now resolved with the minimal query rights Windows still grants for them.
