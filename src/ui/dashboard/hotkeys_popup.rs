@@ -16,17 +16,13 @@ pub(super) enum HotkeySlot {
 }
 
 impl App {
-    pub(super) fn render_hotkeys_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        if !self.show_hotkeys_popup {
-            return;
-        }
-
-        // While waiting for a keypress, consume this frame's key events
-        // directly rather than via any widget -- capture works no matter
-        // where focus happens to be in the popup. Escape cancels; anything
-        // else not registerable as a global hotkey (a bare modifier, or a key
-        // the egui/hotkeys mapping doesn't cover) is ignored so the prompt
-        // keeps waiting instead of silently eating the keypress.
+    /// While waiting for a keypress, consume this frame's key events
+    /// directly rather than via any widget -- capture works no matter
+    /// where focus happens to be in the popup. Escape cancels; anything
+    /// else not registerable as a global hotkey (a bare modifier, or a key
+    /// the egui/hotkeys mapping doesn't cover) is ignored so the prompt
+    /// keeps waiting instead of silently eating the keypress.
+    fn capture_pending_hotkey(&mut self, ctx: &egui::Context, s: &'static Strings) {
         if let Some(slot) = self.recording_hotkey {
             ctx.input(|i| {
                 for event in &i.events {
@@ -42,24 +38,9 @@ impl App {
                             self.recording_hotkey = None;
                             return;
                         }
-                        let Some(base_name) = egui_key_to_hotkey_string(*key) else {
+                        let Some(combo) = hotkey_combo(*key, *modifiers) else {
                             continue;
                         };
-                        // Canonical modifier order (CTRL, ALT, SHIFT) regardless of
-                        // which order the user physically held them down in --
-                        // parse_hotkey accepts any order, but a fixed display order
-                        // keeps the saved string (and the on-screen binding) consistent.
-                        let mut combo = String::new();
-                        if modifiers.ctrl {
-                            combo.push_str("CTRL+");
-                        }
-                        if modifiers.alt {
-                            combo.push_str("ALT+");
-                        }
-                        if modifiers.shift {
-                            combo.push_str("SHIFT+");
-                        }
-                        combo.push_str(base_name);
 
                         let Some((vk, mods)) = crate::hotkeys::parse_hotkey(&combo) else {
                             continue;
@@ -90,6 +71,14 @@ impl App {
                 }
             });
         }
+    }
+
+    pub(super) fn render_hotkeys_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        if !self.show_hotkeys_popup {
+            return;
+        }
+
+        self.capture_pending_hotkey(ctx, s);
 
         let mut close = false;
         egui::Window::new(s.hotkeys_title)
@@ -250,6 +239,27 @@ impl App {
     }
 }
 
+/// The hotkey string for `key` with `modifiers` held, modifiers in canonical
+/// CTRL, ALT, SHIFT order regardless of which order the user physically held
+/// them down in -- parse_hotkey accepts any order, but a fixed display order
+/// keeps the saved string (and the on-screen binding) consistent. `None` for
+/// a key with no hotkey name.
+fn hotkey_combo(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
+    let base_name = egui_key_to_hotkey_string(key)?;
+    let mut combo = String::new();
+    if modifiers.ctrl {
+        combo.push_str("CTRL+");
+    }
+    if modifiers.alt {
+        combo.push_str("ALT+");
+    }
+    if modifiers.shift {
+        combo.push_str("SHIFT+");
+    }
+    combo.push_str(base_name);
+    Some(combo)
+}
+
 /// Maps an egui key-press event (from the Hotkeys popup's "press any key to
 /// bind" capture) to the base-key string form `hotkeys::parse_hotkey` expects
 /// (modifiers are prefixed separately by the capture logic that calls this).
@@ -401,5 +411,39 @@ mod hotkey_capture_tests {
                 "hotkeys::parse_hotkey doesn't recognize \"{with_mods}\""
             );
         }
+    }
+
+    #[test]
+    fn hotkey_combo_orders_modifiers_ctrl_alt_shift() {
+        let all = egui::Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            hotkey_combo(egui::Key::F9, all).as_deref(),
+            Some("CTRL+ALT+SHIFT+F9")
+        );
+        let shift_only = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            hotkey_combo(egui::Key::F9, shift_only).as_deref(),
+            Some("SHIFT+F9")
+        );
+        assert_eq!(
+            hotkey_combo(egui::Key::F9, egui::Modifiers::default()).as_deref(),
+            Some("F9")
+        );
+    }
+
+    #[test]
+    fn hotkey_combo_is_none_for_an_unmapped_key() {
+        assert_eq!(
+            hotkey_combo(egui::Key::Escape, egui::Modifiers::default()),
+            None
+        );
     }
 }

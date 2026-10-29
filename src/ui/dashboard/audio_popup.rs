@@ -63,167 +63,13 @@ impl App {
                 egui::ScrollArea::vertical()
                     .max_height(400.0)
                     .show(ui, |ui| {
-                        section_header(ui, s.system_audio_header);
-                        if self.audio_devices.is_empty() {
-                            ui.label(caption(s.no_audio_devices, TEXT_MUTED));
-                        }
-                        // Iterated from cloned (label, id) pairs, not
-                        // `self.audio_devices` directly -- persisting a
-                        // toggle below needs `&mut self`, which a live
-                        // borrow of `self.audio_devices` here would conflict
-                        // with (same reasoning as the Applications loop's
-                        // `app_audio_sources.clone()` below).
-                        let device_rows: Vec<(String, String)> = self
-                            .audio_devices
-                            .iter()
-                            .map(|dev| {
-                                (
-                                    format!("{} {}", audio_device_icon(dev), dev.name),
-                                    dev.id.clone(),
-                                )
-                            })
-                            .collect();
-                        for (i, (label, dev_id)) in device_rows.into_iter().enumerate() {
-                            let was_checked = self.selected_audio[i];
-                            checkbox_with_volume_slider(
-                                ui,
-                                None,
-                                &mut self.config,
-                                &mut self.error_message,
-                                s.config_save_failed_prefix,
-                                &mut self.selected_audio[i],
-                                label,
-                                &dev_id,
-                                None,
-                            );
-                            // Persisted immediately on toggle so it survives
-                            // an app restart -- see
-                            // `actions::persist_selected_audio_devices`.
-                            if was_checked != self.selected_audio[i] {
-                                self.persist_selected_audio_devices(s);
-                            }
-                        }
+                        self.render_system_audio_rows(ui, s);
 
                         ui.add_space(8.0);
-                        section_header(ui, s.applications_header);
-                        if self.app_audio_sources.is_empty() {
-                            ui.label(caption(s.no_app_audio_sources, TEXT_MUTED));
-                        }
-                        // Iterated from a clone, not `self.app_audio_sources`
-                        // directly -- an uncheck below rebuilds that Vec
-                        // in-place via `rebuild_app_audio_sources_now`,
-                        // which a live borrow of it here would conflict
-                        // with.
-                        let app_audio_sources = self.app_audio_sources.clone();
-                        for (i, src) in app_audio_sources.iter().enumerate() {
-                            if let std::collections::hash_map::Entry::Vacant(entry) =
-                                self.app_audio_icon_textures.entry(i)
-                                && let Some((rgba, w, h)) = &src.icon_rgba
-                            {
-                                let image = egui::ColorImage::from_rgba_unmultiplied(
-                                    [*w as usize, *h as usize],
-                                    rgba,
-                                );
-                                let tex = ui.ctx().load_texture(
-                                    format!("app_audio_icon_{i}"),
-                                    image,
-                                    egui::TextureOptions::LINEAR,
-                                );
-                                entry.insert(tex);
-                            }
-                            let was_checked = self.selected_app_audio[i];
-                            checkbox_with_volume_slider(
-                                ui,
-                                self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
-                                &mut self.config,
-                                &mut self.error_message,
-                                s.config_save_failed_prefix,
-                                &mut self.selected_app_audio[i],
-                                src.display_name.clone(),
-                                &Config::app_audio_gain_key(&src.exe_name),
-                                Some(s.remove_registered_app_tooltip),
-                            );
-                            // Every entry here is already registered (see
-                            // `actions::build_app_audio_sources`) -- the
-                            // checkbox is the only pin/unpin control, no
-                            // separate remove button. Unchecking
-                            // immediately un-registers and drops the row,
-                            // whether or not the app is currently running
-                            // (there's no "checked but idle" state to fall
-                            // back to -- being in this list at all already
-                            // means "record this").
-                            if was_checked && !self.selected_app_audio[i] {
-                                self.config.unregister_app_audio(&src.exe_name);
-                                self.save_config_or_report(s);
-                                self.rebuild_app_audio_sources_now();
-                                break;
-                            }
-                        }
-                        // The Applications list is entirely opt-in via this
-                        // button -- unlike SYSTEM devices, it never shows an
-                        // app just because it's currently making sound (see
-                        // `actions::build_app_audio_sources`'s doc comment).
-                        // A fresh install shows nothing here but this button.
-                        if !self.add_app.open {
-                            if ui
-                                .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
-                                .clicked()
-                            {
-                                self.add_app.open = true;
-                                self.add_app.search.clear();
-                                // Cleared, not left stale, so a previous
-                                // open's results don't briefly show before
-                                // this scan's real results arrive.
-                                self.add_app.installed = Vec::new();
-                                let (tx, rx) = mpsc::channel();
-                                self.add_app.installed_rx = Some(rx);
-                                tokio::task::spawn_blocking(move || {
-                                    let apps = crate::sources::enumerate_installed_apps();
-                                    let _ = tx.send(apps);
-                                });
-                            }
-                        } else {
-                            self.render_add_app_picker(ui, s);
-                        }
+                        self.render_app_audio_rows(ui, s);
 
                         ui.add_space(8.0);
-                        let loopback_selected = self
-                            .audio_devices
-                            .iter()
-                            .zip(self.selected_audio.iter())
-                            .any(|(dev, &sel)| dev.is_loopback && sel);
-                        let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
-                        // A `Monitor` source has no owning process to scope
-                        // loopback to (see `session::start_capture`'s
-                        // `use_process_loopback` gate), so this only ever
-                        // does anything for a `Window` source.
-                        let selected_is_window = self
-                            .selected_source
-                            .and_then(|i| self.sources.get(i))
-                            .is_some_and(|src| src.kind == crate::types::CaptureKind::Window);
-                        ui.add_enabled_ui(loopback_selected && selected_is_window, |ui| {
-                            let response = ui
-                                .checkbox(
-                                    &mut self.app_audio_only,
-                                    egui::RichText::new(s.app_audio_only_label)
-                                        .color(ACCENT_SECONDARY),
-                                )
-                                .on_hover_text(if !has_loopback_device {
-                                    s.tooltip_no_loopback_device
-                                } else if !loopback_selected {
-                                    s.tooltip_check_loopback_first
-                                } else if !selected_is_window {
-                                    s.tooltip_app_audio_only_needs_window
-                                } else {
-                                    s.tooltip_app_audio_only
-                                });
-                            // Persisted as the default for next launch (and thus what a
-                            // hotkey-started recording uses) -- same pattern as overlay_enabled.
-                            if response.changed() {
-                                self.config.default_app_audio_only = self.app_audio_only;
-                                self.save_config_or_report(s);
-                            }
-                        });
+                        self.render_app_audio_only_toggle(ui, s);
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
@@ -235,6 +81,174 @@ impl App {
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_audio_popup = false;
         }
+    }
+
+    /// SYSTEM section: one checkbox + volume slider per audio device.
+    fn render_system_audio_rows(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        section_header(ui, s.system_audio_header);
+        if self.audio_devices.is_empty() {
+            ui.label(caption(s.no_audio_devices, TEXT_MUTED));
+        }
+        // Iterated from cloned (label, id) pairs, not
+        // `self.audio_devices` directly -- persisting a
+        // toggle below needs `&mut self`, which a live
+        // borrow of `self.audio_devices` here would conflict
+        // with (same reasoning as the Applications loop's
+        // `app_audio_sources.clone()` below).
+        let device_rows: Vec<(String, String)> = self
+            .audio_devices
+            .iter()
+            .map(|dev| {
+                (
+                    format!("{} {}", audio_device_icon(dev), dev.name),
+                    dev.id.clone(),
+                )
+            })
+            .collect();
+        for (i, (label, dev_id)) in device_rows.into_iter().enumerate() {
+            let was_checked = self.selected_audio[i];
+            checkbox_with_volume_slider(
+                ui,
+                None,
+                &mut self.config,
+                &mut self.error_message,
+                s.config_save_failed_prefix,
+                &mut self.selected_audio[i],
+                label,
+                &dev_id,
+                None,
+            );
+            // Persisted immediately on toggle so it survives
+            // an app restart -- see
+            // `actions::persist_selected_audio_devices`.
+            if was_checked != self.selected_audio[i] {
+                self.persist_selected_audio_devices(s);
+            }
+        }
+    }
+
+    /// APPLICATIONS section: one row per registered app, then the
+    /// "+ Add app" button or, once clicked, the picker.
+    fn render_app_audio_rows(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        section_header(ui, s.applications_header);
+        if self.app_audio_sources.is_empty() {
+            ui.label(caption(s.no_app_audio_sources, TEXT_MUTED));
+        }
+        // Iterated from a clone, not `self.app_audio_sources`
+        // directly -- an uncheck below rebuilds that Vec
+        // in-place via `rebuild_app_audio_sources_now`,
+        // which a live borrow of it here would conflict
+        // with.
+        let app_audio_sources = self.app_audio_sources.clone();
+        for (i, src) in app_audio_sources.iter().enumerate() {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.app_audio_icon_textures.entry(i)
+                && let Some((rgba, w, h)) = &src.icon_rgba
+            {
+                let image =
+                    egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+                let tex = ui.ctx().load_texture(
+                    format!("app_audio_icon_{i}"),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                entry.insert(tex);
+            }
+            let was_checked = self.selected_app_audio[i];
+            checkbox_with_volume_slider(
+                ui,
+                self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
+                &mut self.config,
+                &mut self.error_message,
+                s.config_save_failed_prefix,
+                &mut self.selected_app_audio[i],
+                src.display_name.clone(),
+                &Config::app_audio_gain_key(&src.exe_name),
+                Some(s.remove_registered_app_tooltip),
+            );
+            // Every entry here is already registered (see
+            // `actions::build_app_audio_sources`) -- the
+            // checkbox is the only pin/unpin control, no
+            // separate remove button. Unchecking
+            // immediately un-registers and drops the row,
+            // whether or not the app is currently running
+            // (there's no "checked but idle" state to fall
+            // back to -- being in this list at all already
+            // means "record this").
+            if was_checked && !self.selected_app_audio[i] {
+                self.config.unregister_app_audio(&src.exe_name);
+                self.save_config_or_report(s);
+                self.rebuild_app_audio_sources_now();
+                break;
+            }
+        }
+        // The Applications list is entirely opt-in via this
+        // button -- unlike SYSTEM devices, it never shows an
+        // app just because it's currently making sound (see
+        // `actions::build_app_audio_sources`'s doc comment).
+        // A fresh install shows nothing here but this button.
+        if !self.add_app.open {
+            if ui
+                .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
+                .clicked()
+            {
+                self.add_app.open = true;
+                self.add_app.search.clear();
+                // Cleared, not left stale, so a previous
+                // open's results don't briefly show before
+                // this scan's real results arrive.
+                self.add_app.installed = Vec::new();
+                let (tx, rx) = mpsc::channel();
+                self.add_app.installed_rx = Some(rx);
+                tokio::task::spawn_blocking(move || {
+                    let apps = crate::sources::enumerate_installed_apps();
+                    let _ = tx.send(apps);
+                });
+            }
+        } else {
+            self.render_add_app_picker(ui, s);
+        }
+    }
+
+    /// The "App audio only" checkbox -- only meaningful with a loopback
+    /// device selected and a window (not a monitor) as the source.
+    fn render_app_audio_only_toggle(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        let loopback_selected = self
+            .audio_devices
+            .iter()
+            .zip(self.selected_audio.iter())
+            .any(|(dev, &sel)| dev.is_loopback && sel);
+        let has_loopback_device = self.audio_devices.iter().any(|d| d.is_loopback);
+        // A `Monitor` source has no owning process to scope
+        // loopback to (see `session::start_capture`'s
+        // `use_process_loopback` gate), so this only ever
+        // does anything for a `Window` source.
+        let selected_is_window = self
+            .selected_source
+            .and_then(|i| self.sources.get(i))
+            .is_some_and(|src| src.kind == crate::types::CaptureKind::Window);
+        ui.add_enabled_ui(loopback_selected && selected_is_window, |ui| {
+            let response = ui
+                .checkbox(
+                    &mut self.app_audio_only,
+                    egui::RichText::new(s.app_audio_only_label).color(ACCENT_SECONDARY),
+                )
+                .on_hover_text(if !has_loopback_device {
+                    s.tooltip_no_loopback_device
+                } else if !loopback_selected {
+                    s.tooltip_check_loopback_first
+                } else if !selected_is_window {
+                    s.tooltip_app_audio_only_needs_window
+                } else {
+                    s.tooltip_app_audio_only
+                });
+            // Persisted as the default for next launch (and thus what a
+            // hotkey-started recording uses) -- same pattern as overlay_enabled.
+            if response.changed() {
+                self.config.default_app_audio_only = self.app_audio_only;
+                self.save_config_or_report(s);
+            }
+        });
     }
 
     /// Inline search-and-pick panel shown in place of the "+ Add app"
@@ -258,13 +272,67 @@ impl App {
         );
         ui.add_space(4.0);
 
+        let filter = self.add_app.search.to_lowercase();
+        let candidates = self.add_app_candidates(&filter);
+
+        // Shown even once open-window candidates are already visible above
+        // -- distinct from "no matches", it's telling the user more
+        // (installed-only) results may still be on the way.
+        if self.add_app.installed_rx.is_some() {
+            ui.label(caption(s.add_app_scanning, TEXT_MUTED));
+        }
+        if candidates.is_empty() && self.add_app.installed_rx.is_none() {
+            let msg = if filter.is_empty() {
+                s.add_app_none_running
+            } else {
+                s.add_app_no_matches
+            };
+            ui.label(caption(msg, TEXT_MUTED));
+        }
+        let picked = self.render_add_app_candidate_list(ui, s, &candidates);
+        if let Some((exe_name, source)) = picked {
+            let exe_path = match source {
+                AddAppSource::OpenWindow(pid) => {
+                    crate::sources::get_exe_path(pid).unwrap_or_default()
+                }
+                AddAppSource::Installed(path) => path,
+            };
+            self.register_app_and_close_picker(exe_name, exe_path, s);
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button(s.add_app_browse_button).clicked()
+                && let Some(path) = FileDialog::new()
+                    .add_filter("Executable", &["exe"])
+                    .pick_file()
+                && let Some(exe_name) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            {
+                self.register_app_and_close_picker(
+                    exe_name,
+                    path.to_string_lossy().into_owned(),
+                    s,
+                );
+            }
+            if ui.button(s.close_button).clicked() {
+                self.add_app.open = false;
+            }
+        });
+    }
+
+    /// The picker's search results for `filter` (already lowercased):
+    /// open windows first, then installed apps, one row per exe, minus
+    /// anything already registered, sorted by name.
+    fn add_app_candidates(&self, filter: &str) -> Vec<AddAppCandidate> {
         let registered: std::collections::HashSet<String> = self
             .config
             .registered_app_audio
             .iter()
             .map(|r| r.exe_name.clone())
             .collect();
-        let filter = self.add_app.search.to_lowercase();
         let mut seen_exe_names = std::collections::HashSet::new();
         let mut candidates: Vec<AddAppCandidate> = Vec::new();
         for src in self
@@ -276,8 +344,8 @@ impl App {
                 continue;
             }
             if !(filter.is_empty()
-                || src.window_title.to_lowercase().contains(&filter)
-                || src.exe_name.to_lowercase().contains(&filter))
+                || src.window_title.to_lowercase().contains(filter)
+                || src.exe_name.to_lowercase().contains(filter))
             {
                 continue;
             }
@@ -299,8 +367,8 @@ impl App {
                 continue;
             }
             if !(filter.is_empty()
-                || app.display_name.to_lowercase().contains(&filter)
-                || app.exe_name.to_lowercase().contains(&filter))
+                || app.display_name.to_lowercase().contains(filter)
+                || app.exe_name.to_lowercase().contains(filter))
             {
                 continue;
             }
@@ -315,27 +383,22 @@ impl App {
             });
         }
         candidates.sort_by_key(|c| c.display_name.to_lowercase());
+        candidates
+    }
 
-        // Shown even once open-window candidates are already visible above
-        // -- distinct from "no matches", it's telling the user more
-        // (installed-only) results may still be on the way.
-        if self.add_app.installed_rx.is_some() {
-            ui.label(caption(s.add_app_scanning, TEXT_MUTED));
-        }
-        if candidates.is_empty() && self.add_app.installed_rx.is_none() {
-            let msg = if filter.is_empty() {
-                s.add_app_none_running
-            } else {
-                s.add_app_no_matches
-            };
-            ui.label(caption(msg, TEXT_MUTED));
-        }
+    /// The scrollable candidate rows; returns the one clicked this frame.
+    fn render_add_app_candidate_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &'static Strings,
+        candidates: &[AddAppCandidate],
+    ) -> Option<(String, AddAppSource)> {
         let mut picked: Option<(String, AddAppSource)> = None;
         egui::ScrollArea::vertical()
             .max_height(220.0)
             .id_salt("add_app_picker_scroll")
             .show(ui, |ui| {
-                for candidate in &candidates {
+                for candidate in candidates {
                     if let std::collections::hash_map::Entry::Vacant(entry) = self
                         .add_app
                         .icon_textures
@@ -381,37 +444,7 @@ impl App {
                     });
                 }
             });
-        if let Some((exe_name, source)) = picked {
-            let exe_path = match source {
-                AddAppSource::OpenWindow(pid) => {
-                    crate::sources::get_exe_path(pid).unwrap_or_default()
-                }
-                AddAppSource::Installed(path) => path,
-            };
-            self.register_app_and_close_picker(exe_name, exe_path, s);
-        }
-
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui.button(s.add_app_browse_button).clicked()
-                && let Some(path) = FileDialog::new()
-                    .add_filter("Executable", &["exe"])
-                    .pick_file()
-                && let Some(exe_name) = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-            {
-                self.register_app_and_close_picker(
-                    exe_name,
-                    path.to_string_lossy().into_owned(),
-                    s,
-                );
-            }
-            if ui.button(s.close_button).clicked() {
-                self.add_app.open = false;
-            }
-        });
+        picked
     }
 
     /// Pins `exe_name`/`exe_path`, rebuilds the Applications list to reflect

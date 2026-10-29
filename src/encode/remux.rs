@@ -391,6 +391,68 @@ unsafe fn decode_track_to_pcm(
     }
 }
 
+/// A group of 1 (or 0) index needs no decode/mix -- passthrough-copy it
+/// exactly like `remux` does. Only groups of 2+ need the PCM decode-and-sum
+/// treatment. Returns (passthrough track indices, merge groups), each in
+/// `groups` order.
+fn split_export_groups(groups: &[Vec<usize>]) -> (Vec<usize>, Vec<&Vec<usize>>) {
+    let mut passthrough_indices: Vec<usize> = Vec::new();
+    let mut merge_groups: Vec<&Vec<usize>> = Vec::new();
+    for g in groups {
+        if g.len() <= 1 {
+            passthrough_indices.extend(g.iter().copied());
+        } else {
+            merge_groups.push(g);
+        }
+    }
+    (passthrough_indices, merge_groups)
+}
+
+/// Decode + sum each merge group independently -- a group that turns out
+/// entirely empty (e.g. every process in it was silent the whole recording)
+/// is dropped rather than becoming a zero-length audio stream.
+unsafe fn decode_and_merge_groups(
+    input_url: &HSTRING,
+    layout: &StreamLayout,
+    merge_groups: &[&Vec<usize>],
+    mix_rate: u32,
+    mix_channels: usize,
+) -> Result<Vec<Vec<i16>>, AppError> {
+    let mut merged_pcms: Vec<Vec<i16>> = Vec::new();
+    for group in merge_groups {
+        let mut decoded: Vec<(usize, Vec<i16>)> = Vec::new();
+        for &idx in group.iter() {
+            decoded.push(unsafe {
+                decode_track_to_pcm(input_url, layout, idx, mix_rate, mix_channels)?
+            });
+        }
+        let mixed = sum_and_normalize(&decoded, mix_channels);
+        if !mixed.is_empty() {
+            merged_pcms.push(mixed);
+        }
+    }
+    Ok(merged_pcms)
+}
+
+/// A sink writer with `MF_SINK_WRITER_DISABLE_THROTTLING` (see the comment
+/// at `do_export_grouped`'s call site) and hardware transforms enabled.
+unsafe fn create_unthrottled_sink_writer(output_url: &HSTRING) -> Result<IMFSinkWriter, AppError> {
+    unsafe {
+        let mut attrs_opt: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs_opt, 2).encode_ctx("MFCreateAttributes")?;
+        let attrs =
+            attrs_opt.ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
+        attrs
+            .SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)
+            .encode_ctx("SetUINT32 disable_throttling")?;
+        attrs
+            .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
+            .encode_ctx("SetUINT32 hw_transforms")?;
+        MFCreateSinkWriterFromURL(output_url, None, Some(&attrs))
+            .encode_ctx("MFCreateSinkWriterFromURL")
+    }
+}
+
 unsafe fn do_export_grouped(
     input: &Path,
     output: &Path,
@@ -410,40 +472,9 @@ unsafe fn do_export_grouped(
         let mix_rate = TARGET_SAMPLE_RATE;
         let mix_channels = TARGET_CHANNELS as usize;
 
-        // A group of 1 (or 0) index needs no decode/mix -- passthrough-copy
-        // it exactly like `remux` does. Only groups of 2+ need the PCM
-        // decode-and-sum treatment.
-        let mut passthrough_indices: Vec<usize> = Vec::new();
-        let mut merge_groups: Vec<&Vec<usize>> = Vec::new();
-        for g in groups {
-            if g.len() <= 1 {
-                passthrough_indices.extend(g.iter().copied());
-            } else {
-                merge_groups.push(g);
-            }
-        }
-
-        // Decode + sum each merge group independently -- a group that
-        // turns out entirely empty (e.g. every process in it was silent
-        // the whole recording) is dropped rather than becoming a
-        // zero-length audio stream.
-        let mut merged_pcms: Vec<Vec<i16>> = Vec::new();
-        for group in &merge_groups {
-            let mut decoded: Vec<(usize, Vec<i16>)> = Vec::new();
-            for &idx in group.iter() {
-                decoded.push(decode_track_to_pcm(
-                    &input_url,
-                    &layout,
-                    idx,
-                    mix_rate,
-                    mix_channels,
-                )?);
-            }
-            let mixed = sum_and_normalize(&decoded, mix_channels);
-            if !mixed.is_empty() {
-                merged_pcms.push(mixed);
-            }
-        }
+        let (passthrough_indices, merge_groups) = split_export_groups(groups);
+        let merged_pcms =
+            decode_and_merge_groups(&input_url, &layout, &merge_groups, mix_rate, mix_channels)?;
 
         if passthrough_indices.is_empty() && merged_pcms.is_empty() {
             return do_remux(input, output, &[]);
@@ -465,18 +496,7 @@ unsafe fn do_export_grouped(
         // decode + mix finished in 1.3s, then the write loop alone ran past
         // a minute with ~0s of CPU time consumed in that window -- sleeping,
         // not computing). Disabling it here writes as fast as the CPU can go.
-        let mut attrs_opt: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs_opt, 2).encode_ctx("MFCreateAttributes")?;
-        let attrs =
-            attrs_opt.ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
-        attrs
-            .SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)
-            .encode_ctx("SetUINT32 disable_throttling")?;
-        attrs
-            .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
-            .encode_ctx("SetUINT32 hw_transforms")?;
-        let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, Some(&attrs))
-            .encode_ctx("MFCreateSinkWriterFromURL")?;
+        let writer = create_unthrottled_sink_writer(&output_url)?;
 
         let video_sink = writer
             .AddStream(&video_type)
@@ -1042,5 +1062,13 @@ mod tests {
             assert!(matches!(result, Err(AppError::Encode(msg)) if msg == "stop"));
             assert_eq!(calls, 1);
         }
+    }
+
+    #[test]
+    fn split_export_groups_passes_singletons_through_and_merges_the_rest() {
+        let groups = vec![vec![0], vec![1, 2], vec![], vec![3], vec![4, 5, 6]];
+        let (passthrough, merge) = split_export_groups(&groups);
+        assert_eq!(passthrough, vec![0, 3]);
+        assert_eq!(merge, vec![&vec![1, 2], &vec![4, 5, 6]]);
     }
 }

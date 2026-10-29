@@ -8,6 +8,25 @@ use crate::i18n::Strings;
 use eframe::egui;
 
 impl App {
+    /// Indices into `self.sources` whose title or exe name contains the
+    /// search box's text (case-insensitive) -- real, unfiltered indices,
+    /// since `source_icon_textures` and `selected_source` are keyed by them.
+    fn filtered_source_indices(&self) -> Vec<usize> {
+        let filter = self.source_filter.to_lowercase();
+        let filtered_indices: Vec<usize> = self
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, src)| {
+                filter.is_empty()
+                    || src.window_title.to_lowercase().contains(&filter)
+                    || src.exe_name.to_lowercase().contains(&filter)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        filtered_indices
+    }
+
     pub(super) fn render_source_panel(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         egui::Panel::left("source_panel")
             .default_size(260.0)
@@ -29,18 +48,7 @@ impl App {
                 // Filters by index rather than cloning matches -- source_icon_textures
                 // and selected_source are both keyed by index into self.sources, so
                 // the real (unfiltered) indices need to survive filtering.
-                let filter = self.source_filter.to_lowercase();
-                let filtered_indices: Vec<usize> = self
-                    .sources
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, src)| {
-                        filter.is_empty()
-                            || src.window_title.to_lowercase().contains(&filter)
-                            || src.exe_name.to_lowercase().contains(&filter)
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
+                let filtered_indices = self.filtered_source_indices();
                 if !self.sources.is_empty() && filtered_indices.is_empty() {
                     ui.label(caption(s.no_matching_windows, TEXT_MUTED));
                 }
