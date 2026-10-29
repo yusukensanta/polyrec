@@ -1,20 +1,21 @@
 use crate::types::{CaptureKind, CaptureSource};
 use std::os::windows::ffi::OsStrExt;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, EnumDisplayMonitors, GetDC,
     GetDIBits, GetMonitorInfoW, GetObjectW, HDC, HMONITOR, MONITORINFO, ReleaseDC,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
-use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGetFileInfoW};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetIconInfo, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
     ICONINFO, IsWindowVisible, MONITORINFOF_PRIMARY,
 };
-use windows::core::PCWSTR;
 use windows::core::{BOOL, Owned};
+use windows::core::{PCWSTR, PWSTR};
 
 /// Displays first, then windows -- a monitor is the "record everything"
 /// fallback a user reaches for before narrowing down to a specific window,
@@ -154,27 +155,34 @@ pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
 /// source's exe name/icon are resolved from its window's process id here.
 pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
     unsafe {
-        let handle =
-            Owned::new(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?);
+        // PROCESS_QUERY_LIMITED_INFORMATION is all QueryFullProcessImageNameW
+        // needs. Windows' integrity-level and protected-process rules still
+        // grant it for elevated and protected processes (where their DACL
+        // allows the caller at all) -- unlike the PROCESS_QUERY_INFORMATION |
+        // PROCESS_VM_READ that GetModuleFileNameExW needed, which those rules
+        // deny for exactly the processes this app most wants to name (games
+        // under anti-cheat, elevated launchers), leaving them "Unknown" with
+        // no icon.
+        let handle = Owned::new(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?);
         // Starts at MAX_PATH (the common case) and doubles up to Windows'
-        // long-path limit if the return value suggests truncation --
-        // GetModuleFileNameExW returns the buffer length (not a distinct
-        // overflow signal) when the real path is >= the buffer, which is
-        // indistinguishable from a real path of exactly that length
-        // otherwise. Without this, an exe under a long node_modules-style or
-        // deeply-nested OneDrive path silently truncates, showing as
-        // "Unknown" with no icon instead of its real name.
-        let mut buf_len: usize = 260;
+        // long-path limit on ERROR_INSUFFICIENT_BUFFER, so an exe under a
+        // long node_modules-style or deeply-nested OneDrive path isn't lost.
+        let mut buf_len: u32 = 260;
         loop {
-            let mut buf = vec![0u16; buf_len];
-            let len = GetModuleFileNameExW(Some(*handle), None, &mut buf);
-            if len == 0 {
-                return None;
+            let mut buf = vec![0u16; buf_len as usize];
+            let mut len = buf_len;
+            match QueryFullProcessImageNameW(
+                *handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            ) {
+                Ok(()) => return Some(String::from_utf16_lossy(&buf[..len as usize])),
+                Err(e) if e.code() == ERROR_INSUFFICIENT_BUFFER.to_hresult() && buf_len < 32768 => {
+                    buf_len *= 2;
+                }
+                Err(_) => return None,
             }
-            if (len as usize) < buf_len || buf_len >= 32768 {
-                return Some(String::from_utf16_lossy(&buf[..len as usize]));
-            }
-            buf_len *= 2;
         }
     }
 }
@@ -578,6 +586,65 @@ pub(crate) fn resolve_possibly_stale_exe_path(exe_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The previous implementation needed PROCESS_QUERY_INFORMATION |
+    /// PROCESS_VM_READ (for GetModuleFileNameExW). Integrity-level and
+    /// protected-process rules deny VM_READ far more often than
+    /// QUERY_LIMITED_INFORMATION, so every process that old access level
+    /// could open must still resolve now -- on a real desktop the new path
+    /// additionally names elevated/protected ones (Taskmgr.exe, audiodg.exe,
+    /// ...) the old one couldn't.
+    #[test]
+    fn get_exe_path_resolves_every_process_the_old_access_level_could_open() {
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+
+        let mut checked = 0;
+        unsafe {
+            let snapshot = Owned::new(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).unwrap());
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            Process32FirstW(*snapshot, &mut entry).unwrap();
+            loop {
+                let pid = entry.th32ProcessID;
+                let old_access_ok =
+                    OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
+                        .map(|h| Owned::new(h))
+                        .is_ok();
+                // A process can exit between the two calls -- only a pid
+                // that's still around afterwards counts as a regression.
+                if old_access_ok && get_exe_path(pid).is_none() {
+                    let still_running = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                        .map(|h| Owned::new(h))
+                        .is_ok();
+                    assert!(!still_running, "get_exe_path lost pid {pid}");
+                }
+                checked += old_access_ok as u32;
+                if Process32NextW(*snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "expected at least this test process to be openable"
+        );
+    }
+
+    #[test]
+    fn get_exe_path_resolves_this_process() {
+        let path = get_exe_path(std::process::id()).expect("get_exe_path failed for self");
+        let expected = std::env::current_exe().unwrap();
+        assert_eq!(
+            std::path::Path::new(&path).file_name(),
+            expected.file_name()
+        );
+    }
 
     // Ignored: assumes a real desktop with actual installed apps and a
     // populated Start Menu, which GitHub's hosted windows-latest CI runner
