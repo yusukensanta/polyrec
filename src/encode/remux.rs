@@ -1,4 +1,5 @@
 use crate::capture::audio::{TARGET_CHANNELS, TARGET_SAMPLE_RATE};
+use crate::encode::mf::MfSession;
 use crate::encode::writer::{make_audio_input_type, make_audio_output_type, make_sample};
 use crate::error::AppError;
 use std::collections::{HashMap, HashSet};
@@ -7,12 +8,10 @@ use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
     MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
-    MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType, MFCreateSinkWriterFromURL,
-    MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown,
-    MFStartup,
+    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READERF_ENDOFSTREAM, MFAudioFormat_PCM,
+    MFCreateAttributes, MFCreateMediaType, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL,
+    MFMediaType_Audio, MFMediaType_Video,
 };
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::core::HSTRING;
 
 /// Media Foundation's sink writer does not guarantee output track order matches
@@ -163,14 +162,8 @@ pub fn remux(
     output: &Path,
     audio_track_indices: &[usize],
 ) -> Result<PathBuf, AppError> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        MFStartup(MF_VERSION, MFSTARTUP_FULL)
-            .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
-        let result = do_remux(input, output, audio_track_indices);
-        let _ = MFShutdown();
-        result
-    }
+    let _mf = MfSession::start_mta()?;
+    unsafe { do_remux(input, output, audio_track_indices) }
 }
 
 /// How many audio streams a finished recording actually contains -- read
@@ -181,21 +174,15 @@ pub fn remux(
 /// track-selection checkboxes and to decide whether exporting is even
 /// meaningful (nothing to select between with fewer than two tracks).
 pub fn count_audio_tracks(path: &Path) -> Result<usize, AppError> {
+    let _mf = MfSession::start_mta()?;
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        MFStartup(MF_VERSION, MFSTARTUP_FULL)
-            .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
-        let result = (|| {
-            let url = HSTRING::from(
-                path.to_str()
-                    .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
-            );
-            let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None)
-                .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL: {e}")))?;
-            Ok(discover_stream_layout(&reader)?.audio.len())
-        })();
-        let _ = MFShutdown();
-        result
+        let url = HSTRING::from(
+            path.to_str()
+                .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
+        );
+        let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None)
+            .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL: {e}")))?;
+        Ok(discover_stream_layout(&reader)?.audio.len())
     }
 }
 
@@ -236,14 +223,8 @@ pub fn export_grouped(
         let flat: Vec<usize> = groups.iter().flatten().copied().collect();
         return remux(input, output, &flat);
     }
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        MFStartup(MF_VERSION, MFSTARTUP_FULL)
-            .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
-        let result = do_export_grouped(input, output, groups);
-        let _ = MFShutdown();
-        result
-    }
+    let _mf = MfSession::start_mta()?;
+    unsafe { do_export_grouped(input, output, groups) }
 }
 
 /// Sums `tracks` (each `(frame_offset, interleaved_samples)`, aligned by

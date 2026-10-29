@@ -28,10 +28,9 @@ fn main() -> eframe::Result<()> {
         .expect("tokio runtime");
     let _rt_guard = rt.enter();
 
-    unsafe {
-        use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFStartup};
-        MFStartup(MF_VERSION, MFSTARTUP_FULL).expect("MFStartup failed — requires Windows 7+");
-    }
+    // Held for the whole run so Media Foundation stays started between the
+    // per-recording/per-export sessions the rest of the app opens and closes.
+    let _mf = encode::mf::MfSession::start().expect("MFStartup failed — requires Windows 7+");
 
     let config = config::Config::load().unwrap_or_else(|e| {
         // load() only errors when config.toml exists but fails to parse (a
@@ -74,16 +73,9 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    let result = eframe::run_native(
+    eframe::run_native(
         "PolyRec",
         native_options,
         Box::new(|cc| Ok(Box::new(ui::App::new(cc, config)))),
-    );
-
-    unsafe {
-        use windows::Win32::Media::MediaFoundation::MFShutdown;
-        let _ = MFShutdown();
-    }
-
-    result
+    )
 }

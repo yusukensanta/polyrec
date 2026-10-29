@@ -1,3 +1,4 @@
+use crate::encode::mf::MfSession;
 use crate::error::AppError;
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::{Path, PathBuf};
@@ -5,11 +6,10 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
     MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFAudioFormat_AAC,
-    MFAudioFormat_PCM, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown,
-    MFStartup, MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoInterlace_Progressive,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFAudioFormat_AAC, MFAudioFormat_PCM,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
+    MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_ARGB32, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
 };
 use windows::core::GUID;
 use windows::core::HSTRING;
@@ -34,6 +34,9 @@ pub struct RecordingWriter {
     audio_streams: Vec<u32>,
     output_path: PathBuf,
     fps: u32,
+    /// Declared last so it drops last -- `writer` must be released before
+    /// Media Foundation shuts down (see `MfSession`).
+    _mf: MfSession,
 }
 
 impl RecordingWriter {
@@ -48,10 +51,8 @@ impl RecordingWriter {
         audio_tracks: &[(u32, u16)],
         allow_hardware_encode: bool,
     ) -> Result<Self, AppError> {
+        let mf = MfSession::start()?;
         unsafe {
-            MFStartup(MF_VERSION, MFSTARTUP_FULL)
-                .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
-
             let path_str = output_path
                 .to_str()
                 .ok_or_else(|| AppError::Encode("output path is not valid UTF-8".into()))?;
@@ -130,6 +131,7 @@ impl RecordingWriter {
                 audio_streams,
                 output_path: output_path.to_path_buf(),
                 fps,
+                _mf: mf,
             })
         }
     }
@@ -193,7 +195,6 @@ impl RecordingWriter {
             self.writer
                 .Finalize()
                 .map_err(|e| AppError::Encode(format!("Finalize: {e}")))?;
-            MFShutdown().map_err(|e| AppError::Encode(format!("MFShutdown: {e}")))?;
         }
         Ok(self.output_path)
     }
