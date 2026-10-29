@@ -1,8 +1,6 @@
 use super::App;
-use super::theme::{
-    ACCENT_PAUSE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
-};
-use super::widgets::{accent_button, section_header};
+use super::theme::{ACCENT_PAUSE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_MUTED, TEXT_PRIMARY};
+use super::widgets::{accent_button, caption, section_header};
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -166,20 +164,12 @@ impl App {
                             .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
                         if has_collision {
                             ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new(s.hotkey_collision_warning)
-                                    .size(TEXT_CAPTION)
-                                    .color(ACCENT_PAUSE),
-                            );
+                            ui.label(caption(s.hotkey_collision_warning, ACCENT_PAUSE));
                         }
 
                         if let Some(warning) = &self.hotkey_capture_warning {
                             ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new(warning)
-                                    .size(TEXT_CAPTION)
-                                    .color(ACCENT_PAUSE),
-                            );
+                            ui.label(caption(warning, ACCENT_PAUSE));
                         }
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
@@ -243,11 +233,7 @@ impl App {
                         .color(ACCENT_SECONDARY)
                         .strong(),
                 );
-                ui.label(
-                    egui::RichText::new(s.hotkey_press_esc_to_cancel)
-                        .size(TEXT_CAPTION)
-                        .color(TEXT_MUTED),
-                );
+                ui.label(caption(s.hotkey_press_esc_to_cancel, TEXT_MUTED));
             });
         } else {
             ui.label(egui::RichText::new(&current).strong().color(TEXT_PRIMARY));

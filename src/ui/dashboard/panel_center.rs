@@ -3,10 +3,12 @@ use super::state::{ExportState, HighlightSaveState};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_STOP, BG_FAINT,
     BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY,
-    TEXT_BUTTON, TEXT_CAPTION, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
 };
 use super::util::open_folder;
-use super::widgets::{accent_button, centered_action_row, format_bytes_free, section_header};
+use super::widgets::{
+    accent_button, caption, centered_action_row, format_bytes_free, section_header,
+};
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
 use crate::types::SessionState;
@@ -31,389 +33,376 @@ impl App {
             ui.set_max_width(440.0);
             section_header(ui, s.status_header);
 
-            let is_paused = self.session.is_paused();
-            if is_recording || is_paused {
-                let elapsed = self
-                    .session
-                    .active()
-                    .map(|a| a.elapsed())
-                    .unwrap_or_default();
-                let secs = elapsed.as_secs();
-
-                // Pulsing dot — alpha oscillates 56%–100% (never fully off)
-                let t = ui.ctx().input(|i| i.time) as f32;
-                let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
-                let dot_col = egui::Color32::from_rgba_unmultiplied(
-                    ACCENT_REC.r(),
-                    ACCENT_REC.g(),
-                    ACCENT_REC.b(),
-                    (alpha * 255.0) as u8,
-                );
-                ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 5.0, dot_col);
-                    let state_label = if is_paused {
-                        s.state_paused
-                    } else {
-                        s.state_recording
-                    };
-                    // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
-                    // which previously computed to 4.18:1 contrast on BG_BASE (fails
-                    // WCAG AA's 4.5:1 minimum for normal text). ACCENT_REC is 5.54:1.
-                    let state_color = if is_paused { ACCENT_PAUSE } else { ACCENT_REC };
-                    ui.label(
-                        egui::RichText::new(state_label)
-                            .size(TEXT_CAPTION)
-                            .color(state_color)
-                            .strong(),
-                    );
-                });
-
-                ui.add_space(8.0);
-
-                // Large monospace timer
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{:02}:{:02}:{:02}",
-                        secs / 3600,
-                        (secs % 3600) / 60,
-                        secs % 60,
-                    ))
-                    .font(egui::FontId::monospace(TEXT_DISPLAY))
-                    .color(TEXT_PRIMARY),
-                );
-
-                ui.add_space(4.0);
-
-                // Stats row
-                let track_count = self.selected_audio.iter().filter(|&&b| b).count()
-                    + self.selected_app_audio.iter().filter(|&&b| b).count();
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{track_count} {}", s.tracks_word))
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                    ui.label(
-                        egui::RichText::new("  ·  ")
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("{frames} {}", s.frames_word))
-                            .size(TEXT_CAPTION)
-                            .color(TEXT_MUTED),
-                    );
-                });
-
-                if let Some(active) = self.session.active() {
-                    let naming = active.naming.clone();
-                    let app_name = active.app_name.clone();
-                    let output_dir = active.output_dir.clone();
-                    // Recomputed only on a new elapsed second, not every
-                    // frame -- see `displayed_recording_name`'s doc comment.
-                    if self.displayed_recording_name.as_ref().map(|(s, _)| *s) != Some(secs) {
-                        let stem = crate::recording_naming::resolve_finished_recording_stem(
-                            &naming,
-                            &app_name,
-                            &output_dir,
-                        );
-                        self.displayed_recording_name = Some((secs, format!("{stem}.mp4")));
-                    }
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(
-                            self.displayed_recording_name
-                                .as_ref()
-                                .map(|(_, name)| name.as_str())
-                                .unwrap_or("recording.mp4"),
-                        )
-                        .size(TEXT_CAPTION)
-                        .color(TEXT_MUTED),
-                    );
-                }
-            } else if self.finalizing.handle.is_some() {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(s.saving_recording)
-                        .size(TEXT_BODY)
-                        .color(TEXT_MUTED),
-                );
-            } else if let Some(path) = self.last_output_path.clone() {
-                self.render_export_controls(ui, s, &path);
-            } else {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(s.select_source_prompt)
-                        .size(TEXT_BODY)
-                        .color(TEXT_MUTED),
-                );
-            }
+            self.render_status(ui, s, is_recording, frames);
 
             ui.add_space(16.0);
             section_header(ui, s.output_header);
 
-            ui.horizontal(|ui| {
-                if ui
-                    .add(accent_button(s.quality_button, ACCENT_SECONDARY))
-                    .on_hover_text(s.quality_tooltip)
-                    .clicked()
-                {
-                    self.show_quality_popup = true;
-                }
-                if ui
-                    .add(accent_button(s.hotkeys_button, ACCENT_SECONDARY))
-                    .on_hover_text(s.hotkeys_tooltip)
-                    .clicked()
-                {
-                    self.show_hotkeys_popup = true;
-                }
-                if ui
-                    .add(accent_button(s.audio_button, ACCENT_SECONDARY))
-                    .on_hover_text(s.audio_tooltip)
-                    .clicked()
-                {
-                    self.show_audio_popup = true;
-                }
-            });
-            // Current audio selection at a glance, since it now lives behind
-            // the Audio button rather than always-visible in the source
-            // panel -- without this, checking what's selected would mean
-            // opening the popup every time.
-            let audio_selected_count = self.selected_audio.iter().filter(|&&b| b).count()
-                + self.selected_app_audio.iter().filter(|&&b| b).count();
-            ui.label(
-                egui::RichText::new(if audio_selected_count == 0 {
-                    s.no_audio_selected.to_string()
-                } else {
-                    format!("{audio_selected_count} {}", s.audio_sources_word)
-                })
-                .size(TEXT_CAPTION)
-                .color(TEXT_MUTED),
+            self.render_output_settings(ui, s);
+            self.render_status_box(ui, s);
+            self.render_action_row(ui, s, is_recording);
+        });
+    }
+
+    /// The Status section's body: live timer/stats while recording or
+    /// paused, "saving" while finalizing, export controls once a
+    /// recording finished, otherwise the select-a-source prompt.
+    fn render_status(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &'static Strings,
+        is_recording: bool,
+        frames: u64,
+    ) {
+        let is_paused = self.session.is_paused();
+        if is_recording || is_paused {
+            let elapsed = self
+                .session
+                .active()
+                .map(|a| a.elapsed())
+                .unwrap_or_default();
+            let secs = elapsed.as_secs();
+
+            // Pulsing dot — alpha oscillates 56%–100% (never fully off)
+            let t = ui.ctx().input(|i| i.time) as f32;
+            let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
+            let dot_col = egui::Color32::from_rgba_unmultiplied(
+                ACCENT_REC.r(),
+                ACCENT_REC.g(),
+                ACCENT_REC.b(),
+                (alpha * 255.0) as u8,
             );
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 5.0, dot_col);
+                let state_label = if is_paused {
+                    s.state_paused
+                } else {
+                    s.state_recording
+                };
+                // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
+                // which previously computed to 4.18:1 contrast on BG_BASE (fails
+                // WCAG AA's 4.5:1 minimum for normal text). ACCENT_REC is 5.54:1.
+                let state_color = if is_paused { ACCENT_PAUSE } else { ACCENT_REC };
+                ui.label(caption(state_label, state_color).strong());
+            });
+
             ui.add_space(8.0);
 
+            // Large monospace timer
+            ui.label(
+                egui::RichText::new(format!(
+                    "{:02}:{:02}:{:02}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60,
+                ))
+                .font(egui::FontId::monospace(TEXT_DISPLAY))
+                .color(TEXT_PRIMARY),
+            );
+
+            ui.add_space(4.0);
+
+            // Stats row
+            let track_count = self.selected_audio.iter().filter(|&&b| b).count()
+                + self.selected_app_audio.iter().filter(|&&b| b).count();
             ui.horizontal(|ui| {
-                let btn_width = 74.0;
-                let tf_width = (ui.available_width() - btn_width - 8.0).max(60.0);
-                let tf = ui.add_sized(
-                    [tf_width, 22.0],
-                    egui::TextEdit::singleline(&mut self.output_dir_input),
-                );
-                if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
-                    self.config.output_dir = PathBuf::from(&self.output_dir_input);
-                    self.save_config_or_report(s);
+                ui.label(caption(
+                    format!("{track_count} {}", s.tracks_word),
+                    TEXT_MUTED,
+                ));
+                ui.label(caption("  ·  ", TEXT_MUTED));
+                ui.label(caption(format!("{frames} {}", s.frames_word), TEXT_MUTED));
+            });
+
+            if let Some(active) = self.session.active() {
+                let naming = active.naming.clone();
+                let app_name = active.app_name.clone();
+                let output_dir = active.output_dir.clone();
+                // Recomputed only on a new elapsed second, not every
+                // frame -- see `displayed_recording_name`'s doc comment.
+                if self.displayed_recording_name.as_ref().map(|(s, _)| *s) != Some(secs) {
+                    let stem = crate::recording_naming::resolve_finished_recording_stem(
+                        &naming,
+                        &app_name,
+                        &output_dir,
+                    );
+                    self.displayed_recording_name = Some((secs, format!("{stem}.mp4")));
                 }
-                if ui
-                    .add(accent_button(s.browse_button, ACCENT_SECONDARY))
-                    .clicked()
-                    && let Some(path) = FileDialog::new()
-                        .set_directory(&self.config.output_dir)
-                        .pick_folder()
-                {
-                    self.output_dir_input = path.to_string_lossy().into_owned();
-                    self.config.output_dir = path;
+                ui.add_space(4.0);
+                ui.label(caption(
+                    self.displayed_recording_name
+                        .as_ref()
+                        .map(|(_, name)| name.as_str())
+                        .unwrap_or("recording.mp4"),
+                    TEXT_MUTED,
+                ));
+            }
+        } else if self.finalizing.handle.is_some() {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(s.saving_recording)
+                    .size(TEXT_BODY)
+                    .color(TEXT_MUTED),
+            );
+        } else if let Some(path) = self.last_output_path.clone() {
+            self.render_export_controls(ui, s, &path);
+        } else {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(s.select_source_prompt)
+                    .size(TEXT_BODY)
+                    .color(TEXT_MUTED),
+            );
+        }
+    }
+
+    /// The Output section: Quality/Hotkeys/Audio buttons, audio selection
+    /// summary, output folder, and recording-name options.
+    fn render_output_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        ui.horizontal(|ui| {
+            if ui
+                .add(accent_button(s.quality_button, ACCENT_SECONDARY))
+                .on_hover_text(s.quality_tooltip)
+                .clicked()
+            {
+                self.show_quality_popup = true;
+            }
+            if ui
+                .add(accent_button(s.hotkeys_button, ACCENT_SECONDARY))
+                .on_hover_text(s.hotkeys_tooltip)
+                .clicked()
+            {
+                self.show_hotkeys_popup = true;
+            }
+            if ui
+                .add(accent_button(s.audio_button, ACCENT_SECONDARY))
+                .on_hover_text(s.audio_tooltip)
+                .clicked()
+            {
+                self.show_audio_popup = true;
+            }
+        });
+        // Current audio selection at a glance, since it now lives behind
+        // the Audio button rather than always-visible in the source
+        // panel -- without this, checking what's selected would mean
+        // opening the popup every time.
+        let audio_selected_count = self.selected_audio.iter().filter(|&&b| b).count()
+            + self.selected_app_audio.iter().filter(|&&b| b).count();
+        ui.label(caption(
+            if audio_selected_count == 0 {
+                s.no_audio_selected.to_string()
+            } else {
+                format!("{audio_selected_count} {}", s.audio_sources_word)
+            },
+            TEXT_MUTED,
+        ));
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            let btn_width = 74.0;
+            let tf_width = (ui.available_width() - btn_width - 8.0).max(60.0);
+            let tf = ui.add_sized(
+                [tf_width, 22.0],
+                egui::TextEdit::singleline(&mut self.output_dir_input),
+            );
+            if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
+                self.config.output_dir = PathBuf::from(&self.output_dir_input);
+                self.save_config_or_report(s);
+            }
+            if ui
+                .add(accent_button(s.browse_button, ACCENT_SECONDARY))
+                .clicked()
+                && let Some(path) = FileDialog::new()
+                    .set_directory(&self.config.output_dir)
+                    .pick_folder()
+            {
+                self.output_dir_input = path.to_string_lossy().into_owned();
+                self.config.output_dir = path;
+                self.save_config_or_report(s);
+            }
+        });
+
+        ui.add_space(6.0);
+        let checkbox_response = ui
+            .checkbox(
+                &mut self.config.use_process_name_for_recording,
+                s.use_process_name_label,
+            )
+            .on_hover_text(s.use_process_name_tooltip);
+        if checkbox_response.changed() {
+            self.save_config_or_report(s);
+        }
+        if !self.config.use_process_name_for_recording {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                let tf = ui.add(
+                    egui::TextEdit::singleline(&mut self.config.custom_recording_prefix)
+                        .hint_text(s.custom_recording_prefix_placeholder),
+                );
+                if tf.lost_focus() {
                     self.save_config_or_report(s);
                 }
             });
+        }
+    }
 
-            ui.add_space(6.0);
-            let checkbox_response = ui
-                .checkbox(
-                    &mut self.config.use_process_name_for_recording,
-                    s.use_process_name_label,
-                )
-                .on_hover_text(s.use_process_name_tooltip);
-            if checkbox_response.changed() {
-                self.save_config_or_report(s);
-            }
-            if !self.config.use_process_name_for_recording {
-                ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-                    let tf = ui.add(
-                        egui::TextEdit::singleline(&mut self.config.custom_recording_prefix)
-                            .hint_text(s.custom_recording_prefix_placeholder),
-                    );
-                    if tf.lost_focus() {
-                        self.save_config_or_report(s);
+    /// The framed status box (free space, Highlight buffering, Highlight
+    /// save result), shown only when it has something to say.
+    fn render_status_box(&self, ui: &mut egui::Ui, s: &'static Strings) {
+        let show_free_space = self.free_space.bytes.is_some();
+        let show_highlight_active = self.session.is_highlighting();
+        let show_highlight_save = !matches!(self.highlight_save.state, HighlightSaveState::Idle);
+        // Grouped into one visually distinct region (rather than a flat
+        // pile of same-size lines distinguished only by color) so it
+        // reads as "the status area" separate from the output-dir
+        // controls above it -- same treatment as source cards.
+        if show_free_space || show_highlight_active || show_highlight_save {
+            ui.add_space(SPACE_NORMAL);
+            egui::Frame::NONE
+                .fill(BG_FAINT)
+                .stroke(egui::Stroke::new(1.0, BORDER))
+                .corner_radius(CORNER_CONTROL)
+                .inner_margin(8i8)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    let mut first = true;
+
+                    if let Some(free) = self.free_space.bytes {
+                        // Same threshold the recording loop itself refuses
+                        // to start/continue below (disk_space::MIN_FREE_BYTES)
+                        // -- flagging it here too means the user sees it
+                        // coming before pressing REC, not just as a
+                        // refusal/mid-recording stop after the fact.
+                        let low = free < crate::disk_space::MIN_FREE_BYTES;
+                        let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
+                        ui.label(caption(
+                            format!("{}{}", s.free_space_prefix, format_bytes_free(free)),
+                            color,
+                        ));
+                        first = false;
+                    }
+
+                    if show_highlight_active {
+                        if !first {
+                            ui.add_space(SPACE_TIGHT);
+                        }
+                        ui.label(caption(s.highlight_status_active, TEXT_PRIMARY));
+                        first = false;
+                    }
+
+                    if !first && show_highlight_save {
+                        ui.add_space(SPACE_TIGHT);
+                    }
+                    match &self.highlight_save.state {
+                        HighlightSaveState::Idle => {}
+                        HighlightSaveState::Saving => {
+                            ui.label(caption(s.highlight_saving_label, TEXT_MUTED));
+                        }
+                        HighlightSaveState::Done(path) => {
+                            ui.label(caption(
+                                format!(
+                                    "{}{}",
+                                    s.highlight_saved_prefix,
+                                    path.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("highlight.mp4")
+                                ),
+                                ACCENT_IDLE,
+                            ));
+                        }
+                        HighlightSaveState::Failed(msg) => {
+                            ui.label(caption(
+                                format!("{}{msg}", s.highlight_save_failed_prefix),
+                                ACCENT_REC,
+                            ));
+                        }
+                    }
+                });
+        }
+    }
+
+    /// The bottom-anchored REC / STOP+pause / Resume row.
+    fn render_action_row(&mut self, ui: &mut egui::Ui, s: &'static Strings, is_recording: bool) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            ui.add_space(8.0);
+
+            let is_paused = self.session.is_paused();
+
+            // Recording/Paused already show their state via the pulsing
+            // dot + colored label at the top of this panel -- showing it
+            // again here too would just be the same fact twice. Idle has
+            // no other indicator, so it's the only state this line adds.
+            //
+            // Always render this label -- even with empty text -- rather
+            // than skipping it outside Idle. Skipping it changed the
+            // action row's position in this Ui's widget order between
+            // states, which shifted REC/STOP+pause/Resume up or down
+            // relative to each other (and separately tripped egui's
+            // "widget rect changed id between passes" warning, since the
+            // row landing at a given screen rect had a different id from
+            // one frame to the next).
+            let state_line = if matches!(self.session.state(), SessionState::Idle) {
+                format!("{}{}", s.state_prefix, s.session_state_idle)
+            } else {
+                String::new()
+            };
+            ui.label(caption(state_line, TEXT_MUTED));
+
+            if is_paused {
+                centered_action_row(ui, 130.0, 52.0, |ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new(s.resume_button)
+                            .color(ACCENT_IDLE)
+                            .size(TEXT_BUTTON),
+                    )
+                    .fill(BG_BTN_IDLE)
+                    .corner_radius(ROUNDING_PRIMARY_BTN)
+                    .min_size(egui::Vec2::new(130.0, 52.0));
+                    if ui.add(btn).clicked() {
+                        self.handle_pause_button();
+                    }
+                });
+            } else if is_recording {
+                let content_width = 90.0 + ui.spacing().item_spacing.x + 44.0;
+                centered_action_row(ui, content_width, 52.0, |ui| {
+                    let stop_btn = egui::Button::new(
+                        egui::RichText::new(s.stop_button)
+                            .color(ACCENT_REC)
+                            .size(TEXT_BUTTON),
+                    )
+                    .fill(BG_BTN_STOP)
+                    .corner_radius(ROUNDING_PRIMARY_BTN)
+                    .min_size(egui::Vec2::new(90.0, 52.0));
+                    if ui.add(stop_btn).clicked() {
+                        self.handle_rec_button(is_recording);
+                    }
+
+                    let pause_btn = egui::Button::new(
+                        egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
+                    )
+                    .fill(egui::Color32::from_rgb(30, 30, 46))
+                    .min_size(egui::Vec2::new(44.0, 52.0));
+                    if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
+                        self.handle_pause_button();
+                    }
+                });
+            } else {
+                centered_action_row(ui, 130.0, 52.0, |ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new(s.rec_button)
+                            .color(ACCENT_IDLE)
+                            .size(TEXT_BUTTON),
+                    )
+                    .fill(BG_BTN_IDLE)
+                    .corner_radius(ROUNDING_PRIMARY_BTN)
+                    .min_size(egui::Vec2::new(130.0, 52.0));
+                    if ui.add(btn).clicked() {
+                        self.handle_rec_button(is_recording);
                     }
                 });
             }
-
-            let show_free_space = self.free_space.bytes.is_some();
-            let show_highlight_active = self.session.is_highlighting();
-            let show_highlight_save =
-                !matches!(self.highlight_save.state, HighlightSaveState::Idle);
-            // Grouped into one visually distinct region (rather than a flat
-            // pile of same-size lines distinguished only by color) so it
-            // reads as "the status area" separate from the output-dir
-            // controls above it -- same treatment as source cards.
-            if show_free_space || show_highlight_active || show_highlight_save {
-                ui.add_space(SPACE_NORMAL);
-                egui::Frame::NONE
-                    .fill(BG_FAINT)
-                    .stroke(egui::Stroke::new(1.0, BORDER))
-                    .corner_radius(CORNER_CONTROL)
-                    .inner_margin(8i8)
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        let mut first = true;
-
-                        if let Some(free) = self.free_space.bytes {
-                            // Same threshold the recording loop itself refuses
-                            // to start/continue below (disk_space::MIN_FREE_BYTES)
-                            // -- flagging it here too means the user sees it
-                            // coming before pressing REC, not just as a
-                            // refusal/mid-recording stop after the fact.
-                            let low = free < crate::disk_space::MIN_FREE_BYTES;
-                            let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}{}",
-                                    s.free_space_prefix,
-                                    format_bytes_free(free)
-                                ))
-                                .size(TEXT_CAPTION)
-                                .color(color),
-                            );
-                            first = false;
-                        }
-
-                        if show_highlight_active {
-                            if !first {
-                                ui.add_space(SPACE_TIGHT);
-                            }
-                            ui.label(
-                                egui::RichText::new(s.highlight_status_active)
-                                    .size(TEXT_CAPTION)
-                                    .color(TEXT_PRIMARY),
-                            );
-                            first = false;
-                        }
-
-                        if !first && show_highlight_save {
-                            ui.add_space(SPACE_TIGHT);
-                        }
-                        match &self.highlight_save.state {
-                            HighlightSaveState::Idle => {}
-                            HighlightSaveState::Saving => {
-                                ui.label(
-                                    egui::RichText::new(s.highlight_saving_label)
-                                        .size(TEXT_CAPTION)
-                                        .color(TEXT_MUTED),
-                                );
-                            }
-                            HighlightSaveState::Done(path) => {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}{}",
-                                        s.highlight_saved_prefix,
-                                        path.file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or("highlight.mp4")
-                                    ))
-                                    .size(TEXT_CAPTION)
-                                    .color(ACCENT_IDLE),
-                                );
-                            }
-                            HighlightSaveState::Failed(msg) => {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}{msg}",
-                                        s.highlight_save_failed_prefix
-                                    ))
-                                    .size(TEXT_CAPTION)
-                                    .color(ACCENT_REC),
-                                );
-                            }
-                        }
-                    });
-            }
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-
-                let is_paused = self.session.is_paused();
-
-                // Recording/Paused already show their state via the pulsing
-                // dot + colored label at the top of this panel -- showing it
-                // again here too would just be the same fact twice. Idle has
-                // no other indicator, so it's the only state this line adds.
-                //
-                // Always render this label -- even with empty text -- rather
-                // than skipping it outside Idle. Skipping it changed the
-                // action row's position in this Ui's widget order between
-                // states, which shifted REC/STOP+pause/Resume up or down
-                // relative to each other (and separately tripped egui's
-                // "widget rect changed id between passes" warning, since the
-                // row landing at a given screen rect had a different id from
-                // one frame to the next).
-                let state_line = if matches!(self.session.state(), SessionState::Idle) {
-                    format!("{}{}", s.state_prefix, s.session_state_idle)
-                } else {
-                    String::new()
-                };
-                ui.label(
-                    egui::RichText::new(state_line)
-                        .size(TEXT_CAPTION)
-                        .color(TEXT_MUTED),
-                );
-
-                if is_paused {
-                    centered_action_row(ui, 130.0, 52.0, |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(s.resume_button)
-                                .color(ACCENT_IDLE)
-                                .size(TEXT_BUTTON),
-                        )
-                        .fill(BG_BTN_IDLE)
-                        .corner_radius(ROUNDING_PRIMARY_BTN)
-                        .min_size(egui::Vec2::new(130.0, 52.0));
-                        if ui.add(btn).clicked() {
-                            self.handle_pause_button();
-                        }
-                    });
-                } else if is_recording {
-                    let content_width = 90.0 + ui.spacing().item_spacing.x + 44.0;
-                    centered_action_row(ui, content_width, 52.0, |ui| {
-                        let stop_btn = egui::Button::new(
-                            egui::RichText::new(s.stop_button)
-                                .color(ACCENT_REC)
-                                .size(TEXT_BUTTON),
-                        )
-                        .fill(BG_BTN_STOP)
-                        .corner_radius(ROUNDING_PRIMARY_BTN)
-                        .min_size(egui::Vec2::new(90.0, 52.0));
-                        if ui.add(stop_btn).clicked() {
-                            self.handle_rec_button(is_recording);
-                        }
-
-                        let pause_btn = egui::Button::new(
-                            egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
-                        )
-                        .fill(egui::Color32::from_rgb(30, 30, 46))
-                        .min_size(egui::Vec2::new(44.0, 52.0));
-                        if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
-                            self.handle_pause_button();
-                        }
-                    });
-                } else {
-                    centered_action_row(ui, 130.0, 52.0, |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(s.rec_button)
-                                .color(ACCENT_IDLE)
-                                .size(TEXT_BUTTON),
-                        )
-                        .fill(BG_BTN_IDLE)
-                        .corner_radius(ROUNDING_PRIMARY_BTN)
-                        .min_size(egui::Vec2::new(130.0, 52.0));
-                        if ui.add(btn).clicked() {
-                            self.handle_rec_button(is_recording);
-                        }
-                    });
-                }
-            });
         });
     }
 
@@ -423,17 +412,9 @@ impl App {
         s: &'static Strings,
         path: &std::path::Path,
     ) {
-        ui.label(
-            egui::RichText::new(s.recording_saved_label)
-                .size(TEXT_CAPTION)
-                .color(TEXT_MUTED),
-        );
+        ui.label(caption(s.recording_saved_label, TEXT_MUTED));
         ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(path.to_string_lossy().as_ref())
-                .size(TEXT_CAPTION)
-                .color(TEXT_PRIMARY),
-        );
+        ui.label(caption(path.to_string_lossy().as_ref(), TEXT_PRIMARY));
         ui.add_space(8.0);
 
         // Fewer than 2 tracks means there's nothing a track-selection export
@@ -560,18 +541,13 @@ impl App {
             });
         } else if is_running {
             section_header(ui, s.exporting_header);
-            ui.label(
-                egui::RichText::new(s.please_wait)
-                    .size(TEXT_CAPTION)
-                    .color(TEXT_MUTED),
-            );
+            ui.label(caption(s.please_wait, TEXT_MUTED));
         } else if let Some(export_path) = done_path {
             section_header(ui, s.export_complete_header);
-            ui.label(
-                egui::RichText::new(export_path.to_string_lossy().as_ref())
-                    .size(TEXT_CAPTION)
-                    .color(TEXT_PRIMARY),
-            );
+            ui.label(caption(
+                export_path.to_string_lossy().as_ref(),
+                TEXT_PRIMARY,
+            ));
             ui.add_space(4.0);
             if ui
                 .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
@@ -582,11 +558,7 @@ impl App {
             }
         } else if let Some(msg) = failed_msg {
             section_header(ui, s.export_failed_header);
-            ui.label(
-                egui::RichText::new(&msg)
-                    .size(TEXT_CAPTION)
-                    .color(ACCENT_REC),
-            );
+            ui.label(caption(&msg, ACCENT_REC));
         }
     }
 }

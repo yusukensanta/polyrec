@@ -7,6 +7,12 @@ pub(super) fn accent_button(text: &str, color: egui::Color32) -> egui::Button<'s
     egui::Button::new(egui::RichText::new(text.to_string()).color(color))
 }
 
+/// Caption-size text in `color` -- the dashboard's small status/hint line
+/// style (timer stats, free space, Highlight status, ...).
+pub(super) fn caption(text: impl Into<String>, color: egui::Color32) -> egui::RichText {
+    egui::RichText::new(text).size(TEXT_CAPTION).color(color)
+}
+
 /// Renders `add_contents` in a `row_height`-tall, `left_to_right` row
 /// explicitly centered within `ui`'s full available width. Used for the
 /// REC/Resume/Stop+Pause action row so all three states land at the same X
