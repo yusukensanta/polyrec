@@ -7,14 +7,13 @@
 //! seams that a single-input remux never has to do.
 
 use crate::encode::mf::MfSession;
-use crate::encode::remux::{ALL_STREAMS, ANY_STREAM, StreamLayout, discover_stream_layout};
+use crate::encode::remux::{ALL_STREAMS, StreamLayout, discover_stream_layout, for_each_sample};
 use crate::error::{AppError, ResultExt};
 use crate::highlight::SegmentInfo;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MF_SOURCE_READERF_ENDOFSTREAM,
-    MFCreateSourceReaderFromURL,
+    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateSourceReaderFromURL,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -185,47 +184,23 @@ unsafe fn do_concat_and_trim(
             }
 
             let total_streams = 1 + layout.audio.len();
-            let mut done_streams: std::collections::HashSet<u32> = std::collections::HashSet::new();
             let mut max_ts_seen: i64 = baseline_hns;
 
-            loop {
-                let mut actual_idx: u32 = 0;
-                let mut stream_flags: u32 = 0;
-                let mut timestamp: i64 = 0;
-                let mut sample: Option<windows::Win32::Media::MediaFoundation::IMFSample> = None;
-
-                reader
-                    .ReadSample(
-                        ANY_STREAM,
-                        0,
-                        Some(&mut actual_idx),
-                        Some(&mut stream_flags),
-                        Some(&mut timestamp),
-                        Some(&mut sample),
-                    )
-                    .encode_ctx(format_args!("ReadSample(segment {})", seg.path.display()))?;
-
-                if stream_flags & 1 != 0 {
-                    return Err(AppError::Encode(format!(
-                        "ReadSample: stream {actual_idx} reported error in segment {}",
-                        seg.path.display()
-                    )));
-                }
-                if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                    done_streams.insert(actual_idx);
-                    if done_streams.len() >= total_streams {
-                        break;
+            let label = format!("segment {}", seg.path.display());
+            for_each_sample(
+                &reader,
+                total_streams,
+                Some(&label),
+                |stream, s, timestamp| {
+                    if let Some(&sink_idx) = source_to_sink.get(&stream) {
+                        max_ts_seen = max_ts_seen.max(timestamp);
+                        let out_ts = timestamp - baseline_hns + running_offset_hns;
+                        s.SetSampleTime(out_ts).encode_ctx("SetSampleTime")?;
+                        write_sample(&writer, sink_idx, &s)?;
                     }
-                    continue;
-                }
-
-                if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
-                    max_ts_seen = max_ts_seen.max(timestamp);
-                    let out_ts = timestamp - baseline_hns + running_offset_hns;
-                    s.SetSampleTime(out_ts).encode_ctx("SetSampleTime")?;
-                    write_sample(&writer, sink_idx, &s)?;
-                }
-            }
+                    Ok(())
+                },
+            )?;
 
             running_offset_hns += (max_ts_seen - baseline_hns).max(0);
         }

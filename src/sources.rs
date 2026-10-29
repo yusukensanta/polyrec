@@ -242,35 +242,54 @@ pub(crate) fn display_name_from_exe_name(exe_name: &str) -> String {
 /// nothing were cached. Failures are never cached -- they're retried on the
 /// next call, same as before the cache existed.
 pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
-    type Icon = (Vec<u8>, u32, u32);
-    type Stamp = (std::time::SystemTime, u64);
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (Stamp, Icon)>>,
-    > = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<IconCache> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(IconCache::default)
+        .get_or_extract(exe_path, extract_exe_icon_rgba_uncached)
+}
 
-    let Some(stamp) = std::fs::metadata(exe_path)
-        .ok()
-        .and_then(|m| Some((m.modified().ok()?, m.len())))
-    else {
-        return extract_exe_icon_rgba_uncached(exe_path);
-    };
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some((cached_stamp, icon)) = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(exe_path)
-        && *cached_stamp == stamp
-    {
-        return Some(icon.clone());
+type Icon = (Vec<u8>, u32, u32);
+/// A file's (modification time, size) -- what a cached icon is keyed on
+/// besides its path.
+type FileStamp = (std::time::SystemTime, u64);
+
+/// `extract_exe_icon_rgba`'s memo, separate from the shell call it wraps so
+/// its reuse/invalidation rules can be tested without one.
+#[derive(Default)]
+struct IconCache {
+    entries: std::sync::Mutex<std::collections::HashMap<String, (FileStamp, Icon)>>,
+}
+
+impl IconCache {
+    fn get_or_extract(
+        &self,
+        exe_path: &str,
+        extract: impl FnOnce(&str) -> Option<Icon>,
+    ) -> Option<Icon> {
+        let Some(stamp) = std::fs::metadata(exe_path)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())))
+        else {
+            return extract(exe_path);
+        };
+        if let Some((cached_stamp, icon)) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(exe_path)
+            && *cached_stamp == stamp
+        {
+            return Some(icon.clone());
+        }
+        // Extracted with the lock released -- the shell call is the slow part
+        // and callers on other threads shouldn't queue behind it.
+        let icon = extract(exe_path)?;
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(exe_path.to_owned(), (stamp, icon.clone()));
+        Some(icon)
     }
-    // Extracted with the lock released -- the shell call is the slow part
-    // and callers on other threads shouldn't queue behind it.
-    let icon = extract_exe_icon_rgba_uncached(exe_path)?;
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(exe_path.to_owned(), (stamp, icon.clone()));
-    Some(icon)
 }
 
 fn extract_exe_icon_rgba_uncached(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
@@ -892,20 +911,96 @@ mod tests {
         assert_eq!(exe_file_name("").as_deref(), None);
     }
 
-    #[test]
-    fn cached_icon_is_identical_to_a_fresh_extraction() {
-        let path = r"C:\Windows\explorer.exe";
-        let fresh = extract_exe_icon_rgba_uncached(path).expect("explorer.exe has an icon");
-        let first = extract_exe_icon_rgba(path).expect("first call");
-        let cached = extract_exe_icon_rgba(path).expect("second call, from the cache");
-        assert_eq!(first, fresh);
-        assert_eq!(cached, fresh);
+    fn fake_icon(byte: u8) -> Icon {
+        (vec![byte; 4], 1, 1)
     }
 
     #[test]
-    fn icon_for_a_missing_file_is_none_and_stays_none() {
-        let path = r"C:\definitely\not\here\nothing.exe";
-        assert_eq!(extract_exe_icon_rgba(path), None);
-        assert_eq!(extract_exe_icon_rgba(path), None);
+    fn icon_cache_serves_a_repeat_request_without_extracting_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("app.exe");
+        std::fs::write(&exe, b"v1").unwrap();
+        let exe = exe.to_str().unwrap();
+        let cache = IconCache::default();
+        let calls = std::cell::Cell::new(0);
+        let extract = |_: &str| {
+            calls.set(calls.get() + 1);
+            Some(fake_icon(7))
+        };
+        assert_eq!(cache.get_or_extract(exe, extract), Some(fake_icon(7)));
+        assert_eq!(cache.get_or_extract(exe, extract), Some(fake_icon(7)));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn icon_cache_re_extracts_once_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("app.exe");
+        std::fs::write(&exe, b"v1").unwrap();
+        let exe_str = exe.to_str().unwrap();
+        let cache = IconCache::default();
+        assert_eq!(
+            cache.get_or_extract(exe_str, |_| Some(fake_icon(1))),
+            Some(fake_icon(1))
+        );
+        // A different size changes the stamp even if the mtime resolution
+        // doesn't move -- an updated exe.
+        std::fs::write(&exe, b"version two").unwrap();
+        assert_eq!(
+            cache.get_or_extract(exe_str, |_| Some(fake_icon(2))),
+            Some(fake_icon(2))
+        );
+    }
+
+    #[test]
+    fn icon_cache_never_caches_a_failed_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("app.exe");
+        std::fs::write(&exe, b"v1").unwrap();
+        let exe = exe.to_str().unwrap();
+        let cache = IconCache::default();
+        assert_eq!(cache.get_or_extract(exe, |_| None), None);
+        // Retried on the next call, which can now succeed.
+        assert_eq!(
+            cache.get_or_extract(exe, |_| Some(fake_icon(3))),
+            Some(fake_icon(3))
+        );
+    }
+
+    #[test]
+    fn icon_cache_passes_unreadable_paths_straight_through() {
+        let cache = IconCache::default();
+        let calls = std::cell::Cell::new(0);
+        let extract = |_: &str| {
+            calls.set(calls.get() + 1);
+            Some(fake_icon(4))
+        };
+        let missing = r"C:\definitely\not\here\nothing.exe";
+        assert_eq!(cache.get_or_extract(missing, extract), Some(fake_icon(4)));
+        assert_eq!(cache.get_or_extract(missing, extract), Some(fake_icon(4)));
+        assert_eq!(calls.get(), 2, "no stamp to key on, so nothing is cached");
+    }
+
+    #[test]
+    fn real_shell_icon_through_the_cache_matches_a_fresh_extraction() {
+        // SHGetFileInfoW expects COM on the calling thread -- every production
+        // caller joins a single-threaded apartment first.
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            );
+        }
+        // Retried: racing other tests' concurrent shell calls in a fresh test
+        // process, SHGetFileInfoW occasionally reports success with no icon
+        // (about 1 run in 7). Best-effort by design (a missing icon just
+        // shows no icon), and never cached, so a retry is what the app does
+        // on its next refresh too.
+        let path = r"C:\Windows\explorer.exe";
+        let retry = |f: &dyn Fn() -> Option<Icon>| (0..10).find_map(|_| f());
+        let fresh =
+            retry(&|| extract_exe_icon_rgba_uncached(path)).expect("explorer.exe has an icon");
+        let cached = retry(&|| extract_exe_icon_rgba(path)).expect("cached path");
+        assert_eq!(cached, fresh);
     }
 }
