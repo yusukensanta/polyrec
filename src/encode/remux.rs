@@ -9,8 +9,9 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
     MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ANY_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM, MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType,
-    MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MFAudioFormat_PCM, MFCreateAttributes,
+    MFCreateMediaType, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Audio,
+    MFMediaType_Video,
 };
 use windows::core::HSTRING;
 
@@ -103,17 +104,53 @@ pub(crate) const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 /// `do_export_grouped`'s video+passthrough-audio portion (its separately
 /// merged/transcoded audio groups are written afterward, in their own loop
 /// -- they're PCM chunks, not samples read from a reader, so they don't fit
-/// this shape). Not shared with `highlight_export::concat_and_trim`'s
-/// superficially similar loop -- that one rewrites each sample's timestamp
-/// for cross-segment PTS continuity and iterates multiple readers (one per
-/// segment file) with a carried-over time offset, neither of which this
-/// single-reader, samples-as-is copy needs to support.
+/// this shape).
 unsafe fn copy_passthrough_samples(
     reader: &IMFSourceReader,
     writer: &IMFSinkWriter,
     source_to_sink: &HashMap<u32, u32>,
     total_streams: usize,
 ) -> Result<(), AppError> {
+    unsafe {
+        for_each_sample(reader, total_streams, None, |stream, sample, _timestamp| {
+            if let Some(&sink_idx) = source_to_sink.get(&stream) {
+                writer
+                    .WriteSample(sink_idx, &sample)
+                    .encode_ctx(format_args!("WriteSample(stream {stream})"))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `for_each_sample`'s `ReadSample` failure context and the suffix of its
+/// "stream N reported error" message, for `label`.
+fn read_error_context(label: Option<&str>) -> (String, String) {
+    match label {
+        None => ("ReadSample".to_string(), String::new()),
+        Some(label) => (format!("ReadSample({label})"), format!(" in {label}")),
+    }
+}
+
+/// Reads every stream `reader` has selected (`ANY_STREAM`) until all
+/// `total_streams` of them have reported end-of-stream, handing each
+/// delivered sample to `on_sample` with its source stream index and
+/// timestamp (ticks without a sample are skipped). A stream reporting
+/// `MF_SOURCE_READERF_ERROR` fails the whole read. `label` names the input
+/// in error messages ("ReadSample(<label>)", "... reported error in
+/// <label>"); `None` when there's only one obvious input.
+///
+/// Shared by `copy_passthrough_samples` (samples copied as-is) and
+/// `highlight_export::concat_and_trim`'s per-segment copy (timestamps
+/// rebased across segment seams) -- the read/EOS/error handling is the
+/// same, only what happens to each sample differs.
+pub(crate) unsafe fn for_each_sample(
+    reader: &IMFSourceReader,
+    total_streams: usize,
+    label: Option<&str>,
+    mut on_sample: impl FnMut(u32, IMFSample, i64) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let (read_ctx, error_suffix) = read_error_context(label);
     unsafe {
         let mut done_streams: HashSet<u32> = HashSet::new();
         loop {
@@ -131,11 +168,11 @@ unsafe fn copy_passthrough_samples(
                     Some(&mut timestamp),
                     Some(&mut sample),
                 )
-                .encode_ctx("ReadSample")?;
+                .encode_ctx(&read_ctx)?;
 
-            if stream_flags & 1 != 0 {
+            if stream_flags & (MF_SOURCE_READERF_ERROR.0 as u32) != 0 {
                 return Err(AppError::Encode(format!(
-                    "ReadSample: stream {actual_idx} reported error"
+                    "ReadSample: stream {actual_idx} reported error{error_suffix}"
                 )));
             }
 
@@ -147,10 +184,8 @@ unsafe fn copy_passthrough_samples(
                 continue;
             }
 
-            if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
-                writer
-                    .WriteSample(sink_idx, &s)
-                    .encode_ctx(format_args!("WriteSample(stream {actual_idx})"))?;
+            if let Some(sample) = sample {
+                on_sample(actual_idx, sample, timestamp)?;
             }
         }
         Ok(())
@@ -943,5 +978,69 @@ mod tests {
             count_audio_tracks(&path).expect("count_audio_tracks failed"),
             0
         );
+    }
+
+    #[test]
+    fn read_error_context_matches_the_messages_each_caller_used_to_build() {
+        // copy_passthrough_samples' former literals:
+        let (ctx, suffix) = read_error_context(None);
+        assert_eq!(ctx, "ReadSample");
+        assert_eq!(
+            format!("ReadSample: stream 3 reported error{suffix}"),
+            "ReadSample: stream 3 reported error"
+        );
+        // concat_and_trim's former format strings:
+        let (ctx, suffix) = read_error_context(Some(r"segment C:\seg_0.mp4"));
+        assert_eq!(ctx, r"ReadSample(segment C:\seg_0.mp4)");
+        assert_eq!(
+            format!("ReadSample: stream 3 reported error{suffix}"),
+            r"ReadSample: stream 3 reported error in segment C:\seg_0.mp4"
+        );
+    }
+
+    /// Opens `path` with every stream selected, the way `do_remux` does.
+    unsafe fn open_all_streams(path: &std::path::Path) -> (IMFSourceReader, StreamLayout) {
+        unsafe {
+            let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path), None).unwrap();
+            reader.SetStreamSelection(ALL_STREAMS, true).unwrap();
+            let layout = discover_stream_layout(&reader).unwrap();
+            (reader, layout)
+        }
+    }
+
+    #[test]
+    fn for_each_sample_delivers_every_stream_until_all_reach_end_of_stream() {
+        let _mf = MfSession::start_mta().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = make_test_mp4(dir.path());
+        unsafe {
+            let (reader, layout) = open_all_streams(&path);
+            let mut per_stream: HashMap<u32, usize> = HashMap::new();
+            for_each_sample(&reader, 1 + layout.audio.len(), None, |stream, _s, _ts| {
+                *per_stream.entry(stream).or_default() += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert!(per_stream.get(&layout.video).copied().unwrap_or(0) >= 1);
+            assert!(per_stream.get(&layout.audio[0]).copied().unwrap_or(0) >= 1);
+            assert_eq!(per_stream.len(), 2, "only the two streams in the file");
+        }
+    }
+
+    #[test]
+    fn for_each_sample_stops_at_the_first_callback_error() {
+        let _mf = MfSession::start_mta().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = make_test_mp4(dir.path());
+        unsafe {
+            let (reader, layout) = open_all_streams(&path);
+            let mut calls = 0;
+            let result = for_each_sample(&reader, 1 + layout.audio.len(), None, |_, _, _| {
+                calls += 1;
+                Err(AppError::Encode("stop".into()))
+            });
+            assert!(matches!(result, Err(AppError::Encode(msg)) if msg == "stop"));
+            assert_eq!(calls, 1);
+        }
     }
 }
