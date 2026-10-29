@@ -8,6 +8,7 @@ mod panel_center;
 mod panel_menu;
 mod panel_source;
 mod popups;
+mod state;
 mod theme;
 mod util;
 mod widgets;
@@ -21,33 +22,13 @@ use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use eframe::egui;
 use hotkeys_popup::HotkeySlot;
+use state::{AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, SelfUpdate};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::time::Instant;
 use theme::{setup_fonts, setup_theme};
-
-enum ExportState {
-    Idle,
-    Running,
-    Done(PathBuf),
-    Failed(String),
-}
-
-enum HighlightSaveState {
-    Idle,
-    Saving,
-    Done(PathBuf),
-    Failed(String),
-}
-
-enum SelfUpdateState {
-    Idle,
-    Confirming(crate::update_check::AvailableUpdate),
-    Working,
-    Failed(String),
-}
 
 pub struct App {
     config: Config,
@@ -81,41 +62,6 @@ pub struct App {
     show_quality_popup: bool,
     show_hotkeys_popup: bool,
     show_audio_popup: bool,
-    /// "+ Add app" opens this inline instead of going straight to a native
-    /// file browser -- lets an app be found and pinned via
-    /// `Config::register_app_audio` by searching (currently open windows,
-    /// or installed-but-not-running apps found via Start Menu shortcuts)
-    /// instead of needing to know where it's installed. A native file
-    /// browser remains as a fallback ("Browse for .exe instead…") for the
-    /// rare app neither search source finds.
-    show_add_app_picker: bool,
-    /// Live text from the add-app picker's search box -- filters both
-    /// currently open windows and installed-but-not-running apps by
-    /// exe/display name, same convention as `source_filter`.
-    add_app_search: String,
-    /// Installed apps found by resolving Start Menu shortcuts, so the add-app
-    /// picker can also find one that isn't running yet -- scanned once when
-    /// the picker opens (`enumerate_installed_apps` walks every `.lnk` under
-    /// two Start Menu folders and resolves each via COM, too slow to redo
-    /// every frame), not refreshed again until it's reopened. Populated
-    /// asynchronously (see `add_app_installed_rx`) rather than on the UI
-    /// thread -- open-window candidates still show immediately in the
-    /// meantime, since those come from the already-available `sources`.
-    add_app_installed: Vec<crate::sources::InstalledApp>,
-    /// One-shot channel for the background `enumerate_installed_apps` scan
-    /// kicked off when the add-app picker opens -- polled in
-    /// `poll_background_work`, same pattern as `update_check_rx`. `None`
-    /// once the result has arrived (or the picker was never opened).
-    add_app_installed_rx: Option<mpsc::Receiver<Vec<crate::sources::InstalledApp>>>,
-    /// Textures for add-app picker candidates -- keyed by lowercased
-    /// exe_name (not list index, unlike `app_audio_icon_textures`) since the
-    /// candidate list's order and membership shift on every keystroke as
-    /// the search filter changes; keying by identity means a texture
-    /// already loaded for a still-matching candidate is never needlessly
-    /// reloaded. Persists for the app's lifetime once loaded, same
-    /// "clear on list change, rebuild lazily" spirit as the other icon
-    /// caches, just never needing the clear since the key is stable.
-    add_app_icon_textures: std::collections::HashMap<String, egui::TextureHandle>,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
     recording_start: Option<Instant>,
@@ -136,31 +82,16 @@ pub struct App {
     displayed_recording_name: Option<(u64, String)>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
-    /// Free space on `config.output_dir`'s volume, refreshed periodically
-    /// (see `refresh_free_space`) rather than on every frame -- `GetDiskFreeSpaceExW`
-    /// is fast, but there's no reason to make a syscall 30-60+ times a second
-    /// for a number that only meaningfully changes over seconds, same
-    /// reasoning as the recording loop's own `DISK_CHECK_INTERVAL`.
-    free_space_bytes: Option<u64>,
-    free_space_checked_at: Option<Instant>,
-    free_space_checked_dir: Option<PathBuf>,
     /// Last time `refresh_sources_and_audio_if_due` actually ran (see there
     /// for why this is throttled rather than run every frame).
     sources_checked_at: Option<Instant>,
-    /// How many audio streams the last finished recording actually contains,
-    /// probed from the file itself (see `remux::count_audio_tracks`) rather
-    /// than trusted from the pre-recording device selection. Export controls
-    /// only make sense with 2+ tracks to choose between -- with 0 or 1,
-    /// there's nothing a track-selection export could meaningfully remove.
-    export_available_tracks: usize,
-    export_track_selection: Vec<bool>,
     /// Display label for each audio track actually used in the last
     /// finished manual recording (devices, then app-audio sources, in the
     /// same order `start_recording_with_source` assigns track ids) --
     /// NOT the live system device list (`audio_devices`), which reflects
     /// whatever's currently plugged in and has no entries for app-audio
     /// sources at all. The export checkbox list zips this against
-    /// `export_track_selection` by position; a length mismatch (e.g. a
+    /// `export.track_selection` by position; a length mismatch (e.g. a
     /// device disconnected mid-recording, producing fewer tracks than were
     /// selected) falls back to a generic "Track N" label for the unlabeled
     /// tail rather than panicking or misattributing a name.
@@ -171,15 +102,7 @@ pub struct App {
     /// record-start rather than re-parsed from the recording's filename, so
     /// it can't drift if that filename format ever changes.
     last_recording_app_name: String,
-    /// "Mix selected tracks into one" export checkbox -- unchecked by
-    /// default. See `render_export_controls`.
-    export_mix_tracks: bool,
-    export_state: ExportState,
-    export_result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     hotkey_listener: Option<HotkeyListener>,
-    finalizing_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
-    finalizing_path: Option<PathBuf>,
-    finalizing_disk_full: Option<Arc<std::sync::atomic::AtomicBool>>,
     update_available: Option<crate::update_check::AvailableUpdate>,
     update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
     /// User-facing error banner (disk-full refusal to start, disk-full
@@ -193,10 +116,13 @@ pub struct App {
     /// out to be unregisterable (already used by another app, or reserved by
     /// Windows) — see `hotkeys::try_register`.
     hotkey_capture_warning: Option<String>,
-    highlight_save_state: HighlightSaveState,
-    highlight_save_handle: Option<tokio::task::JoinHandle<Result<PathBuf, crate::error::AppError>>>,
-    self_update_state: SelfUpdateState,
-    self_update_handle: Option<tokio::task::JoinHandle<Result<(), crate::error::AppError>>>,
+    /// The Audio popup's "+ Add app" picker -- see `AddAppPicker`.
+    add_app: AddAppPicker,
+    free_space: FreeSpaceCache,
+    finalizing: Finalizing,
+    export: ExportUi,
+    highlight_save: HighlightSave,
+    self_update: SelfUpdate,
     /// Window position as of the most recent frame -- updated every frame in
     /// `ui()` (cheap, in-memory only) and written to `config.toml` exactly
     /// once, in `on_exit()`, rather than on every change. A window drag can
@@ -232,7 +158,7 @@ impl App {
         // construction, so it's always checked.
         let app_audio_sources = actions::build_app_audio_sources(&mut config);
         let selected_app_audio = vec![true; app_audio_sources.len()];
-        let export_track_selection = vec![true; n];
+        let initial_track_selection = vec![true; n];
         let wake_ctx = cc.egui_ctx.clone();
         let hotkey_listener = HotkeyListener::spawn(
             &config.hotkeys.start_stop,
@@ -268,11 +194,6 @@ impl App {
             show_quality_popup: false,
             show_hotkeys_popup: false,
             show_audio_popup: false,
-            show_add_app_picker: false,
-            add_app_search: String::new(),
-            add_app_installed: Vec::new(),
-            add_app_installed_rx: None,
-            add_app_icon_textures: std::collections::HashMap::new(),
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
@@ -280,31 +201,22 @@ impl App {
             displayed_recording_name: None,
             last_output_path: None,
             output_dir_input,
-            free_space_bytes: None,
-            free_space_checked_at: None,
-            free_space_checked_dir: None,
             sources_checked_at: None,
-            export_available_tracks: 0,
-            export_track_selection,
             last_recording_audio_labels: Vec::new(),
             last_recording_app_name: String::new(),
-            export_mix_tracks: false,
-            export_state: ExportState::Idle,
-            export_result_rx: None,
             hotkey_listener: Some(hotkey_listener),
-            finalizing_handle: None,
-            finalizing_path: None,
-            finalizing_disk_full: None,
             update_available: None,
             update_check_rx: Some(update_check_rx),
             error_message: None,
             recording_hotkey: None,
             hotkey_capture_warning: None,
-            highlight_save_state: HighlightSaveState::Idle,
-            highlight_save_handle: None,
-            self_update_state: SelfUpdateState::Idle,
-            self_update_handle: None,
             last_window_pos: None,
+            add_app: AddAppPicker::default(),
+            free_space: FreeSpaceCache::default(),
+            finalizing: Finalizing::default(),
+            export: ExportUi::new(initial_track_selection),
+            highlight_save: HighlightSave::default(),
+            self_update: SelfUpdate::default(),
         }
     }
 }

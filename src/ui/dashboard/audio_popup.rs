@@ -172,19 +172,19 @@ impl App {
                         // app just because it's currently making sound (see
                         // `actions::build_app_audio_sources`'s doc comment).
                         // A fresh install shows nothing here but this button.
-                        if !self.show_add_app_picker {
+                        if !self.add_app.open {
                             if ui
                                 .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
                                 .clicked()
                             {
-                                self.show_add_app_picker = true;
-                                self.add_app_search.clear();
+                                self.add_app.open = true;
+                                self.add_app.search.clear();
                                 // Cleared, not left stale, so a previous
                                 // open's results don't briefly show before
                                 // this scan's real results arrive.
-                                self.add_app_installed = Vec::new();
+                                self.add_app.installed = Vec::new();
                                 let (tx, rx) = mpsc::channel();
-                                self.add_app_installed_rx = Some(rx);
+                                self.add_app.installed_rx = Some(rx);
                                 tokio::task::spawn_blocking(move || {
                                     let apps = crate::sources::enumerate_installed_apps();
                                     let _ = tx.send(apps);
@@ -250,8 +250,8 @@ impl App {
     /// need to be open, let alone actively making sound, to be found:
     /// currently open windows (`self.sources`, already available, so these
     /// show immediately) and installed-but-not-running apps
-    /// (`self.add_app_installed`, populated asynchronously -- see
-    /// `add_app_installed_rx`'s doc comment -- so these appear a moment
+    /// (`self.add_app.installed`, populated asynchronously -- see
+    /// `add_app.installed_rx`'s doc comment -- so these appear a moment
     /// later on a machine with many Start Menu shortcuts). An exe already
     /// open wins the dedup over the same exe found only via a Start Menu
     /// shortcut. Registers on click -- an open window's path is derived
@@ -260,7 +260,7 @@ impl App {
     /// case neither source finds (unregistered, no shortcut).
     fn render_add_app_picker(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         ui.add(
-            egui::TextEdit::singleline(&mut self.add_app_search)
+            egui::TextEdit::singleline(&mut self.add_app.search)
                 .hint_text(s.add_app_search_placeholder)
                 .desired_width(f32::INFINITY),
         );
@@ -272,7 +272,7 @@ impl App {
             .iter()
             .map(|r| r.exe_name.clone())
             .collect();
-        let filter = self.add_app_search.to_lowercase();
+        let filter = self.add_app.search.to_lowercase();
         let mut seen_exe_names = std::collections::HashSet::new();
         let mut candidates: Vec<AddAppCandidate> = Vec::new();
         for src in self
@@ -302,7 +302,7 @@ impl App {
                 icon_rgba: src.icon_rgba.clone(),
             });
         }
-        for app in &self.add_app_installed {
+        for app in &self.add_app.installed {
             if registered.contains(&app.exe_name) {
                 continue;
             }
@@ -327,14 +327,14 @@ impl App {
         // Shown even once open-window candidates are already visible above
         // -- distinct from "no matches", it's telling the user more
         // (installed-only) results may still be on the way.
-        if self.add_app_installed_rx.is_some() {
+        if self.add_app.installed_rx.is_some() {
             ui.label(
                 egui::RichText::new(s.add_app_scanning)
                     .size(TEXT_CAPTION)
                     .color(TEXT_MUTED),
             );
         }
-        if candidates.is_empty() && self.add_app_installed_rx.is_none() {
+        if candidates.is_empty() && self.add_app.installed_rx.is_none() {
             let msg = if filter.is_empty() {
                 s.add_app_none_running
             } else {
@@ -353,7 +353,8 @@ impl App {
             .show(ui, |ui| {
                 for candidate in &candidates {
                     if let std::collections::hash_map::Entry::Vacant(entry) = self
-                        .add_app_icon_textures
+                        .add_app
+                        .icon_textures
                         .entry(candidate.exe_name.to_lowercase())
                         && let Some((rgba, w, h)) = &candidate.icon_rgba
                     {
@@ -370,7 +371,8 @@ impl App {
                     }
                     ui.horizontal(|ui| {
                         if let Some(tex) = self
-                            .add_app_icon_textures
+                            .add_app
+                            .icon_textures
                             .get(&candidate.exe_name.to_lowercase())
                         {
                             ui.image((tex.id(), egui::vec2(16.0, 16.0)));
@@ -427,7 +429,7 @@ impl App {
                 );
             }
             if ui.button(s.close_button).clicked() {
-                self.show_add_app_picker = false;
+                self.add_app.open = false;
             }
         });
     }
@@ -440,6 +442,6 @@ impl App {
         self.config.register_app_audio(exe_name, exe_path);
         self.save_config_or_report(s);
         self.rebuild_app_audio_sources_now();
-        self.show_add_app_picker = false;
+        self.add_app.open = false;
     }
 }

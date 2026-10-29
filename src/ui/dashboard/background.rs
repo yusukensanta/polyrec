@@ -1,5 +1,6 @@
+use super::App;
+use super::state::{ExportState, HighlightSaveState};
 use super::util::take_if_finished;
-use super::{App, ExportState, HighlightSaveState};
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -23,26 +24,27 @@ impl App {
         }
 
         // Poll the add-app picker's background Start Menu scan -- see
-        // `add_app_installed_rx`'s doc comment for why this isn't done
+        // `add_app.installed_rx`'s doc comment for why this isn't done
         // synchronously on the click that opens the picker.
-        if let Some(rx) = &self.add_app_installed_rx
+        if let Some(rx) = &self.add_app.installed_rx
             && let Ok(apps) = rx.try_recv()
         {
-            self.add_app_installed = apps;
-            self.add_app_installed_rx = None;
+            self.add_app.installed = apps;
+            self.add_app.installed_rx = None;
         }
 
         // Poll export result channel
         let export_result = self
-            .export_result_rx
+            .export
+            .result_rx
             .as_ref()
             .and_then(|rx| rx.try_recv().ok());
         if let Some(result) = export_result {
-            self.export_state = match result {
+            self.export.state = match result {
                 Ok(path) => ExportState::Done(path),
                 Err(msg) => ExportState::Failed(msg),
             };
-            self.export_result_rx = None;
+            self.export.result_rx = None;
         }
 
         // Poll hotkey events (non-blocking)
@@ -69,7 +71,7 @@ impl App {
         // stop, instead of the UI being stuck showing "Recording" forever for
         // a capture that already ended on its own.
         if (is_recording || self.session.is_paused())
-            && self.finalizing_handle.is_none()
+            && self.finalizing.handle.is_none()
             && self.session.active().is_some_and(|a| a.recorder_finished())
         {
             self.stop_recording();
@@ -77,18 +79,19 @@ impl App {
 
         // Show export controls (inline in the status panel) once recorder has
         // finished writing the file
-        if let Some(handle) = take_if_finished(&mut self.finalizing_handle) {
-            self.finalizing_path = None;
+        if let Some(handle) = take_if_finished(&mut self.finalizing.handle) {
+            self.finalizing.path = None;
             let disk_full = self
-                .finalizing_disk_full
+                .finalizing
+                .disk_full
                 .take()
                 .is_some_and(|f| f.load(Ordering::Relaxed));
             match tokio::runtime::Handle::current().block_on(handle) {
                 Ok(Ok(path)) => {
                     // Probed from the file itself, not trusted from the
                     // pre-recording device selection -- see field doc on
-                    // export_available_tracks.
-                    self.export_available_tracks = crate::encode::remux::count_audio_tracks(&path)
+                    // export.available_tracks.
+                    self.export.available_tracks = crate::encode::remux::count_audio_tracks(&path)
                         .inspect_err(|e| {
                             tracing::warn!(
                                 "count_audio_tracks failed, export controls will stay hidden: {e}"
@@ -98,17 +101,17 @@ impl App {
                     tracing::info!(
                         "recording finalized: {} ({} audio track(s))",
                         path.display(),
-                        self.export_available_tracks
+                        self.export.available_tracks
                     );
-                    self.export_track_selection = vec![true; self.export_available_tracks];
-                    self.export_state = ExportState::Idle;
-                    self.export_result_rx = None;
+                    self.export.track_selection = vec![true; self.export.available_tracks];
+                    self.export.state = ExportState::Idle;
+                    self.export.result_rx = None;
                     self.last_output_path = Some(path);
                     if disk_full {
                         self.error_message = Some(s.disk_full_mid_recording.to_string());
                     } else if let Some(msg) = audio_tracks_missing_message(
                         s,
-                        self.export_available_tracks,
+                        self.export.available_tracks,
                         self.last_recording_audio_labels.len(),
                     ) {
                         self.error_message = Some(msg);
@@ -145,13 +148,13 @@ impl App {
             // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
-        if matches!(self.export_state, ExportState::Running) {
+        if matches!(self.export.state, ExportState::Running) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if self.session.is_paused() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
-        if self.finalizing_handle.is_some() {
+        if self.finalizing.handle.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Without this, a Highlight save that finishes in the background
@@ -159,16 +162,16 @@ impl App {
         // until something else happens to wake the UI (e.g. another
         // keypress) -- looking like the save silently did nothing on its
         // first press.
-        if matches!(self.highlight_save_state, HighlightSaveState::Saving) {
+        if matches!(self.highlight_save.state, HighlightSaveState::Saving) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
     pub(super) fn poll_highlight_save_result(&mut self) {
-        let Some(handle) = take_if_finished(&mut self.highlight_save_handle) else {
+        let Some(handle) = take_if_finished(&mut self.highlight_save.handle) else {
             return;
         };
-        self.highlight_save_state = match tokio::runtime::Handle::current().block_on(handle) {
+        self.highlight_save.state = match tokio::runtime::Handle::current().block_on(handle) {
             Ok(Ok(path)) => HighlightSaveState::Done(path),
             Ok(Err(e)) => HighlightSaveState::Failed(e.to_string()),
             Err(e) => HighlightSaveState::Failed(e.to_string()),
