@@ -1,6 +1,6 @@
 //! RAII guard for Media Foundation's process-wide startup reference count.
 
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
@@ -27,8 +27,7 @@ impl MfSession {
     /// recording writer's thread (which has never needed one of its own).
     pub(crate) fn start() -> Result<Self, AppError> {
         unsafe {
-            MFStartup(MF_VERSION, MFSTARTUP_FULL)
-                .map_err(|e| AppError::Encode(format!("MFStartup: {e}")))?;
+            MFStartup(MF_VERSION, MFSTARTUP_FULL).encode_ctx("MFStartup")?;
         }
         Ok(Self(()))
     }

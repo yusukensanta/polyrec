@@ -1,5 +1,5 @@
 use crate::encode::mf::MfSession;
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::{Path, PathBuf};
 use windows::Win32::Media::MediaFoundation::{
@@ -70,8 +70,7 @@ impl RecordingWriter {
                 MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MFCreateAttributes,
             };
             let mut attrs_opt: Option<IMFAttributes> = None;
-            MFCreateAttributes(&mut attrs_opt, 1)
-                .map_err(|e| AppError::Encode(format!("MFCreateAttributes: {e}")))?;
+            MFCreateAttributes(&mut attrs_opt, 1).encode_ctx("MFCreateAttributes")?;
             let attrs = attrs_opt
                 .ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
             attrs
@@ -79,9 +78,9 @@ impl RecordingWriter {
                     &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
                     allow_hardware_encode as u32,
                 )
-                .map_err(|e| AppError::Encode(format!("SetUINT32 hw_transforms: {e}")))?;
+                .encode_ctx("SetUINT32 hw_transforms")?;
             let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
-                .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+                .encode_ctx("MFCreateSinkWriterFromURL")?;
 
             let requested_subtype = if codec == "h265" {
                 MFVideoFormat_HEVC
@@ -101,27 +100,25 @@ impl RecordingWriter {
                         MFVideoFormat_H264,
                         bitrate_bps,
                     )?;
-                    writer.AddStream(&fallback_out).map_err(|e| {
-                        AppError::Encode(format!("AddStream video (H264 fallback): {e}"))
-                    })?
+                    writer
+                        .AddStream(&fallback_out)
+                        .encode_ctx("AddStream video (H264 fallback)")?
                 }
                 Err(e) => return Err(AppError::Encode(format!("AddStream video: {e}"))),
             };
             let video_in = make_video_input_type(width, height, fps)?;
             writer
                 .SetInputMediaType(video_stream, &video_in, None)
-                .map_err(|e| AppError::Encode(format!("SetInputMediaType video: {e}")))?;
+                .encode_ctx("SetInputMediaType video")?;
 
             let mut audio_streams = Vec::new();
             for (sample_rate, channels) in audio_tracks {
                 let audio_out = make_audio_output_type(*sample_rate, *channels)?;
                 let audio_in = make_audio_input_type(*sample_rate, *channels)?;
-                let idx = writer
-                    .AddStream(&audio_out)
-                    .map_err(|e| AppError::Encode(format!("AddStream audio: {e}")))?;
+                let idx = writer.AddStream(&audio_out).encode_ctx("AddStream audio")?;
                 writer
                     .SetInputMediaType(idx, &audio_in, None)
-                    .map_err(|e| AppError::Encode(format!("SetInputMediaType audio: {e}")))?;
+                    .encode_ctx("SetInputMediaType audio")?;
                 audio_streams.push(idx);
             }
 
@@ -137,11 +134,7 @@ impl RecordingWriter {
     }
 
     pub fn begin_writing(&self) -> Result<(), AppError> {
-        unsafe {
-            self.writer
-                .BeginWriting()
-                .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))
-        }
+        unsafe { self.writer.BeginWriting().encode_ctx("BeginWriting") }
     }
 
     pub fn write_video(&self, frame: VideoFrame) -> Result<(), AppError> {
@@ -152,7 +145,7 @@ impl RecordingWriter {
             let sample = make_sample(&data, pts_hns, duration_hns)?;
             self.writer
                 .WriteSample(self.video_stream, &sample)
-                .map_err(|e| AppError::Encode(format!("WriteSample video: {e}")))
+                .encode_ctx("WriteSample video")
         }
     }
 
@@ -186,15 +179,13 @@ impl RecordingWriter {
             let sample = make_sample(&pcm, pts_hns, duration_hns)?;
             self.writer
                 .WriteSample(stream_idx, &sample)
-                .map_err(|e| AppError::Encode(format!("WriteSample audio[{track_idx}]: {e}")))
+                .encode_ctx(format_args!("WriteSample audio[{track_idx}]"))
         }
     }
 
     pub fn finalize(self) -> Result<PathBuf, AppError> {
         unsafe {
-            self.writer
-                .Finalize()
-                .map_err(|e| AppError::Encode(format!("Finalize: {e}")))?;
+            self.writer.Finalize().encode_ctx("Finalize")?;
         }
         Ok(self.output_path)
     }
@@ -208,21 +199,20 @@ unsafe fn make_video_output_type(
     bitrate_bps: u32,
 ) -> Result<IMFMediaType, AppError> {
     unsafe {
-        let t =
-            MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
+        let t = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-            .map_err(|e| AppError::Encode(format!("SetGUID MajorType: {e}")))?;
+            .encode_ctx("SetGUID MajorType")?;
         t.SetGUID(&MF_MT_SUBTYPE, &subtype)
-            .map_err(|e| AppError::Encode(format!("SetGUID subtype: {e}")))?;
+            .encode_ctx("SetGUID subtype")?;
         t.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
-            .map_err(|e| AppError::Encode(format!("SetUINT64 frame_size: {e}")))?;
+            .encode_ctx("SetUINT64 frame_size")?;
         t.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(fps, 1))
-            .map_err(|e| AppError::Encode(format!("SetUINT64 frame_rate: {e}")))?;
+            .encode_ctx("SetUINT64 frame_rate")?;
         t.SetUINT32(&MF_MT_AVG_BITRATE, bitrate_bps)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 bitrate: {e}")))?;
+            .encode_ctx("SetUINT32 bitrate")?;
         // MFVideoInterlace_Progressive = MFVideoInterlaceMode(2i32)
         t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 interlace: {e}")))?;
+            .encode_ctx("SetUINT32 interlace")?;
         Ok(t)
     }
 }
@@ -233,25 +223,24 @@ unsafe fn make_video_input_type(
     fps: u32,
 ) -> Result<IMFMediaType, AppError> {
     unsafe {
-        let t =
-            MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
+        let t = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-            .map_err(|e| AppError::Encode(format!("SetGUID MajorType: {e}")))?;
+            .encode_ctx("SetGUID MajorType")?;
         // ARGB32 matches WGC BGRA output; MF topology inserts colour-space converter automatically
         t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_ARGB32)
-            .map_err(|e| AppError::Encode(format!("SetGUID ARGB32: {e}")))?;
+            .encode_ctx("SetGUID ARGB32")?;
         t.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))
-            .map_err(|e| AppError::Encode(format!("SetUINT64 frame_size: {e}")))?;
+            .encode_ctx("SetUINT64 frame_size")?;
         t.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(fps, 1))
-            .map_err(|e| AppError::Encode(format!("SetUINT64 frame_rate: {e}")))?;
+            .encode_ctx("SetUINT64 frame_rate")?;
         t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 interlace: {e}")))?;
+            .encode_ctx("SetUINT32 interlace")?;
         // Our pixel buffer is top-down (D3D11's natural row order, preserved by the
         // straight row-by-row copy in capture/video.rs). Without this, the color
         // converter defaults to assuming bottom-up (classic DIB convention), which
         // flips the encoded video vertically. Positive stride = top-down.
         t.SetUINT32(&MF_MT_DEFAULT_STRIDE, width * 4)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 default_stride: {e}")))?;
+            .encode_ctx("SetUINT32 default_stride")?;
         Ok(t)
     }
 }
@@ -261,18 +250,17 @@ pub(crate) unsafe fn make_audio_output_type(
     channels: u16,
 ) -> Result<IMFMediaType, AppError> {
     unsafe {
-        let t =
-            MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
+        let t = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-            .map_err(|e| AppError::Encode(format!("SetGUID audio major: {e}")))?;
+            .encode_ctx("SetGUID audio major")?;
         t.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)
-            .map_err(|e| AppError::Encode(format!("SetGUID AAC: {e}")))?;
+            .encode_ctx("SetGUID AAC")?;
         t.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)
-            .map_err(|e| AppError::Encode(format!("sample_rate out: {e}")))?;
+            .encode_ctx("sample_rate out")?;
         t.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)
-            .map_err(|e| AppError::Encode(format!("channels out: {e}")))?;
+            .encode_ctx("channels out")?;
         t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AUDIO_BITRATE_BPS / 8)
-            .map_err(|e| AppError::Encode(format!("audio bitrate out: {e}")))?;
+            .encode_ctx("audio bitrate out")?;
         Ok(t)
     }
 }
@@ -284,22 +272,21 @@ pub(crate) unsafe fn make_audio_input_type(
     unsafe {
         let block_align = channels as u32 * 2;
         let bytes_per_sec = sample_rate * block_align;
-        let t =
-            MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
+        let t = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-            .map_err(|e| AppError::Encode(format!("SetGUID audio major: {e}")))?;
+            .encode_ctx("SetGUID audio major")?;
         t.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
-            .map_err(|e| AppError::Encode(format!("SetGUID PCM: {e}")))?;
+            .encode_ctx("SetGUID PCM")?;
         t.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)
-            .map_err(|e| AppError::Encode(format!("sample_rate in: {e}")))?;
+            .encode_ctx("sample_rate in")?;
         t.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)
-            .map_err(|e| AppError::Encode(format!("channels in: {e}")))?;
+            .encode_ctx("channels in")?;
         t.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
-            .map_err(|e| AppError::Encode(format!("bits_per_sample: {e}")))?;
+            .encode_ctx("bits_per_sample")?;
         t.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align)
-            .map_err(|e| AppError::Encode(format!("block_align: {e}")))?;
+            .encode_ctx("block_align")?;
         t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytes_per_sec)
-            .map_err(|e| AppError::Encode(format!("bytes_per_sec: {e}")))?;
+            .encode_ctx("bytes_per_sec")?;
         Ok(t)
     }
 }
@@ -310,32 +297,22 @@ pub(crate) unsafe fn make_sample(
     duration_hns: i64,
 ) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, AppError> {
     unsafe {
-        let buffer = MFCreateMemoryBuffer(data.len() as u32)
-            .map_err(|e| AppError::Encode(format!("MFCreateMemoryBuffer: {e}")))?;
+        let buffer = MFCreateMemoryBuffer(data.len() as u32).encode_ctx("MFCreateMemoryBuffer")?;
 
         let mut buf_ptr: *mut u8 = std::ptr::null_mut();
-        buffer
-            .Lock(&mut buf_ptr, None, None)
-            .map_err(|e| AppError::Encode(format!("Lock: {e}")))?;
+        buffer.Lock(&mut buf_ptr, None, None).encode_ctx("Lock")?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, data.len());
-        buffer
-            .Unlock()
-            .map_err(|e| AppError::Encode(format!("Unlock: {e}")))?;
+        buffer.Unlock().encode_ctx("Unlock")?;
         buffer
             .SetCurrentLength(data.len() as u32)
-            .map_err(|e| AppError::Encode(format!("SetCurrentLength: {e}")))?;
+            .encode_ctx("SetCurrentLength")?;
 
-        let sample =
-            MFCreateSample().map_err(|e| AppError::Encode(format!("MFCreateSample: {e}")))?;
-        sample
-            .AddBuffer(&buffer)
-            .map_err(|e| AppError::Encode(format!("AddBuffer: {e}")))?;
-        sample
-            .SetSampleTime(pts_hns)
-            .map_err(|e| AppError::Encode(format!("SetSampleTime: {e}")))?;
+        let sample = MFCreateSample().encode_ctx("MFCreateSample")?;
+        sample.AddBuffer(&buffer).encode_ctx("AddBuffer")?;
+        sample.SetSampleTime(pts_hns).encode_ctx("SetSampleTime")?;
         sample
             .SetSampleDuration(duration_hns)
-            .map_err(|e| AppError::Encode(format!("SetSampleDuration: {e}")))?;
+            .encode_ctx("SetSampleDuration")?;
         Ok(sample)
     }
 }

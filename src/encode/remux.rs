@@ -1,7 +1,7 @@
 use crate::capture::audio::{TARGET_CHANNELS, TARGET_SAMPLE_RATE};
 use crate::encode::mf::MfSession;
 use crate::encode::writer::{make_audio_input_type, make_audio_output_type, make_sample};
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use windows::Win32::Media::MediaFoundation::{
@@ -35,7 +35,7 @@ pub(crate) unsafe fn discover_stream_layout(
             };
             let major = t
                 .GetGUID(&MF_MT_MAJOR_TYPE)
-                .map_err(|e| AppError::Encode(format!("GetGUID major_type (stream {i}): {e}")))?;
+                .encode_ctx(format_args!("GetGUID major_type (stream {i})"))?;
             if major == MFMediaType_Video {
                 video = video.or(Some(i));
             } else if major == MFMediaType_Audio {
@@ -63,29 +63,27 @@ pub(crate) unsafe fn build_passthrough_sink_writer(
 ) -> Result<(IMFSinkWriter, u32, Vec<u32>), AppError> {
     unsafe {
         let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(output_url, None, None)
-            .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+            .encode_ctx("MFCreateSinkWriterFromURL")?;
 
         let video_sink = writer
             .AddStream(video_type)
-            .map_err(|e| AppError::Encode(format!("AddStream(video): {e}")))?;
+            .encode_ctx("AddStream(video)")?;
         writer
             .SetInputMediaType(video_sink, video_type, None)
-            .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
+            .encode_ctx("SetInputMediaType(video)")?;
 
         let mut audio_sinks = Vec::with_capacity(audio_types.len());
         for (i, audio_type) in audio_types.iter().enumerate() {
             let asink = writer
                 .AddStream(audio_type)
-                .map_err(|e| AppError::Encode(format!("AddStream(audio[{i}]): {e}")))?;
+                .encode_ctx(format_args!("AddStream(audio[{i}])"))?;
             writer
                 .SetInputMediaType(asink, audio_type, None)
-                .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio[{i}]): {e}")))?;
+                .encode_ctx(format_args!("SetInputMediaType(audio[{i}])"))?;
             audio_sinks.push(asink);
         }
 
-        writer
-            .BeginWriting()
-            .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))?;
+        writer.BeginWriting().encode_ctx("BeginWriting")?;
 
         Ok((writer, video_sink, audio_sinks))
     }
@@ -131,7 +129,7 @@ unsafe fn copy_passthrough_samples(
                     Some(&mut timestamp),
                     Some(&mut sample),
                 )
-                .map_err(|e| AppError::Encode(format!("ReadSample: {e}")))?;
+                .encode_ctx("ReadSample")?;
 
             if stream_flags & 1 != 0 {
                 return Err(AppError::Encode(format!(
@@ -148,9 +146,9 @@ unsafe fn copy_passthrough_samples(
             }
 
             if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
-                writer.WriteSample(sink_idx, &s).map_err(|e| {
-                    AppError::Encode(format!("WriteSample(stream {actual_idx}): {e}"))
-                })?;
+                writer
+                    .WriteSample(sink_idx, &s)
+                    .encode_ctx(format_args!("WriteSample(stream {actual_idx})"))?;
             }
         }
         Ok(())
@@ -180,8 +178,8 @@ pub fn count_audio_tracks(path: &Path) -> Result<usize, AppError> {
             path.to_str()
                 .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
         );
-        let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None)
-            .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL: {e}")))?;
+        let reader: IMFSourceReader =
+            MFCreateSourceReaderFromURL(&url, None).encode_ctx("MFCreateSourceReaderFromURL")?;
         Ok(discover_stream_layout(&reader)?.audio.len())
     }
 }
@@ -280,37 +278,34 @@ unsafe fn decode_track_to_pcm(
             .get(idx)
             .ok_or_else(|| AppError::Encode(format!("no audio track at logical index {idx}")))?;
 
-        let reader: IMFSourceReader =
-            MFCreateSourceReaderFromURL(input_url, None).map_err(|e| {
-                AppError::Encode(format!("MFCreateSourceReaderFromURL audio[{idx}]: {e}"))
-            })?;
+        let reader: IMFSourceReader = MFCreateSourceReaderFromURL(input_url, None)
+            .encode_ctx(format_args!("MFCreateSourceReaderFromURL audio[{idx}]"))?;
         reader
             .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
+            .encode_ctx("SetStreamSelection(all,false)")?;
         reader
             .SetStreamSelection(src_idx, true)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {idx}): {e}")))?;
+            .encode_ctx(format_args!("SetStreamSelection(audio {idx})"))?;
 
-        let pcm_type =
-            MFCreateMediaType().map_err(|e| AppError::Encode(format!("MFCreateMediaType: {e}")))?;
+        let pcm_type = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
         pcm_type
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-            .map_err(|e| AppError::Encode(format!("SetGUID major_type: {e}")))?;
+            .encode_ctx("SetGUID major_type")?;
         pcm_type
             .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
-            .map_err(|e| AppError::Encode(format!("SetGUID PCM: {e}")))?;
+            .encode_ctx("SetGUID PCM")?;
         pcm_type
             .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, mix_rate)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 rate: {e}")))?;
+            .encode_ctx("SetUINT32 rate")?;
         pcm_type
             .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, mix_channels as u32)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 channels: {e}")))?;
+            .encode_ctx("SetUINT32 channels")?;
         pcm_type
             .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 bits: {e}")))?;
+            .encode_ctx("SetUINT32 bits")?;
         reader
             .SetCurrentMediaType(src_idx, None, &pcm_type)
-            .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(audio {idx}): {e}")))?;
+            .encode_ctx(format_args!("SetCurrentMediaType(audio {idx})"))?;
 
         let mut samples: Vec<i16> = Vec::new();
         let mut first_frame_offset: Option<usize> = None;
@@ -329,20 +324,20 @@ unsafe fn decode_track_to_pcm(
                     Some(&mut timestamp),
                     Some(&mut sample),
                 )
-                .map_err(|e| AppError::Encode(format!("ReadSample(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("ReadSample(audio {idx})"))?;
 
             if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
                 break;
             }
             let Some(sample) = sample else { continue };
-            let buffer = sample.ConvertToContiguousBuffer().map_err(|e| {
-                AppError::Encode(format!("ConvertToContiguousBuffer(audio {idx}): {e}"))
-            })?;
+            let buffer = sample
+                .ConvertToContiguousBuffer()
+                .encode_ctx(format_args!("ConvertToContiguousBuffer(audio {idx})"))?;
             let mut data: *mut u8 = std::ptr::null_mut();
             let mut cur_len = 0u32;
             buffer
                 .Lock(&mut data, None, Some(&mut cur_len))
-                .map_err(|e| AppError::Encode(format!("Lock(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("Lock(audio {idx})"))?;
             let bytes = std::slice::from_raw_parts(data, cur_len as usize);
 
             if first_frame_offset.is_none() {
@@ -355,7 +350,7 @@ unsafe fn decode_track_to_pcm(
 
             buffer
                 .Unlock()
-                .map_err(|e| AppError::Encode(format!("Unlock(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("Unlock(audio {idx})"))?;
         }
 
         Ok((first_frame_offset.unwrap_or(0), samples))
@@ -380,11 +375,11 @@ unsafe fn do_export_grouped(
         );
 
         let probe_reader: IMFSourceReader = MFCreateSourceReaderFromURL(&input_url, None)
-            .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL probe: {e}")))?;
+            .encode_ctx("MFCreateSourceReaderFromURL probe")?;
         let layout = discover_stream_layout(&probe_reader)?;
         let video_type: IMFMediaType = probe_reader
             .GetNativeMediaType(layout.video, 0)
-            .map_err(|e| AppError::Encode(format!("GetNativeMediaType(video): {e}")))?;
+            .encode_ctx("GetNativeMediaType(video)")?;
 
         let mix_rate = TARGET_SAMPLE_RATE;
         let mix_channels = TARGET_CHANNELS as usize;
@@ -445,25 +440,24 @@ unsafe fn do_export_grouped(
         // a minute with ~0s of CPU time consumed in that window -- sleeping,
         // not computing). Disabling it here writes as fast as the CPU can go.
         let mut attrs_opt: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs_opt, 2)
-            .map_err(|e| AppError::Encode(format!("MFCreateAttributes: {e}")))?;
+        MFCreateAttributes(&mut attrs_opt, 2).encode_ctx("MFCreateAttributes")?;
         let attrs =
             attrs_opt.ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
         attrs
             .SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 disable_throttling: {e}")))?;
+            .encode_ctx("SetUINT32 disable_throttling")?;
         attrs
             .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
-            .map_err(|e| AppError::Encode(format!("SetUINT32 hw_transforms: {e}")))?;
+            .encode_ctx("SetUINT32 hw_transforms")?;
         let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&output_url, None, Some(&attrs))
-            .map_err(|e| AppError::Encode(format!("MFCreateSinkWriterFromURL: {e}")))?;
+            .encode_ctx("MFCreateSinkWriterFromURL")?;
 
         let video_sink = writer
             .AddStream(&video_type)
-            .map_err(|e| AppError::Encode(format!("AddStream(video): {e}")))?;
+            .encode_ctx("AddStream(video)")?;
         writer
             .SetInputMediaType(video_sink, &video_type, None)
-            .map_err(|e| AppError::Encode(format!("SetInputMediaType(video): {e}")))?;
+            .encode_ctx("SetInputMediaType(video)")?;
 
         let mut passthrough_sinks: Vec<(u32, u32)> = Vec::new(); // (src_idx, sink_idx)
         for &idx in &passthrough_indices {
@@ -472,13 +466,13 @@ unsafe fn do_export_grouped(
             })?;
             let native_type: IMFMediaType = probe_reader
                 .GetNativeMediaType(src_idx, 0)
-                .map_err(|e| AppError::Encode(format!("GetNativeMediaType(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("GetNativeMediaType(audio {idx})"))?;
             let sink_idx = writer
                 .AddStream(&native_type)
-                .map_err(|e| AppError::Encode(format!("AddStream(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("AddStream(audio {idx})"))?;
             writer
                 .SetInputMediaType(sink_idx, &native_type, None)
-                .map_err(|e| AppError::Encode(format!("SetInputMediaType(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("SetInputMediaType(audio {idx})"))?;
             passthrough_sinks.push((src_idx, sink_idx));
         }
 
@@ -488,29 +482,27 @@ unsafe fn do_export_grouped(
             let audio_in = make_audio_input_type(mix_rate, mix_channels as u16)?;
             let sink_idx = writer
                 .AddStream(&audio_out)
-                .map_err(|e| AppError::Encode(format!("AddStream(merged audio): {e}")))?;
+                .encode_ctx("AddStream(merged audio)")?;
             writer
                 .SetInputMediaType(sink_idx, &audio_in, None)
-                .map_err(|e| AppError::Encode(format!("SetInputMediaType(merged audio): {e}")))?;
+                .encode_ctx("SetInputMediaType(merged audio)")?;
             merge_sinks.push(sink_idx);
         }
 
-        writer
-            .BeginWriting()
-            .map_err(|e| AppError::Encode(format!("BeginWriting: {e}")))?;
+        writer.BeginWriting().encode_ctx("BeginWriting")?;
 
         // Video + passthrough audio: interleaved compressed-copy loop,
         // same technique as `do_remux`.
         probe_reader
             .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
+            .encode_ctx("SetStreamSelection(all,false)")?;
         probe_reader
             .SetStreamSelection(layout.video, true)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
+            .encode_ctx("SetStreamSelection(video)")?;
         for &(src_idx, _) in &passthrough_sinks {
             probe_reader
                 .SetStreamSelection(src_idx, true)
-                .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio): {e}")))?;
+                .encode_ctx("SetStreamSelection(audio)")?;
         }
         let mut source_to_sink: HashMap<u32, u32> = HashMap::new();
         source_to_sink.insert(layout.video, video_sink);
@@ -536,14 +528,12 @@ unsafe fn do_export_grouped(
                 let sample = make_sample(&chunk_bytes, pts_hns, duration_hns)?;
                 writer
                     .WriteSample(sink_idx, &sample)
-                    .map_err(|e| AppError::Encode(format!("WriteSample(merged audio): {e}")))?;
+                    .encode_ctx("WriteSample(merged audio)")?;
                 frame = end;
             }
         }
 
-        writer
-            .Finalize()
-            .map_err(|e| AppError::Encode(format!("Finalize: {e}")))?;
+        writer.Finalize().encode_ctx("Finalize")?;
 
         Ok(output.to_path_buf())
     }
@@ -568,17 +558,17 @@ unsafe fn do_remux(
 
         // ── Source reader ────────────────────────────────────────────────────────
         let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&input_url, None)
-            .map_err(|e| AppError::Encode(format!("MFCreateSourceReaderFromURL: {e}")))?;
+            .encode_ctx("MFCreateSourceReaderFromURL")?;
 
         let layout = discover_stream_layout(&reader)?;
 
         // Disable all streams, then re-enable desired ones
         reader
             .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
+            .encode_ctx("SetStreamSelection(all,false)")?;
         reader
             .SetStreamSelection(layout.video, true)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
+            .encode_ctx("SetStreamSelection(video)")?;
         // audio_track_indices are 0-based logical indices into the discovered audio
         // stream list (in the order they appear in the source), NOT raw stream indices —
         // the sink writer does not guarantee AddStream order matches output track order.
@@ -588,7 +578,7 @@ unsafe fn do_remux(
             })?;
             reader
                 .SetStreamSelection(src_idx, true)
-                .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("SetStreamSelection(audio {idx})"))?;
         }
 
         // Configure each enabled stream for compressed passthrough.
@@ -597,20 +587,20 @@ unsafe fn do_remux(
         // compressed bytes without decoding.
         let video_type: IMFMediaType = reader
             .GetNativeMediaType(layout.video, 0)
-            .map_err(|e| AppError::Encode(format!("GetNativeMediaType(video): {e}")))?;
+            .encode_ctx("GetNativeMediaType(video)")?;
         reader
             .SetCurrentMediaType(layout.video, None, &video_type)
-            .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(video): {e}")))?;
+            .encode_ctx("SetCurrentMediaType(video)")?;
 
         let mut audio_types: Vec<(u32, IMFMediaType)> = Vec::new();
         for &idx in audio_track_indices {
             let src_idx = layout.audio[idx];
             let t: IMFMediaType = reader
                 .GetNativeMediaType(src_idx, 0)
-                .map_err(|e| AppError::Encode(format!("GetNativeMediaType(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("GetNativeMediaType(audio {idx})"))?;
             reader
                 .SetCurrentMediaType(src_idx, None, &t)
-                .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(audio {idx}): {e}")))?;
+                .encode_ctx(format_args!("SetCurrentMediaType(audio {idx})"))?;
             audio_types.push((src_idx, t));
         }
 
@@ -631,9 +621,7 @@ unsafe fn do_remux(
         let total_enabled = 1 + audio_track_indices.len();
         copy_passthrough_samples(&reader, &writer, &source_to_sink, total_enabled)?;
 
-        writer
-            .Finalize()
-            .map_err(|e| AppError::Encode(format!("Finalize: {e}")))?;
+        writer.Finalize().encode_ctx("Finalize")?;
 
         Ok(output.to_path_buf())
     }
