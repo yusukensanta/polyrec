@@ -4,7 +4,7 @@ use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_device
 use crate::config::Config;
 use crate::i18n::Strings;
 use crate::recording_naming::RecordingNaming;
-use crate::session::{EncodeSettings, state::SessionAction};
+use crate::session::{CaptureInputs, EncodeSettings, state::SessionAction};
 use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use std::sync::Arc;
@@ -119,12 +119,15 @@ fn app_audio_fingerprint(sources: &[AppAudioSource]) -> Vec<(String, Vec<u32>)> 
 /// exactly; emitting one label per source regardless of process count would
 /// desync every label after the first multi-process source from its actual
 /// track.
-fn build_audio_labels(devices: &[AudioDevice], app_sources: &[AppAudioSource]) -> Vec<String> {
+fn build_audio_labels<'a>(
+    devices: impl IntoIterator<Item = &'a AudioDevice>,
+    app_sources: impl IntoIterator<Item = &'a AppAudioSource>,
+) -> Vec<String> {
     devices
-        .iter()
+        .into_iter()
         .map(|dev| format!("{} {}", audio_device_icon(dev), dev.name))
         .chain(
-            app_sources.iter().flat_map(|src| {
+            app_sources.into_iter().flat_map(|src| {
                 std::iter::repeat_n(src.display_name.clone(), src.process_ids.len())
             }),
         )
@@ -349,52 +352,34 @@ impl App {
     /// as "the" track) ahead of the mic improves the odds it's what a
     /// player defaults to without explicit track selection, even though
     /// nothing here can fully guarantee it.
-    fn resolve_capture_inputs(
-        &self,
-    ) -> (
-        Vec<AudioDevice>,
-        Vec<f32>,
-        Vec<AppAudioSource>,
-        Vec<f32>,
-        EncodeSettings,
-    ) {
-        let mut selected_devices: Vec<_> = self
+    fn resolve_capture_inputs(&self) -> CaptureInputs {
+        let mut devices: Vec<(AudioDevice, f32)> = self
             .audio_devices
             .iter()
             .zip(self.selected_audio.iter())
             .filter(|&(_, &sel)| sel)
-            .map(|(dev, _)| dev.clone())
+            .map(|(dev, _)| (dev.clone(), self.config.audio_gain(&dev.id)))
             .collect();
-        selected_devices.sort_by_key(|dev| !dev.is_loopback);
-        let selected_gains: Vec<f32> = selected_devices
-            .iter()
-            .map(|dev| self.config.audio_gain(&dev.id))
-            .collect();
-        let selected_app_sources: Vec<_> = self
+        devices.sort_by_key(|(dev, _)| !dev.is_loopback);
+        let app_sources = self
             .app_audio_sources
             .iter()
             .zip(self.selected_app_audio.iter())
             .filter(|&(_, &sel)| sel)
-            .map(|(src, _)| src.clone())
+            .map(|(src, _)| (src.clone(), self.config.app_audio_gain(&src.exe_name)))
             .collect();
-        let selected_app_gains: Vec<f32> = selected_app_sources
-            .iter()
-            .map(|src| self.config.app_audio_gain(&src.exe_name))
-            .collect();
-        let encode = EncodeSettings {
-            codec: self.config.encode.codec.clone(),
-            fps: self.config.encode.fps(),
-            resolution_mode: self.config.encode.resolution_mode(),
-            bitrate_mode: self.config.encode.bitrate_mode(),
-            encoder_mode: self.config.encode.encoder_mode(),
-        };
-        (
-            selected_devices,
-            selected_gains,
-            selected_app_sources,
-            selected_app_gains,
-            encode,
-        )
+        CaptureInputs {
+            devices,
+            app_sources,
+            app_audio_only: self.app_audio_only,
+            encode: EncodeSettings {
+                codec: self.config.encode.codec.clone(),
+                fps: self.config.encode.fps(),
+                resolution_mode: self.config.encode.resolution_mode(),
+                bitrate_mode: self.config.encode.bitrate_mode(),
+                encoder_mode: self.config.encode.encoder_mode(),
+            },
+        }
     }
 
     /// Resolves `Config::use_process_name_for_recording` /
@@ -413,25 +398,22 @@ impl App {
     pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
         let source_title = source.window_title.clone();
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
-        let (selected_devices, selected_gains, selected_app_sources, selected_app_gains, encode) =
-            self.resolve_capture_inputs();
-        let track_count = selected_devices.len() + selected_app_sources.len();
-        let audio_labels = build_audio_labels(&selected_devices, &selected_app_sources);
+        let inputs = self.resolve_capture_inputs();
+        let track_count = inputs.devices.len() + inputs.app_sources.len();
+        let audio_labels = build_audio_labels(
+            inputs.devices.iter().map(|(dev, _)| dev),
+            inputs.app_sources.iter().map(|(src, _)| src),
+        );
         let naming = self.resolve_recording_naming();
         // Only transition to the Recording state once start_capture actually
         // succeeds -- otherwise a disk-full refusal would leave the UI showing
         // "Recording" for a capture that never started.
         match self.session.start_capture(
             source,
-            selected_devices,
-            selected_gains,
-            selected_app_sources,
-            selected_app_gains,
-            self.app_audio_only,
+            inputs,
             self.show_recording_border,
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
-            encode,
             naming,
         ) {
             Ok(path) => {
@@ -534,21 +516,15 @@ impl App {
     }
 
     pub(super) fn start_highlight_buffering_for(&mut self, source: CaptureSource) {
-        let (selected_devices, selected_gains, selected_app_sources, selected_app_gains, encode) =
-            self.resolve_capture_inputs();
+        let inputs = self.resolve_capture_inputs();
         let buffer_seconds = self.config.highlight.buffer_seconds.clamp(
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MIN,
             crate::config::HIGHLIGHT_BUFFER_SECONDS_MAX,
         );
         if let Err(e) = self.session.start_highlight_buffering(
             &source,
-            selected_devices,
-            selected_gains,
-            selected_app_sources,
-            selected_app_gains,
-            self.app_audio_only,
+            inputs,
             &self.config.output_dir,
-            encode,
             buffer_seconds,
         ) {
             tracing::warn!("failed to start Highlight buffering: {e}");

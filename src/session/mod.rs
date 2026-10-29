@@ -1,36 +1,28 @@
 pub mod clock;
+mod pipeline;
 pub mod state;
 
-use crate::capture::CaptureControl;
-use crate::capture::audio::{
-    TARGET_CHANNELS, TARGET_SAMPLE_RATE, run_audio_capture, run_process_loopback_capture,
-};
-use crate::capture::video::{
-    CaptureTarget, query_capture_size, query_display_size, run_video_capture,
-};
+pub use pipeline::CaptureInputs;
+
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
-use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
+use crate::encode::RecordingCommand;
+use crate::encode::actor::spawn_recording_actor;
 use crate::encode::highlight_export;
-use crate::encode::writer::video_bitrate_bps;
-use crate::encode::{EncoderParams, RecordingCommand};
 use crate::error::{AppError, ResultExt};
 use crate::highlight::{
     HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
-use crate::types::{
-    AppAudioSource, AudioDevice, CaptureKind, CaptureSource, SessionState, TrackId,
-};
+use crate::types::{CaptureKind, CaptureSource, SessionState};
+use pipeline::{CaptureDimensions, CapturePipeline};
 use state::{SessionAction, transition};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-const VIDEO_CHANNEL_CAPACITY: usize = 4;
-const AUDIO_CHANNEL_CAPACITY: usize = 64;
 
 /// Resolved encoder settings for one recording — built by the caller (the dashboard,
 /// from `Config::encode`) and passed into `start_capture`.
@@ -60,16 +52,9 @@ impl Default for EncodeSettings {
 }
 
 pub struct ActiveCapture {
-    capture_handles: Vec<JoinHandle<()>>,
-    pump_handles: Vec<JoinHandle<()>>,
+    pipeline: CapturePipeline,
     pub recorder_handle: JoinHandle<Result<PathBuf, AppError>>,
     pub recording_tx: mpsc::Sender<RecordingCommand>,
-    /// Clock + pause/stop signals shared by every capture loop of this
-    /// recording. The capture loops run on their own `spawn_blocking` OS
-    /// threads, so `capture_handles.abort()` alone does NOT stop them --
-    /// `abort()` has no effect on an already-running blocking closure; they
-    /// only exit once `ctrl.request_stop()` is observed (see `stop_capture`).
-    pub ctrl: CaptureControl,
     pub output_path: PathBuf,
     /// Folder `output_path`'s finished file will be renamed into (see
     /// `encode::actor::spawn_recording_actor`) -- along with `app_name` and
@@ -96,6 +81,13 @@ pub struct ActiveCapture {
     pub kind: CaptureKind,
 }
 
+impl ActiveCapture {
+    /// Recorded time so far, excluding paused spans.
+    pub fn elapsed(&self) -> Duration {
+        self.pipeline.ctrl.clock.elapsed()
+    }
+}
+
 /// The rolling "Highlight" background buffer -- entirely separate from
 /// `ActiveCapture`, on its own capture threads, and NOT part of the
 /// Idle/Recording/Paused state machine (`session::state`): it's a background
@@ -103,12 +95,10 @@ pub struct ActiveCapture {
 /// not a session state of its own. See the Highlight buffer design plan for
 /// the full lifecycle rules this implements.
 pub struct ActiveHighlight {
-    capture_handles: Vec<JoinHandle<()>>,
-    pump_handles: Vec<JoinHandle<()>>,
+    pipeline: CapturePipeline,
     highlight_handle: JoinHandle<Result<(), AppError>>,
     highlight_tx: mpsc::Sender<RecordingCommand>,
     save_now_tx: mpsc::UnboundedSender<SaveNowRequest>,
-    ctrl: CaptureControl,
     segments: Arc<Mutex<VecDeque<SegmentInfo>>>,
     /// How much of the buffer `save_highlight` should try to save -- captured
     /// at start time since it's this buffering session's own setting, not
@@ -155,23 +145,15 @@ impl SessionManager {
 
     /// Starts capture and recording actors.
     /// `frame_count` is incremented by the video pump for each frame forwarded to the encoder.
-    #[allow(clippy::too_many_arguments)]
     pub fn start_capture(
         &mut self,
         source: CaptureSource,
-        audio_devices: Vec<AudioDevice>,
-        audio_gains: Vec<f32>,
-        app_audio_sources: Vec<AppAudioSource>,
-        app_audio_source_gains: Vec<f32>,
-        app_audio_only: bool,
+        inputs: CaptureInputs,
         show_border: bool,
         frame_count: Arc<AtomicU64>,
-        output_dir: &std::path::Path,
-        encode: EncodeSettings,
+        output_dir: &Path,
         naming: RecordingNaming,
     ) -> Result<PathBuf, AppError> {
-        let ctrl = CaptureControl::new();
-
         let app_name = app_name_from_exe(&source.exe_name);
         let (output_path, polyrec_dir) = prepare_recording_paths(output_dir, &app_name);
 
@@ -180,126 +162,34 @@ impl SessionManager {
             return Err(AppError::DiskFull(polyrec_dir));
         }
 
-        // All captured audio is downmixed/resampled (or, for app sources,
-        // already produced) at this fixed target, regardless of each
-        // device's native mix format -- so a per-app source's track needs
-        // the exact same spec entry as a device's. See
-        // total_audio_track_count's doc comment for why the count (not a
-        // per-track value) is the only thing that needs to match
-        // spawn_app_audio_tracks's track-ID assignment.
-        let audio_specs: Vec<(u32, u16)> =
-            vec![
-                (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-                total_audio_track_count(&audio_devices, &app_audio_sources)
-            ];
-
-        let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
-            resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
-
-        // Spawn RecordingActor
+        let dims = CaptureDimensions::resolve(&source, &inputs.encode);
         let disk_full_flag = Arc::new(AtomicBool::new(false));
-        let active_output_dir = polyrec_dir.clone();
-        let active_app_name = app_name.clone();
-        let active_naming = naming.clone();
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
-            polyrec_dir,
-            app_name,
-            naming,
-            encoder_params(
-                output_width,
-                output_height,
-                bitrate_bps,
-                audio_specs,
-                &encode,
-            ),
+            polyrec_dir.clone(),
+            app_name.clone(),
+            naming.clone(),
+            dims.encoder_params(&inputs),
             Arc::clone(&disk_full_flag),
         );
-
-        // Spawn video capture + pump
-        let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
-        let hwnd_val = source.hwnd;
-        let source_kind = source.kind;
-        let video_ctrl = ctrl.clone();
-        let video_capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("failed to build video capture runtime: {e}");
-                    return;
-                }
-            };
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
-                let target = match source_kind {
-                    CaptureKind::Window => CaptureTarget::Window(windows::Win32::Foundation::HWND(
-                        hwnd_val as *mut core::ffi::c_void,
-                    )),
-                    CaptureKind::Monitor => CaptureTarget::Monitor(
-                        windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void),
-                    ),
-                };
-                if let Err(e) = run_video_capture(
-                    target,
-                    (capture_width, capture_height),
-                    (output_width, output_height),
-                    video_ctrl,
-                    video_tx,
-                    show_border,
-                )
-                .await
-                {
-                    tracing::error!("VideoCapture error: {e}");
-                }
-            });
-        });
-        let video_pump_handle = spawn_video_pump(video_rx, recording_tx.clone(), frame_count);
-
-        // Spawn audio capture + pump (one per device), then per-app audio
-        // capture + pump -- see spawn_device_audio_tracks/spawn_app_audio_tracks
-        // for what each does and why sharing them with start_highlight_buffering
-        // is safe.
-        let mut capture_handles = vec![video_capture_handle];
-        let mut pump_handles = vec![video_pump_handle];
-        let device_track_count = audio_devices.len();
-
-        let (device_capture_handles, device_pump_handles) = spawn_device_audio_tracks(
-            audio_devices,
-            &audio_gains,
-            app_audio_only,
-            source.kind,
-            source.process_id,
-            &ctrl,
+        let pipeline = CapturePipeline::spawn(
+            &source,
+            inputs,
+            dims,
             &recording_tx,
+            frame_count,
+            show_border,
             "",
         );
-        capture_handles.extend(device_capture_handles);
-        pump_handles.extend(device_pump_handles);
-
-        let (app_capture_handles, app_pump_handles) = spawn_app_audio_tracks(
-            app_audio_sources,
-            &app_audio_source_gains,
-            device_track_count as u32,
-            &ctrl,
-            &recording_tx,
-            "",
-        );
-        capture_handles.extend(app_capture_handles);
-        pump_handles.extend(app_pump_handles);
 
         self.active = Some(ActiveCapture {
-            capture_handles,
-            pump_handles,
+            pipeline,
             recorder_handle,
             recording_tx,
-            ctrl,
             output_path: output_path.clone(),
-            output_dir: active_output_dir,
-            app_name: active_app_name,
-            naming: active_naming,
+            output_dir: polyrec_dir,
+            app_name,
+            naming,
             disk_full_flag,
             hwnd: source.hwnd,
             kind: source.kind,
@@ -312,40 +202,20 @@ impl SessionManager {
     /// Returns the recorder's `JoinHandle` so the caller can wait for finalization to complete
     /// before treating the output file as ready (see recorder-finalize-race design spec).
     pub fn stop_capture(&mut self) -> Option<JoinHandle<Result<PathBuf, AppError>>> {
-        if let Some(active) = self.active.take() {
-            // Signal capture loops to exit -- `abort()` has no effect on the
-            // spawn_blocking closures actually running them (see stop_flag doc);
-            // they only stop by observing this flag on their next loop iteration.
-            active.ctrl.request_stop();
-            // Wait for every capture loop to actually return, and for the pump
-            // tasks forwarding their output to drain and exit in turn (a pump
-            // exits once its capture loop's sender is dropped, which happens
-            // when the loop returns) -- bounded by the capture loops' own
-            // shutdown time (at most on the order of one frame, not the
-            // recording's length), not blocking indefinitely.
-            //
-            // This must happen *before* `Stop` is sent below: `Stop` used to be
-            // sent immediately, which could reach the recorder and trigger
-            // `finalize()` before a still-in-flight frame had been forwarded by
-            // its pump, silently dropping it from the output. Video capture
-            // trails its last-captured frame by up to one iteration by design
-            // (see the ping-pong buffering in `capture::video`), so without
-            // this wait that final frame was frequently lost -- reproduced by a
-            // real short recording ending up with zero video frames.
-            tokio::runtime::Handle::current().block_on(async {
-                for h in active.capture_handles {
-                    let _ = h.await;
-                }
-                for h in active.pump_handles {
-                    let _ = h.await;
-                }
-            });
-            // Deliver Stop to recorder; blocking_send is safe from non-async context
-            let _ = active.recording_tx.blocking_send(RecordingCommand::Stop);
-            Some(active.recorder_handle)
-        } else {
-            None
-        }
+        let active = self.active.take()?;
+        // The capture loops must have fully drained into the recorder
+        // *before* `Stop` is sent below: `Stop` used to be sent immediately,
+        // which could reach the recorder and trigger `finalize()` before a
+        // still-in-flight frame had been forwarded by its pump, silently
+        // dropping it from the output. Video capture trails its
+        // last-captured frame by up to one iteration by design (see the
+        // ping-pong buffering in `capture::video`), so without this wait that
+        // final frame was frequently lost -- reproduced by a real short
+        // recording ending up with zero video frames.
+        active.pipeline.shutdown();
+        // Deliver Stop to recorder; blocking_send is safe from non-async context
+        let _ = active.recording_tx.blocking_send(RecordingCommand::Stop);
+        Some(active.recorder_handle)
     }
 
     pub fn is_recording(&self) -> bool {
@@ -373,23 +243,16 @@ impl SessionManager {
     }
 
     /// Starts (or restarts, for a different window) the Highlight background
-    /// buffer against `source`. Deliberately mirrors `start_capture`'s
-    /// capture-thread setup rather than sharing a helper with it -- keeping
-    /// the two paths fully independent means a bug in one can't reach the
-    /// other, per the design's "no degradation of existing recording"
-    /// requirement. Own capture threads, own clock, own (never-toggled)
-    /// pause flag -- Highlight buffering doesn't support pausing.
-    #[allow(clippy::too_many_arguments)]
+    /// buffer against `source`, on a `CapturePipeline` of its own -- own
+    /// capture threads, own clock, own (never-toggled) pause flag; nothing is
+    /// shared with a manual recording's pipeline but the code that builds it
+    /// (see `pipeline`'s module doc). Highlight buffering doesn't support
+    /// pausing.
     pub fn start_highlight_buffering(
         &mut self,
         source: &CaptureSource,
-        audio_devices: Vec<AudioDevice>,
-        audio_gains: Vec<f32>,
-        app_audio_sources: Vec<AppAudioSource>,
-        app_audio_source_gains: Vec<f32>,
-        app_audio_only: bool,
+        inputs: CaptureInputs,
         output_dir: &Path,
-        encode: EncodeSettings,
         buffer_seconds: u32,
     ) -> Result<(), AppError> {
         let segment_dir = highlight_segment_dir(output_dir);
@@ -413,20 +276,7 @@ impl SessionManager {
             return Err(AppError::DiskFull(segment_dir));
         }
 
-        let ctrl = CaptureControl::new(); // never paused -- no pause support
-
-        // See total_audio_track_count's doc comment for why the count (not
-        // a per-track value) is the only thing that needs to match
-        // spawn_app_audio_tracks's track-ID assignment.
-        let audio_specs: Vec<(u32, u16)> =
-            vec![
-                (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-                total_audio_track_count(&audio_devices, &app_audio_sources)
-            ];
-
-        let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
-            resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
-
+        let dims = CaptureDimensions::resolve(source, &inputs.encode);
         let max_segments = buffer_seconds
             .max(1)
             .div_ceil(HIGHLIGHT_SEGMENT_SECONDS)
@@ -435,96 +285,27 @@ impl SessionManager {
         let disk_full_flag = Arc::new(AtomicBool::new(false));
         let (highlight_tx, save_now_tx, highlight_handle) = spawn_highlight_actor(
             segment_dir,
-            encoder_params(
-                output_width,
-                output_height,
-                bitrate_bps,
-                audio_specs,
-                &encode,
-            ),
+            dims.encoder_params(&inputs),
             HIGHLIGHT_SEGMENT_SECONDS,
             max_segments,
             Arc::clone(&segments),
             Arc::clone(&disk_full_flag),
         );
-
-        let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
-        let hwnd_val = source.hwnd;
-        let source_kind = source.kind;
-        let video_ctrl = ctrl.clone();
-        let video_capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("failed to build highlight video capture runtime: {e}");
-                    return;
-                }
-            };
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
-                let target = match source_kind {
-                    CaptureKind::Window => CaptureTarget::Window(windows::Win32::Foundation::HWND(
-                        hwnd_val as *mut core::ffi::c_void,
-                    )),
-                    CaptureKind::Monitor => CaptureTarget::Monitor(
-                        windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void),
-                    ),
-                };
-                if let Err(e) = run_video_capture(
-                    target,
-                    (capture_width, capture_height),
-                    (output_width, output_height),
-                    video_ctrl,
-                    video_tx,
-                    false,
-                )
-                .await
-                {
-                    tracing::error!("Highlight VideoCapture error: {e}");
-                }
-            });
-        });
-        let video_pump_handle =
-            spawn_video_pump(video_rx, highlight_tx.clone(), Arc::new(AtomicU64::new(0)));
-
-        let mut capture_handles = vec![video_capture_handle];
-        let mut pump_handles = vec![video_pump_handle];
-        let device_track_count = audio_devices.len();
-
-        let (device_capture_handles, device_pump_handles) = spawn_device_audio_tracks(
-            audio_devices,
-            &audio_gains,
-            app_audio_only,
-            source.kind,
-            source.process_id,
-            &ctrl,
+        let pipeline = CapturePipeline::spawn(
+            source,
+            inputs,
+            dims,
             &highlight_tx,
+            Arc::new(AtomicU64::new(0)),
+            false,
             "Highlight ",
         );
-        capture_handles.extend(device_capture_handles);
-        pump_handles.extend(device_pump_handles);
-
-        let (app_capture_handles, app_pump_handles) = spawn_app_audio_tracks(
-            app_audio_sources,
-            &app_audio_source_gains,
-            device_track_count as u32,
-            &ctrl,
-            &highlight_tx,
-            "Highlight ",
-        );
-        capture_handles.extend(app_capture_handles);
-        pump_handles.extend(app_pump_handles);
 
         self.highlight = Some(ActiveHighlight {
-            capture_handles,
-            pump_handles,
+            pipeline,
             highlight_handle,
             highlight_tx,
             save_now_tx,
-            ctrl,
             segments,
             buffer_seconds,
             disk_full_flag,
@@ -558,19 +339,11 @@ impl SessionManager {
     /// end-to-end run, not just the isolated unit tests).
     pub fn stop_highlight_buffering(&mut self, discard: bool) {
         if let Some(active) = self.highlight.take() {
-            active.ctrl.request_stop();
             // See the matching comment in `stop_capture` -- waited on (not
             // aborted) so the capture loops' final in-flight frames reach the
             // highlight actor before `Stop` does, instead of being silently
             // dropped by a `Stop` that got there first.
-            tokio::runtime::Handle::current().block_on(async {
-                for h in active.capture_handles {
-                    let _ = h.await;
-                }
-                for h in active.pump_handles {
-                    let _ = h.await;
-                }
-            });
+            active.pipeline.shutdown();
             let _ = active.highlight_tx.blocking_send(RecordingCommand::Stop);
             if discard {
                 let _ = tokio::runtime::Handle::current().block_on(active.highlight_handle);
@@ -637,14 +410,14 @@ impl SessionManager {
 
     pub fn pause_capture(&mut self) {
         if let Some(active) = &self.active {
-            active.ctrl.pause();
+            active.pipeline.ctrl.pause();
         }
         self.apply(SessionAction::Pause);
     }
 
     pub fn resume_capture(&mut self) {
         if let Some(active) = &self.active {
-            active.ctrl.resume();
+            active.pipeline.ctrl.resume();
         }
         self.apply(SessionAction::Resume);
     }
@@ -711,294 +484,26 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
     (temp_path, polyrec_dir)
 }
 
-/// How many audio tracks `spawn_device_audio_tracks` + `spawn_app_audio_tracks`
-/// will spawn for `audio_devices`/`app_audio_sources` -- one per device, one
-/// per process ID across every app-audio source (see
-/// `AppAudioSource::process_ids`'s doc comment for why). This is the single
-/// source of truth `audio_specs`' entry count is built from in both
-/// `start_capture` and `start_highlight_buffering`: every entry is the same
-/// `(TARGET_SAMPLE_RATE, TARGET_CHANNELS)` value regardless of which
-/// device/app-source it ends up assigned to, so all that actually needs to
-/// match `spawn_app_audio_tracks`'s track-ID assignment is this *count* --
-/// keeping both derived from the same function (rather than two
-/// independently-written iterations over the same data) is what keeps them
-/// from silently drifting apart if either one's filtering logic changes.
-fn total_audio_track_count(
-    audio_devices: &[AudioDevice],
-    app_audio_sources: &[AppAudioSource],
-) -> usize {
-    audio_devices.len()
-        + app_audio_sources
-            .iter()
-            .map(|s| s.process_ids.len())
-            .sum::<usize>()
-}
-
-/// Spawns one capture thread + one pump task per selected audio device,
-/// forwarding each device's samples into `dest_tx` -- the per-device half of
-/// `start_capture`'s and `start_highlight_buffering`'s audio setup, which
-/// otherwise deliberately don't share their capture-thread setup (see
-/// `start_highlight_buffering`'s doc comment on why they're kept
-/// independent). Sharing this doesn't compromise that: every call spawns
-/// entirely new, independent threads/channels/handles, so what's shared is
-/// the *code*, not any *state* between the two callers -- the same reasoning
-/// `resolve_capture_and_output_dimensions` below already relies on for the
-/// pure-math half of setup, extended here to the actual spawn loop.
-/// `log_prefix` ("" for manual recording, "Highlight " for the highlight
-/// buffer) is the only thing that actually differs between the two calls.
-#[allow(clippy::too_many_arguments)]
-fn spawn_device_audio_tracks(
-    audio_devices: Vec<AudioDevice>,
-    audio_gains: &[f32],
-    app_audio_only: bool,
-    source_kind: CaptureKind,
-    source_process_id: u32,
-    ctrl: &CaptureControl,
-    dest_tx: &mpsc::Sender<RecordingCommand>,
-    log_prefix: &'static str,
-) -> (Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
-    let mut capture_handles = Vec::with_capacity(audio_devices.len());
-    let mut pump_handles = Vec::with_capacity(audio_devices.len());
-    for (i, dev) in audio_devices.into_iter().enumerate() {
-        let track_id = TrackId::new(i as u32);
-        let gain = audio_gains.get(i).copied().unwrap_or(1.0);
-        let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-        let audio_ctrl = ctrl.clone();
-        let dev_id = dev.id.clone();
-        let is_loopback = dev.is_loopback;
-        // A `Monitor` source has no owning process to scope loopback to
-        // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
-        // doc comment), so "App audio only" can never apply there regardless
-        // of the checkbox's own state.
-        let use_process_loopback =
-            is_loopback && app_audio_only && source_kind == CaptureKind::Window;
-        let target_pid = source_process_id;
-        let capture_handle = tokio::task::spawn_blocking(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("{log_prefix}failed to build audio capture runtime: {e}");
-                    return;
-                }
-            };
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
-                let result = if use_process_loopback {
-                    run_process_loopback_capture(
-                        target_pid, true, track_id, audio_ctrl, audio_tx, gain,
-                    )
-                    .await
-                } else {
-                    run_audio_capture(dev_id, track_id, is_loopback, audio_ctrl, audio_tx, gain)
-                        .await
-                };
-                if let Err(e) = result {
-                    tracing::error!("{log_prefix}AudioCapture[{track_id:?}] error: {e}");
-                }
-            });
-        });
-        let pump_handle = spawn_audio_pump(audio_rx, dest_tx.clone());
-        capture_handles.push(capture_handle);
-        pump_handles.push(pump_handle);
-    }
-    (capture_handles, pump_handles)
-}
-
-/// Spawns per-app audio capture + pump -- independent of `app_audio_only`
-/// and of whichever process is the video source; each selected app is its
-/// own explicit target, always via process loopback capture since that's
-/// the only way to isolate one app's audio (see `AppAudioSource`'s doc
-/// comment). One app_source can still expand to several tracks: WASAPI's
-/// process-loopback capture only targets one process tree per stream, and
-/// genuinely mixing separately captured PCM streams into one track needs a
-/// real-time mixer this doesn't have -- so multiple genuinely independent
-/// top-level process trees of the same exe (see `AppAudioSource::process_ids`,
-/// and `enumerate_app_audio_sessions`'s `canonical_root_pid`, which already
-/// collapses a single app's parent/child helper processes -- e.g. Discord's
-/// GPU/renderer/utility processes -- down to one entry) each get their own
-/// track instead. A registered-but-inactive entry (empty `process_ids`)
-/// contributes no tracks at all. Track IDs start at `first_track_id` so
-/// they continue on from whatever device tracks `spawn_device_audio_tracks`
-/// already assigned. Same sharing rationale as that function for why this
-/// is safe to call from both `start_capture` and `start_highlight_buffering`.
-#[allow(clippy::too_many_arguments)]
-fn spawn_app_audio_tracks(
-    app_audio_sources: Vec<AppAudioSource>,
-    app_audio_source_gains: &[f32],
-    first_track_id: u32,
-    ctrl: &CaptureControl,
-    dest_tx: &mpsc::Sender<RecordingCommand>,
-    log_prefix: &'static str,
-) -> (Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
-    let mut capture_handles = Vec::new();
-    let mut pump_handles = Vec::new();
-    let mut next_track_id = first_track_id;
-    for (i, app_source) in app_audio_sources.into_iter().enumerate() {
-        tracing::info!(
-            "AppAudio diagnostic: source={} process_ids={:?} (empty means no capture task spawns for it at all)",
-            app_source.exe_name,
-            app_source.process_ids
-        );
-        let gain = app_audio_source_gains.get(i).copied().unwrap_or(1.0);
-        for &target_pid in &app_source.process_ids {
-            let track_id = TrackId::new(next_track_id);
-            next_track_id += 1;
-            let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
-            let audio_ctrl = ctrl.clone();
-            let capture_handle = tokio::task::spawn_blocking(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!(
-                            "{log_prefix}failed to build app audio capture runtime: {e}"
-                        );
-                        return;
-                    }
-                };
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, async move {
-                    if let Err(e) = run_process_loopback_capture(
-                        target_pid, true, track_id, audio_ctrl, audio_tx, gain,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            "{log_prefix}AppAudioCapture[{track_id:?}] pid={target_pid} error: {e}"
-                        );
-                    }
-                });
-            });
-            let pump_handle = spawn_audio_pump(audio_rx, dest_tx.clone());
-            capture_handles.push(capture_handle);
-            pump_handles.push(pump_handle);
-        }
-    }
-    (capture_handles, pump_handles)
-}
-
-/// Resolves the capture-side staging size, encoder output size, and bitrate --
-/// shared by `start_capture` and `start_highlight_buffering`, which otherwise
-/// deliberately don't share their capture-thread setup (see
-/// `start_highlight_buffering`'s doc comment): this part runs before either
-/// spawns any capture threads and is pure query + math, so extracting it
-/// doesn't compromise that independence.
-///
-/// Queries the size Windows.Graphics.Capture will actually deliver frames at —
-/// NOT GetClientRect, which excludes the title bar/borders and doesn't match
-/// WGC's window capture size. Used to size the capture-side staging texture;
-/// does NOT need to match the encoder (frames are scaled to output_width/height),
-/// only itself internally (frame pool vs. staging texture). The display size is
-/// only queried when the resolution mode is `Display` — the non-default mode
-/// (see the resolution-regression fix) — to avoid a wasted syscall otherwise.
-///
-/// For a `Monitor` source, "capture size" and "display size" are the same
-/// thing by construction (you're capturing the monitor itself), so
-/// `query_display_size` -- which resolves a *window*'s monitor via
-/// `MonitorFromWindow` -- is skipped entirely; the already-queried capture
-/// size is reused as the display size too.
-fn resolve_capture_and_output_dimensions(
-    kind: CaptureKind,
-    hwnd_val: usize,
-    encode: &EncodeSettings,
-) -> (u32, u32, u32, u32, u32) {
-    let target = match kind {
-        CaptureKind::Window => CaptureTarget::Window(windows::Win32::Foundation::HWND(
-            hwnd_val as *mut core::ffi::c_void,
-        )),
-        CaptureKind::Monitor => CaptureTarget::Monitor(windows::Win32::Graphics::Gdi::HMONITOR(
-            hwnd_val as *mut core::ffi::c_void,
-        )),
-    };
-    let (capture_width, capture_height) = match query_capture_size(target) {
-        Ok((w, h)) => (w.max(2) & !1, h.max(2) & !1),
-        Err(e) => {
-            tracing::warn!(
-                "query_capture_size failed for handle {:x}: {e}; using 1920x1080",
-                hwnd_val
-            );
-            (1920u32, 1080u32)
-        }
-    };
-    let display_size = if kind == CaptureKind::Monitor {
-        Some((capture_width, capture_height))
-    } else if matches!(encode.resolution_mode, ResolutionMode::Display) {
-        let real_hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
-        match query_display_size(real_hwnd) {
-            Ok((w, h)) => Some((w.max(2) & !1, h.max(2) & !1)),
-            Err(e) => {
-                tracing::warn!(
-                    "query_display_size failed for hwnd {:x}: {e}; using capture size",
-                    hwnd_val
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let (output_width, output_height) = resolve_output_size(
-        &encode.resolution_mode,
-        (capture_width, capture_height),
-        display_size,
-    );
-    let bitrate_bps = match encode.bitrate_mode {
-        BitrateMode::Auto => video_bitrate_bps(output_width, output_height, encode.fps),
-        BitrateMode::Manual(bps) => bps,
-    };
-    (
-        capture_width,
-        capture_height,
-        output_width,
-        output_height,
-        bitrate_bps,
-    )
-}
-
-/// Assembles the writer config both `start_capture` and
-/// `start_highlight_buffering` hand to their actor.
-fn encoder_params(
-    width: u32,
-    height: u32,
-    bitrate_bps: u32,
-    audio_tracks: Vec<(u32, u16)>,
-    encode: &EncodeSettings,
-) -> EncoderParams {
-    EncoderParams {
-        width,
-        height,
-        fps: encode.fps,
-        codec: encode.codec.clone(),
-        bitrate_bps,
-        audio_tracks,
-        allow_hardware_encode: matches!(encode.encoder_mode, EncoderMode::Hardware),
-    }
-}
-
-/// Pure resolution-mode resolution — no I/O, so it's directly unit-testable without
-/// touching real monitor/capture APIs. `display_size` is `None` when the caller didn't
-/// query it (mode != Display) or the query failed.
-fn resolve_output_size(
-    mode: &ResolutionMode,
-    capture_size: (u32, u32),
-    display_size: Option<(u32, u32)>,
-) -> (u32, u32) {
-    match mode {
-        ResolutionMode::Native => capture_size,
-        ResolutionMode::Display => display_size.unwrap_or(capture_size),
-        ResolutionMode::Custom(w, h) => (*w, *h),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{AppAudioSource, AudioDevice};
     use std::sync::atomic::Ordering;
+
+    /// Every device/app at unity gain with the default encode settings --
+    /// what the e2e tests below record with.
+    fn inputs(
+        devices: Vec<AudioDevice>,
+        app_sources: Vec<AppAudioSource>,
+        app_audio_only: bool,
+    ) -> CaptureInputs {
+        CaptureInputs {
+            devices: devices.into_iter().map(|d| (d, 1.0)).collect(),
+            app_sources: app_sources.into_iter().map(|s| (s, 1.0)).collect(),
+            app_audio_only,
+            encode: EncodeSettings::default(),
+        }
+    }
 
     /// `enumerate_sources()` can return transient shell popups (e.g. volume/brightness
     /// OSD "PopupHost" windows) with a degenerate client rect that breaks H264 setup —
@@ -1079,42 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_output_size_native_uses_capture_size() {
-        let size = resolve_output_size(
-            &crate::config::ResolutionMode::Native,
-            (1280, 720),
-            Some((2560, 1440)),
-        );
-        assert_eq!(size, (1280, 720));
-    }
-
-    #[test]
-    fn resolve_output_size_display_uses_display_size_when_available() {
-        let size = resolve_output_size(
-            &crate::config::ResolutionMode::Display,
-            (1280, 720),
-            Some((2560, 1440)),
-        );
-        assert_eq!(size, (2560, 1440));
-    }
-
-    #[test]
-    fn resolve_output_size_display_falls_back_to_capture_size_when_query_failed() {
-        let size = resolve_output_size(&crate::config::ResolutionMode::Display, (1280, 720), None);
-        assert_eq!(size, (1280, 720));
-    }
-
-    #[test]
-    fn resolve_output_size_custom_uses_explicit_values() {
-        let size = resolve_output_size(
-            &crate::config::ResolutionMode::Custom(1920, 1080),
-            (1280, 720),
-            Some((2560, 1440)),
-        );
-        assert_eq!(size, (1920, 1080));
-    }
-
-    #[test]
     fn encode_settings_default_matches_config_default() {
         let settings = EncodeSettings::default();
         let config_default = crate::config::Config::default().encode;
@@ -1158,15 +627,10 @@ mod tests {
         let frame_count = Arc::new(AtomicU64::new(0));
         sm.start_capture(
             source,
-            audio_devices,
-            vec![],
-            vec![],
-            vec![],
-            false,
+            inputs(audio_devices, vec![], false),
             true,
             Arc::clone(&frame_count),
             dir.path(),
-            EncodeSettings::default(),
             RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
@@ -1233,15 +697,10 @@ mod tests {
         let temp_path = sm
             .start_capture(
                 source,
-                audio_devices,
-                vec![],
-                vec![],
-                vec![],
-                false,
+                inputs(audio_devices, vec![], false),
                 true,
                 Arc::clone(&frame_count),
                 dir.path(),
-                EncodeSettings::default(),
                 RecordingNaming::ProcessName,
             )
             .expect("start_capture failed");
@@ -1306,15 +765,10 @@ mod tests {
         let temp_path = sm
             .start_capture(
                 source.clone(),
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-                false,
+                inputs(vec![], vec![], false),
                 true,
                 Arc::clone(&frame_count),
                 dir.path(),
-                EncodeSettings::default(),
                 naming.clone(),
             )
             .expect("start_capture failed (first recording)");
@@ -1342,15 +796,10 @@ mod tests {
         let temp_path2 = sm
             .start_capture(
                 source,
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-                false,
+                inputs(vec![], vec![], false),
                 true,
                 Arc::clone(&frame_count2),
                 dir.path(),
-                EncodeSettings::default(),
                 naming,
             )
             .expect("start_capture failed (second recording)");
@@ -1405,15 +854,10 @@ mod tests {
         let frame_count = Arc::new(AtomicU64::new(0));
         sm.start_capture(
             source,
-            audio_devices,
-            vec![],
-            vec![],
-            vec![],
-            false,
+            inputs(audio_devices, vec![], false),
             true,
             Arc::clone(&frame_count),
             dir.path(),
-            EncodeSettings::default(),
             RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
@@ -1543,15 +987,10 @@ mod tests {
         let temp_path = sm
             .start_capture(
                 source,
-                audio_devices,
-                vec![],
-                vec![],
-                vec![],
-                true,
+                inputs(audio_devices, vec![], true),
                 true,
                 Arc::clone(&frame_count),
                 dir.path(),
-                EncodeSettings::default(),
                 RecordingNaming::ProcessName,
             )
             .expect("start_capture failed");
@@ -1611,15 +1050,10 @@ mod tests {
         let frame_count = Arc::new(AtomicU64::new(0));
         sm.start_capture(
             source,
-            audio_devices,
-            vec![],
-            app_audio_sources,
-            vec![],
-            false,
+            inputs(audio_devices, app_audio_sources, false),
             true,
             Arc::clone(&frame_count),
             dir.path(),
-            EncodeSettings::default(),
             RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
@@ -1698,15 +1132,10 @@ mod tests {
         let frame_count = Arc::new(AtomicU64::new(0));
         sm.start_capture(
             source,
-            audio_devices,
-            vec![],
-            app_audio_sources,
-            vec![],
-            false,
+            inputs(audio_devices, app_audio_sources, false),
             true,
             Arc::clone(&frame_count),
             dir.path(),
-            EncodeSettings::default(),
             RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
@@ -1782,15 +1211,10 @@ mod tests {
         let frame_count = Arc::new(AtomicU64::new(0));
         sm.start_capture(
             source,
-            audio_devices,
-            vec![],
-            app_audio_sources,
-            vec![],
-            false,
+            inputs(audio_devices, app_audio_sources, false),
             true,
             Arc::clone(&frame_count),
             dir.path(),
-            EncodeSettings::default(),
             RecordingNaming::ProcessName,
         )
         .expect("start_capture failed");
@@ -1845,13 +1269,8 @@ mod tests {
         let mut sm = SessionManager::new();
         sm.start_highlight_buffering(
             &source,
-            audio_devices,
-            vec![],
-            vec![],
-            vec![],
-            false,
+            inputs(audio_devices, vec![], false),
             dir.path(),
-            EncodeSettings::default(),
             30,
         )
         .expect("start_highlight_buffering failed");
@@ -1933,13 +1352,8 @@ mod tests {
 
         sm.start_highlight_buffering(
             &source,
-            audio_devices.clone(),
-            vec![],
-            vec![],
-            vec![],
-            false,
+            inputs(audio_devices.clone(), vec![], false),
             dir.path(),
-            EncodeSettings::default(),
             30,
         )
         .expect("first start_highlight_buffering failed");
@@ -1964,13 +1378,8 @@ mod tests {
         // manual recording stops.
         sm.start_highlight_buffering(
             &source,
-            audio_devices,
-            vec![],
-            vec![],
-            vec![],
-            false,
+            inputs(audio_devices, vec![], false),
             dir.path(),
-            EncodeSettings::default(),
             30,
         )
         .expect("resumed start_highlight_buffering failed");
