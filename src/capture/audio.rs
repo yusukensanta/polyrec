@@ -422,7 +422,11 @@ pub async fn run_audio_capture(
             .Activate(CLSCTX_ALL, None)
             .windows_ctx("Activate IAudioClient")?;
 
-        let mix_format = audio_client.GetMixFormat().windows_ctx("GetMixFormat")?;
+        // GetMixFormat hands back a CoTaskMemAlloc'd WAVEFORMATEX the caller
+        // owns -- previously never freed, leaking one allocation per device
+        // track per recording. Initialize copies what it needs, so it's safe
+        // to release as soon as this function returns, on every path.
+        let mix_format = CoTaskMem(audio_client.GetMixFormat().windows_ctx("GetMixFormat")?);
 
         let stream_flags: u32 = if is_loopback {
             AUDCLNT_STREAMFLAGS_LOOPBACK
@@ -437,17 +441,17 @@ pub async fn run_audio_capture(
                 stream_flags,
                 1_000_000i64,
                 0i64,
-                mix_format,
+                mix_format.0,
                 None,
             )
             .windows_ctx("IAudioClient::Initialize")?;
 
-        let sample_rate = (*mix_format).nSamplesPerSec;
-        let channels = (*mix_format).nChannels;
+        let sample_rate = (*mix_format.0).nSamplesPerSec;
+        let channels = (*mix_format.0).nChannels;
         if channels == 0 {
             return Err(AppError::Windows("WASAPI mix format has 0 channels".into()));
         }
-        let bytes_per_frame = (*mix_format).nBlockAlign as usize;
+        let bytes_per_frame = (*mix_format.0).nBlockAlign as usize;
 
         run_capture_loop(
             audio_client,
@@ -463,6 +467,16 @@ pub async fn run_audio_capture(
             None,
         )
         .await
+    }
+}
+
+/// A COM-allocated (`CoTaskMemAlloc`) pointer, freed with `CoTaskMemFree`
+/// on drop.
+struct CoTaskMem<T>(*mut T);
+
+impl<T> Drop for CoTaskMem<T> {
+    fn drop(&mut self) {
+        unsafe { CoTaskMemFree(Some(self.0 as *const _)) };
     }
 }
 
