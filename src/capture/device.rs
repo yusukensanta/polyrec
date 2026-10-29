@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
@@ -28,7 +28,7 @@ impl D3dDevice {
                 None,
                 Some(&mut d3d_context),
             )
-            .map_err(|e| AppError::Capture(format!("D3D11CreateDevice failed: {e}")))?;
+            .capture_ctx("D3D11CreateDevice failed")?;
         }
         Ok(Self {
             d3d_device: d3d_device.unwrap(),
@@ -39,7 +39,7 @@ impl D3dDevice {
     pub fn dxgi_device(&self) -> Result<IDXGIDevice, AppError> {
         self.d3d_device
             .cast::<IDXGIDevice>()
-            .map_err(|e| AppError::Capture(format!("cast to IDXGIDevice failed: {e}")))
+            .capture_ctx("cast to IDXGIDevice failed")
     }
 }
 

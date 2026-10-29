@@ -1,6 +1,6 @@
 use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{RecordingCommand, RecordingWriter};
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::PathBuf;
@@ -87,13 +87,11 @@ pub fn spawn_recording_actor(
         let finished_temp_path = writer.finalize()?;
         let stem = resolve_finished_recording_stem(&naming, &app_name, &output_dir);
         let final_path = output_dir.join(format!("{stem}.mp4"));
-        std::fs::rename(&finished_temp_path, &final_path).map_err(|e| {
-            AppError::Encode(format!(
-                "failed to rename {} to {}: {e}",
-                finished_temp_path.display(),
-                final_path.display()
-            ))
-        })?;
+        std::fs::rename(&finished_temp_path, &final_path).encode_ctx(format_args!(
+            "failed to rename {} to {}",
+            finished_temp_path.display(),
+            final_path.display()
+        ))?;
         Ok(final_path)
     });
 

@@ -1,5 +1,5 @@
 use crate::capture::device::D3dDevice;
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use crate::session::clock::RecordingClock;
 use crate::types::VideoFrame;
 use std::sync::Arc;
@@ -63,15 +63,12 @@ pub fn query_capture_size(target: CaptureTarget) -> Result<(u32, u32), AppError>
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         );
         let interop: IGraphicsCaptureItemInterop =
-            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(
-                |e| AppError::Capture(format!("IGraphicsCaptureItemInterop factory: {e}")),
-            )?;
+            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .capture_ctx("IGraphicsCaptureItemInterop factory")?;
         let item: GraphicsCaptureItem = target
             .create_item(&interop)
-            .map_err(|e| AppError::Capture(format!("CreateFor{{Window,Monitor}}: {e}")))?;
-        let size = item
-            .Size()
-            .map_err(|e| AppError::Capture(format!("item.Size: {e}")))?;
+            .capture_ctx("CreateFor{{Window,Monitor}}")?;
+        let size = item.Size().capture_ctx("item.Size")?;
         Ok((size.Width as u32, size.Height as u32))
     }
 }
@@ -224,7 +221,7 @@ pub async fn run_video_capture(
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         )
         .ok()
-        .map_err(|e| AppError::Capture(format!("CoInitializeEx: {e}")))?;
+        .capture_ctx("CoInitializeEx")?;
     }
 
     let device = D3dDevice::new()?;
@@ -233,21 +230,19 @@ pub async fn run_video_capture(
     // CreateDirect3D11DeviceFromDXGIDevice returns IInspectable; cast to IDirect3DDevice.
     let winrt_raw = unsafe {
         CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)
-            .map_err(|e| AppError::Capture(format!("CreateDirect3D11DeviceFromDXGIDevice: {e}")))?
+            .capture_ctx("CreateDirect3D11DeviceFromDXGIDevice")?
     };
-    let winrt_device: IDirect3DDevice = winrt_raw
-        .cast()
-        .map_err(|e| AppError::Capture(format!("cast to IDirect3DDevice: {e}")))?;
+    let winrt_device: IDirect3DDevice = winrt_raw.cast().capture_ctx("cast to IDirect3DDevice")?;
 
     // Obtain the IGraphicsCaptureItemInterop factory and create item from the target.
     let interop: IGraphicsCaptureItemInterop =
         windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-            .map_err(|e| AppError::Capture(format!("IGraphicsCaptureItemInterop factory: {e}")))?;
+            .capture_ctx("IGraphicsCaptureItemInterop factory")?;
 
     let item: GraphicsCaptureItem = unsafe {
         target
             .create_item(&interop)
-            .map_err(|e| AppError::Capture(format!("CreateFor{{Window,Monitor}}: {e}")))?
+            .capture_ctx("CreateFor{{Window,Monitor}}")?
     };
 
     // Use the caller-supplied (already-clamped-even) size for the frame pool, not
@@ -265,11 +260,11 @@ pub async fn run_video_capture(
         2,
         size,
     )
-    .map_err(|e| AppError::Capture(format!("CreateFreeThreaded: {e}")))?;
+    .capture_ctx("CreateFreeThreaded")?;
 
     let session = frame_pool
         .CreateCaptureSession(&item)
-        .map_err(|e| AppError::Capture(format!("CreateCaptureSession: {e}")))?;
+        .capture_ctx("CreateCaptureSession")?;
 
     // Windows draws its own colored border around a window/monitor with an
     // active capture session -- desired for a manual recording (`show_border
@@ -283,9 +278,7 @@ pub async fn run_video_capture(
     // (border shown) since there's no way to suppress it there.
     let _ = session.SetIsBorderRequired(show_border);
 
-    session
-        .StartCapture()
-        .map_err(|e| AppError::Capture(format!("StartCapture: {e}")))?;
+    session.StartCapture().capture_ctx("StartCapture")?;
 
     // WGC's documented signal that the capture target is gone (the captured
     // window was closed/destroyed, or its monitor was disconnected) --
@@ -301,7 +294,7 @@ pub async fn run_video_capture(
         item_closed_handler.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }))
-    .map_err(|e| AppError::Capture(format!("GraphicsCaptureItem::Closed: {e}")))?;
+    .capture_ctx("GraphicsCaptureItem::Closed")?;
 
     // Two staging textures, ping-ponged (see `ping_pong_indices`/`map_staging`),
     // created once here and reused every frame via CopyResource. A single staging
@@ -335,11 +328,11 @@ pub async fn run_video_capture(
             device
                 .d3d_device
                 .CreateTexture2D(&staging_desc, None, Some(&mut staging))
-                .map_err(|e| AppError::Capture(format!("CreateTexture2D staging: {e}")))?;
+                .capture_ctx("CreateTexture2D staging")?;
             staging
                 .expect("CreateTexture2D succeeded but staging is None")
                 .cast()
-                .map_err(|e| AppError::Capture(format!("cast staging to ID3D11Resource: {e}")))
+                .capture_ctx("cast staging to ID3D11Resource")
         }
     };
     let staging: [ID3D11Resource; 2] = [create_staging(&device)?, create_staging(&device)?];
@@ -373,18 +366,16 @@ pub async fn run_video_capture(
             continue;
         }
 
-        let surface = frame
-            .Surface()
-            .map_err(|e| AppError::Capture(format!("frame.Surface: {e}")))?;
+        let surface = frame.Surface().capture_ctx("frame.Surface")?;
 
         // Obtain underlying D3D11 texture via IDirect3DDxgiInterfaceAccess.
         let dxgi_access: IDirect3DDxgiInterfaceAccess = surface
             .cast()
-            .map_err(|e| AppError::Capture(format!("cast to IDirect3DDxgiInterfaceAccess: {e}")))?;
+            .capture_ctx("cast to IDirect3DDxgiInterfaceAccess")?;
         let texture: ID3D11Texture2D = unsafe {
             dxgi_access
                 .GetInterface()
-                .map_err(|e| AppError::Capture(format!("GetInterface ID3D11Texture2D: {e}")))?
+                .capture_ctx("GetInterface ID3D11Texture2D")?
         };
 
         let (write_idx, read_idx) = ping_pong_indices(frame_counter);
@@ -393,7 +384,7 @@ pub async fn run_video_capture(
         unsafe {
             let src_res: ID3D11Resource = texture
                 .cast()
-                .map_err(|e| AppError::Capture(format!("cast texture to ID3D11Resource: {e}")))?;
+                .capture_ctx("cast texture to ID3D11Resource")?;
             device
                 .d3d_context
                 .CopyResource(&staging[write_idx], &src_res);

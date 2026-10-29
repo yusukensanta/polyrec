@@ -8,7 +8,7 @@
 
 use crate::encode::mf::MfSession;
 use crate::encode::remux::{StreamLayout, discover_stream_layout};
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use crate::highlight::SegmentInfo;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -54,42 +54,39 @@ unsafe fn open_passthrough_reader(
             path.to_str()
                 .ok_or_else(|| AppError::Encode("segment path not valid UTF-8".into()))?,
         );
-        let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None).map_err(|e| {
-            AppError::Encode(format!(
-                "MFCreateSourceReaderFromURL({}): {e}",
-                path.display()
-            ))
-        })?;
+        let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None).encode_ctx(
+            format_args!("MFCreateSourceReaderFromURL({})", path.display()),
+        )?;
 
         let layout = discover_stream_layout(&reader)?;
 
         reader
             .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(all,false): {e}")))?;
+            .encode_ctx("SetStreamSelection(all,false)")?;
         reader
             .SetStreamSelection(layout.video, true)
-            .map_err(|e| AppError::Encode(format!("SetStreamSelection(video): {e}")))?;
+            .encode_ctx("SetStreamSelection(video)")?;
         for &a in &layout.audio {
             reader
                 .SetStreamSelection(a, true)
-                .map_err(|e| AppError::Encode(format!("SetStreamSelection(audio {a}): {e}")))?;
+                .encode_ctx(format_args!("SetStreamSelection(audio {a})"))?;
         }
 
         let video_type: IMFMediaType = reader
             .GetNativeMediaType(layout.video, 0)
-            .map_err(|e| AppError::Encode(format!("GetNativeMediaType(video): {e}")))?;
+            .encode_ctx("GetNativeMediaType(video)")?;
         reader
             .SetCurrentMediaType(layout.video, None, &video_type)
-            .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(video): {e}")))?;
+            .encode_ctx("SetCurrentMediaType(video)")?;
 
         let mut audio_types = Vec::new();
         for &a in &layout.audio {
             let t: IMFMediaType = reader
                 .GetNativeMediaType(a, 0)
-                .map_err(|e| AppError::Encode(format!("GetNativeMediaType(audio {a}): {e}")))?;
+                .encode_ctx(format_args!("GetNativeMediaType(audio {a})"))?;
             reader
                 .SetCurrentMediaType(a, None, &t)
-                .map_err(|e| AppError::Encode(format!("SetCurrentMediaType(audio {a}): {e}")))?;
+                .encode_ctx(format_args!("SetCurrentMediaType(audio {a})"))?;
             audio_types.push(t);
         }
 
@@ -162,7 +159,7 @@ unsafe fn do_concat_and_trim(
         if skip_hns > 0 {
             first_reader
                 .SetCurrentPosition(&GUID::zeroed(), &time_propvariant(skip_hns))
-                .map_err(|e| AppError::Encode(format!("SetCurrentPosition({skip_hns}): {e}")))?;
+                .encode_ctx(format_args!("SetCurrentPosition({skip_hns})"))?;
         }
 
         let (writer, video_sink, audio_sinks) =
@@ -216,9 +213,7 @@ unsafe fn do_concat_and_trim(
                         Some(&mut timestamp),
                         Some(&mut sample),
                     )
-                    .map_err(|e| {
-                        AppError::Encode(format!("ReadSample(segment {}): {e}", seg.path.display()))
-                    })?;
+                    .encode_ctx(format_args!("ReadSample(segment {})", seg.path.display()))?;
 
                 if stream_flags & 1 != 0 {
                     return Err(AppError::Encode(format!(
@@ -237,8 +232,7 @@ unsafe fn do_concat_and_trim(
                 if let (Some(s), Some(&sink_idx)) = (sample, source_to_sink.get(&actual_idx)) {
                     max_ts_seen = max_ts_seen.max(timestamp);
                     let out_ts = timestamp - baseline_hns + running_offset_hns;
-                    s.SetSampleTime(out_ts)
-                        .map_err(|e| AppError::Encode(format!("SetSampleTime: {e}")))?;
+                    s.SetSampleTime(out_ts).encode_ctx("SetSampleTime")?;
                     write_sample(&writer, sink_idx, &s)?;
                 }
             }
@@ -246,9 +240,7 @@ unsafe fn do_concat_and_trim(
             running_offset_hns += (max_ts_seen - baseline_hns).max(0);
         }
 
-        writer
-            .Finalize()
-            .map_err(|e| AppError::Encode(format!("Finalize: {e}")))?;
+        writer.Finalize().encode_ctx("Finalize")?;
 
         Ok(output.to_path_buf())
     }
@@ -262,7 +254,7 @@ fn write_sample(
     unsafe {
         writer
             .WriteSample(stream_idx, sample)
-            .map_err(|e| AppError::Encode(format!("WriteSample(stream {stream_idx}): {e}")))
+            .encode_ctx(format_args!("WriteSample(stream {stream_idx})"))
     }
 }
 

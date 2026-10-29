@@ -3,7 +3,7 @@
 //! periodically during one (stop gracefully instead of letting Media Foundation
 //! fail mid-write and produce a corrupt/truncated file with no explanation).
 
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,7 +84,7 @@ pub fn free_bytes(path: &Path) -> Result<u64, AppError> {
             None,
             None,
         )
-        .map_err(|e| AppError::Windows(format!("GetDiskFreeSpaceExW({}): {e}", path.display())))?;
+        .windows_ctx(format_args!("GetDiskFreeSpaceExW({})", path.display()))?;
     }
     Ok(free_bytes_available)
 }

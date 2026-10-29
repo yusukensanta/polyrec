@@ -7,7 +7,7 @@
 //! either swaps the running exe in place (portable) or silently re-runs the
 //! installer (installed via Inno Setup).
 
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -40,7 +40,7 @@ fn detect_install_kind_at(exe_path: &Path) -> InstallKind {
 }
 
 pub fn detect_install_kind() -> Result<InstallKind, AppError> {
-    let exe = std::env::current_exe().map_err(|e| AppError::Update(format!("current_exe: {e}")))?;
+    let exe = std::env::current_exe().update_ctx("current_exe")?;
     Ok(detect_install_kind_at(&exe))
 }
 
@@ -80,7 +80,7 @@ fn http_client() -> Result<reqwest::Client, AppError> {
         .user_agent(concat!("polyrec-self-update/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()
-        .map_err(|e| AppError::Update(format!("building HTTP client: {e}")))
+        .update_ctx("building HTTP client")
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>, AppError> {
@@ -89,13 +89,13 @@ async fn download_bytes(url: &str) -> Result<Vec<u8>, AppError> {
         .get(url)
         .send()
         .await
-        .map_err(|e| AppError::Update(format!("GET {url}: {e}")))?
+        .update_ctx(format_args!("GET {url}"))?
         .error_for_status()
-        .map_err(|e| AppError::Update(format!("GET {url}: {e}")))?;
+        .update_ctx(format_args!("GET {url}"))?;
     Ok(resp
         .bytes()
         .await
-        .map_err(|e| AppError::Update(format!("reading body of {url}: {e}")))?
+        .update_ctx(format_args!("reading body of {url}"))?
         .to_vec())
 }
 
@@ -106,8 +106,7 @@ fn release_asset_url(version_tag: &str, filename: &str) -> String {
 async fn fetch_expected_sha256(version_tag: &str, filename: &str) -> Result<String, AppError> {
     let sums_url = release_asset_url(version_tag, "SHA256SUMS.txt");
     let bytes = download_bytes(&sums_url).await?;
-    let text = String::from_utf8(bytes)
-        .map_err(|e| AppError::Update(format!("SHA256SUMS.txt wasn't valid UTF-8: {e}")))?;
+    let text = String::from_utf8(bytes).update_ctx("SHA256SUMS.txt wasn't valid UTF-8")?;
     parse_sha256sums(&text, filename).ok_or_else(|| {
         AppError::Update(format!(
             "no checksum entry for {filename} in SHA256SUMS.txt"
@@ -186,14 +185,13 @@ async fn download_and_verify(version_tag: &str, filename: &str) -> Result<Vec<u8
 /// (which also contains README.md/LICENSE, see `release.yml`'s "Package
 /// zip" step -- everything else is ignored).
 fn extract_exe_from_zip(zip_bytes: &[u8]) -> Result<Vec<u8>, AppError> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
-        .map_err(|e| AppError::Update(format!("opening update zip: {e}")))?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).update_ctx("opening update zip")?;
     let mut file = archive
         .by_name("polyrec.exe")
-        .map_err(|e| AppError::Update(format!("update zip has no polyrec.exe: {e}")))?;
+        .update_ctx("update zip has no polyrec.exe")?;
     let mut out = Vec::with_capacity(file.size() as usize);
-    std::io::copy(&mut file, &mut out)
-        .map_err(|e| AppError::Update(format!("reading polyrec.exe from update zip: {e}")))?;
+    std::io::copy(&mut file, &mut out).update_ctx("reading polyrec.exe from update zip")?;
     Ok(out)
 }
 
@@ -216,22 +214,18 @@ async fn update_portable(version_tag: &str) -> Result<(), AppError> {
     let exe_bytes = extract_exe_from_zip(&zip_bytes)?;
 
     let temp_path = std::env::temp_dir().join(format!("polyrec-update-{version_tag}.exe"));
-    std::fs::write(&temp_path, &exe_bytes).map_err(|e| {
-        AppError::Update(format!(
-            "writing downloaded exe to {}: {e}",
-            temp_path.display()
-        ))
-    })?;
+    std::fs::write(&temp_path, &exe_bytes).update_ctx(format_args!(
+        "writing downloaded exe to {}",
+        temp_path.display()
+    ))?;
 
-    self_replace::self_replace(&temp_path)
-        .map_err(|e| AppError::Update(format!("self_replace failed: {e}")))?;
+    self_replace::self_replace(&temp_path).update_ctx("self_replace failed")?;
     let _ = std::fs::remove_file(&temp_path);
 
-    let current_exe = std::env::current_exe()
-        .map_err(|e| AppError::Update(format!("current_exe after self_replace: {e}")))?;
+    let current_exe = std::env::current_exe().update_ctx("current_exe after self_replace")?;
     std::process::Command::new(&current_exe)
         .spawn()
-        .map_err(|e| AppError::Update(format!("spawning updated exe: {e}")))?;
+        .update_ctx("spawning updated exe")?;
     Ok(())
 }
 
@@ -240,9 +234,8 @@ async fn update_installed(version_tag: &str) -> Result<(), AppError> {
     let setup_bytes = download_and_verify(version_tag, &setup_filename).await?;
 
     let temp_path = std::env::temp_dir().join(format!("polyrec-update-{version_tag}-setup.exe"));
-    std::fs::write(&temp_path, &setup_bytes).map_err(|e| {
-        AppError::Update(format!("writing installer to {}: {e}", temp_path.display()))
-    })?;
+    std::fs::write(&temp_path, &setup_bytes)
+        .update_ctx(format_args!("writing installer to {}", temp_path.display()))?;
 
     // /VERYSILENT+/SUPPRESSMSGBOXES suppress Inno's own wizard UI; they do
     // NOT suppress the OS-level UAC elevation prompt (independent, driven by
@@ -255,7 +248,7 @@ async fn update_installed(version_tag: &str) -> Result<(), AppError> {
     std::process::Command::new(&temp_path)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         .spawn()
-        .map_err(|e| AppError::Update(format!("launching installer: {e}")))?;
+        .update_ctx("launching installer")?;
     Ok(())
 }
 

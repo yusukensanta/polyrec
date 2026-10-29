@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use crate::session::clock::RecordingClock;
 use crate::types::{AppAudioSource, AudioDevice, AudioSamples, TrackId};
 use std::sync::Arc;
@@ -137,9 +137,8 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| {
-                AppError::Windows(format!("CoCreateInstance MMDeviceEnumerator: {e}"))
-            })?;
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .windows_ctx("CoCreateInstance MMDeviceEnumerator")?;
 
         // Default render endpoint — used for loopback capture
         if let Ok(dev) = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
@@ -210,21 +209,18 @@ pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| {
-                AppError::Windows(format!("CoCreateInstance MMDeviceEnumerator: {e}"))
-            })?;
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .windows_ctx("CoCreateInstance MMDeviceEnumerator")?;
         let device = enumerator
             .GetDefaultAudioEndpoint(eRender, eMultimedia)
-            .map_err(|e| AppError::Windows(format!("GetDefaultAudioEndpoint: {e}")))?;
+            .windows_ctx("GetDefaultAudioEndpoint")?;
         let session_manager: IAudioSessionManager2 = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| AppError::Windows(format!("Activate IAudioSessionManager2: {e}")))?;
+            .windows_ctx("Activate IAudioSessionManager2")?;
         let session_enum = session_manager
             .GetSessionEnumerator()
-            .map_err(|e| AppError::Windows(format!("GetSessionEnumerator: {e}")))?;
-        let count = session_enum
-            .GetCount()
-            .map_err(|e| AppError::Windows(format!("GetCount: {e}")))?;
+            .windows_ctx("GetSessionEnumerator")?;
+        let count = session_enum.GetCount().windows_ctx("GetCount")?;
 
         let mut seen_pids = std::collections::HashSet::new();
         for i in 0..count {
@@ -439,27 +435,23 @@ pub async fn run_audio_capture(
 
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                .map_err(|e| AppError::Windows(format!("CoCreateInstance: {e}")))?;
+                .windows_ctx("CoCreateInstance")?;
 
         let device = if device_id.is_empty() {
             let flow = if is_loopback { eRender } else { eCapture };
             enumerator
                 .GetDefaultAudioEndpoint(flow, eMultimedia)
-                .map_err(|e| AppError::Windows(format!("GetDefaultAudioEndpoint: {e}")))?
+                .windows_ctx("GetDefaultAudioEndpoint")?
         } else {
             let id: windows::core::HSTRING = device_id.as_str().into();
-            enumerator
-                .GetDevice(&id)
-                .map_err(|e| AppError::Windows(format!("GetDevice: {e}")))?
+            enumerator.GetDevice(&id).windows_ctx("GetDevice")?
         };
 
         let audio_client: IAudioClient = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| AppError::Windows(format!("Activate IAudioClient: {e}")))?;
+            .windows_ctx("Activate IAudioClient")?;
 
-        let mix_format = audio_client
-            .GetMixFormat()
-            .map_err(|e| AppError::Windows(format!("GetMixFormat: {e}")))?;
+        let mix_format = audio_client.GetMixFormat().windows_ctx("GetMixFormat")?;
 
         let stream_flags: u32 = if is_loopback {
             AUDCLNT_STREAMFLAGS_LOOPBACK
@@ -477,7 +469,7 @@ pub async fn run_audio_capture(
                 mix_format,
                 None,
             )
-            .map_err(|e| AppError::Windows(format!("IAudioClient::Initialize: {e}")))?;
+            .windows_ctx("IAudioClient::Initialize")?;
 
         let sample_rate = (*mix_format).nSamplesPerSec;
         let channels = (*mix_format).nChannels;
@@ -547,9 +539,7 @@ pub async fn run_process_loopback_capture(
                 &wave_format,
                 None,
             )
-            .map_err(|e| {
-                AppError::Windows(format!("IAudioClient::Initialize (process loopback): {e}"))
-            })?;
+            .windows_ctx("IAudioClient::Initialize (process loopback)")?;
 
         run_capture_loop(
             audio_client,
@@ -616,11 +606,9 @@ async unsafe fn run_capture_loop(
     unsafe {
         let capture_client: IAudioCaptureClient = audio_client
             .GetService()
-            .map_err(|e| AppError::Windows(format!("GetService IAudioCaptureClient: {e}")))?;
+            .windows_ctx("GetService IAudioCaptureClient")?;
 
-        audio_client
-            .Start()
-            .map_err(|e| AppError::Windows(format!("IAudioClient::Start: {e}")))?;
+        audio_client.Start().windows_ctx("IAudioClient::Start")?;
 
         let mut resampler = LinearResampler::new(sample_rate, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
@@ -690,7 +678,7 @@ async unsafe fn run_capture_loop(
 
                     capture_client
                         .ReleaseBuffer(frames_available)
-                        .map_err(|e| AppError::Windows(format!("ReleaseBuffer: {e}")))?;
+                        .windows_ctx("ReleaseBuffer")?;
 
                     if !diag_logged {
                         if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
@@ -911,7 +899,7 @@ unsafe fn try_activate_process_loopback_audio_client(
             Some(&variant as *const _),
             &handler,
         )
-        .map_err(|e| AppError::Windows(format!("ActivateAudioInterfaceAsync: {e}")));
+        .windows_ctx("ActivateAudioInterfaceAsync");
 
         // `variant.blob.pBlobData` points at our stack `params`, not CoTaskMem-allocated
         // memory — dropping `variant` normally would run PropVariantClear, which for
@@ -921,15 +909,14 @@ unsafe fn try_activate_process_loopback_audio_client(
         activate_result?;
 
         let activated = match result_rx.recv_timeout(timeout) {
-            Ok(r) => r.map_err(|e| {
-                AppError::Windows(format!("process loopback activation failed: {e}"))
-            })?,
+            Ok(r) => r.windows_ctx("process loopback activation failed")?,
             Err(_) => return Ok(None),
         };
 
-        activated.cast::<IAudioClient>().map(Some).map_err(|e| {
-            AppError::Windows(format!("cast activated interface to IAudioClient: {e}"))
-        })
+        activated
+            .cast::<IAudioClient>()
+            .map(Some)
+            .windows_ctx("cast activated interface to IAudioClient")
     }
 }
 

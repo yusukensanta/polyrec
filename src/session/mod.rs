@@ -12,7 +12,7 @@ use crate::encode::RecordingCommand;
 use crate::encode::actor::{spawn_audio_pump, spawn_recording_actor, spawn_video_pump};
 use crate::encode::highlight_export;
 use crate::encode::writer::video_bitrate_bps;
-use crate::error::AppError;
+use crate::error::{AppError, ResultExt};
 use crate::highlight::{
     HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
@@ -656,7 +656,7 @@ impl SessionManager {
                 highlight_export::concat_and_trim(&snapshot, buffer_seconds, &output_path)
             })
             .await
-            .map_err(|e| AppError::Encode(format!("save_highlight join error: {e}")))?
+            .encode_ctx("save_highlight join error")?
         });
 
         Ok(handle)
