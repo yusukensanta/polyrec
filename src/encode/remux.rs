@@ -8,15 +8,16 @@ use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
     MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READERF_ENDOFSTREAM, MFAudioFormat_PCM,
-    MFCreateAttributes, MFCreateMediaType, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL,
-    MFMediaType_Audio, MFMediaType_Video,
+    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ANY_STREAM,
+    MF_SOURCE_READERF_ENDOFSTREAM, MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType,
+    MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video,
 };
 use windows::core::HSTRING;
 
 /// Media Foundation's sink writer does not guarantee output track order matches
 /// `AddStream` call order — it can depend on which encoder actually flushes first.
 /// Never assume "stream 0 = video, 1.. = audio"; always find streams by major type.
+#[derive(Clone)]
 pub(crate) struct StreamLayout {
     pub(crate) video: u32,
     pub(crate) audio: Vec<u32>,
@@ -89,10 +90,11 @@ pub(crate) unsafe fn build_passthrough_sink_writer(
     }
 }
 
-// 0xFFFFFFFE = MF_SOURCE_READER_ANY_STREAM
-const MF_SOURCE_READER_ANY_STREAM: u32 = 0xFFFF_FFFE;
-// 0xFFFFFFFE = MF_SOURCE_READER_ALL_STREAMS (same value)
-const MF_SOURCE_READER_ALL_STREAMS: u32 = 0xFFFF_FFFE;
+/// `MF_SOURCE_READER_ANY_STREAM` / `MF_SOURCE_READER_ALL_STREAMS` as the
+/// `u32` stream index `ReadSample`/`SetStreamSelection` take (windows-rs
+/// exposes them as typed `i32` constants; both are 0xFFFFFFFE).
+pub(crate) const ANY_STREAM: u32 = MF_SOURCE_READER_ANY_STREAM.0 as u32;
+pub(crate) const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 
 /// Copies compressed samples from every stream `reader` has selected into
 /// `writer`, mapping each source stream index to its sink stream index via
@@ -122,7 +124,7 @@ unsafe fn copy_passthrough_samples(
 
             reader
                 .ReadSample(
-                    MF_SOURCE_READER_ANY_STREAM,
+                    ANY_STREAM,
                     0,
                     Some(&mut actual_idx),
                     Some(&mut stream_flags),
@@ -174,10 +176,7 @@ pub fn remux(
 pub fn count_audio_tracks(path: &Path) -> Result<usize, AppError> {
     let _mf = MfSession::start_mta()?;
     unsafe {
-        let url = HSTRING::from(
-            path.to_str()
-                .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
-        );
+        let url = HSTRING::from(path);
         let reader: IMFSourceReader =
             MFCreateSourceReaderFromURL(&url, None).encode_ctx("MFCreateSourceReaderFromURL")?;
         Ok(discover_stream_layout(&reader)?.audio.len())
@@ -281,7 +280,7 @@ unsafe fn decode_track_to_pcm(
         let reader: IMFSourceReader = MFCreateSourceReaderFromURL(input_url, None)
             .encode_ctx(format_args!("MFCreateSourceReaderFromURL audio[{idx}]"))?;
         reader
-            .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
+            .SetStreamSelection(ALL_STREAMS, false)
             .encode_ctx("SetStreamSelection(all,false)")?;
         reader
             .SetStreamSelection(src_idx, true)
@@ -363,16 +362,8 @@ unsafe fn do_export_grouped(
     groups: &[Vec<usize>],
 ) -> Result<PathBuf, AppError> {
     unsafe {
-        let input_url = HSTRING::from(
-            input
-                .to_str()
-                .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
-        );
-        let output_url = HSTRING::from(
-            output
-                .to_str()
-                .ok_or_else(|| AppError::Encode("output path not valid UTF-8".into()))?,
-        );
+        let input_url = HSTRING::from(input);
+        let output_url = HSTRING::from(output);
 
         let probe_reader: IMFSourceReader = MFCreateSourceReaderFromURL(&input_url, None)
             .encode_ctx("MFCreateSourceReaderFromURL probe")?;
@@ -494,7 +485,7 @@ unsafe fn do_export_grouped(
         // Video + passthrough audio: interleaved compressed-copy loop,
         // same technique as `do_remux`.
         probe_reader
-            .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
+            .SetStreamSelection(ALL_STREAMS, false)
             .encode_ctx("SetStreamSelection(all,false)")?;
         probe_reader
             .SetStreamSelection(layout.video, true)
@@ -545,16 +536,8 @@ unsafe fn do_remux(
     audio_track_indices: &[usize],
 ) -> Result<PathBuf, AppError> {
     unsafe {
-        let input_url = HSTRING::from(
-            input
-                .to_str()
-                .ok_or_else(|| AppError::Encode("input path not valid UTF-8".into()))?,
-        );
-        let output_url = HSTRING::from(
-            output
-                .to_str()
-                .ok_or_else(|| AppError::Encode("output path not valid UTF-8".into()))?,
-        );
+        let input_url = HSTRING::from(input);
+        let output_url = HSTRING::from(output);
 
         // ── Source reader ────────────────────────────────────────────────────────
         let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&input_url, None)
@@ -564,7 +547,7 @@ unsafe fn do_remux(
 
         // Disable all streams, then re-enable desired ones
         reader
-            .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
+            .SetStreamSelection(ALL_STREAMS, false)
             .encode_ctx("SetStreamSelection(all,false)")?;
         reader
             .SetStreamSelection(layout.video, true)

@@ -465,13 +465,7 @@ impl Default for SessionManager {
 /// if the exe name is empty or sanitizes away to nothing. `pub(crate)` so the
 /// dashboard can reuse the exact same sanitization for Highlight save filenames.
 pub(crate) fn app_name_from_exe(exe_name: &str) -> String {
-    let trimmed =
-        if exe_name.len() >= 4 && exe_name[exe_name.len() - 4..].eq_ignore_ascii_case(".exe") {
-            &exe_name[..exe_name.len() - 4]
-        } else {
-            exe_name
-        };
-    crate::recording_naming::sanitize_filename_component(trimmed)
+    crate::recording_naming::sanitize_filename_component(crate::sources::strip_exe_suffix(exe_name))
 }
 
 /// Directory the Highlight buffer's rotating segment files live in -- kept
