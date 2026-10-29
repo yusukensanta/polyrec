@@ -585,6 +585,15 @@ fn decode_packet(packet: &[u8], sample_count: usize, bytes_per_sample: usize) ->
     Some(samples)
 }
 
+/// WASAPI's contract for `AUDCLNT_BUFFERFLAGS_SILENT`: the packet is
+/// silence, whatever its data bytes happen to contain -- so it's recorded
+/// as zeros.
+fn apply_silent_flag(samples: &mut [f32], flags: u32) {
+    if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
+        samples.fill(0.0);
+    }
+}
+
 /// One-shot diagnostic for a report of app-audio tracks recording as
 /// silence despite the source app audibly producing sound (mic/device
 /// tracks unaffected) -- distinguishes "WASAPI itself reports this
@@ -727,7 +736,7 @@ async unsafe fn run_capture_loop(
                         data,
                         frames_available as usize * bytes_per_frame,
                     );
-                    let samples = decode_packet(packet, sample_count, bytes_per_sample)
+                    let mut samples = decode_packet(packet, sample_count, bytes_per_sample)
                         .unwrap_or_else(|| {
                             if !warned_unrecognized_bit_depth {
                                 warned_unrecognized_bit_depth = true;
@@ -743,7 +752,11 @@ async unsafe fn run_capture_loop(
                         .ReleaseBuffer(frames_available)
                         .windows_ctx("ReleaseBuffer")?;
 
+                    // Diagnostics see the data as delivered (their whole point
+                    // is telling "flagged silent" apart from "zeros"); the
+                    // recording gets what the flag says it is.
                     diagnostics.record_packet(track_id, flags, &samples);
+                    apply_silent_flag(&mut samples, flags);
 
                     // Always release buffer first (above), then discard if paused.
                     if ctrl.is_paused() {
@@ -1405,5 +1418,20 @@ mod tests {
             !had_packets.zero_buffer_warned,
             "a track that produced packets"
         );
+    }
+
+    #[test]
+    fn a_silent_flagged_packet_is_recorded_as_zeros() {
+        let mut samples = vec![0.5f32, -0.25, 0.125];
+        apply_silent_flag(&mut samples, AUDCLNT_BUFFERFLAGS_SILENT);
+        assert_eq!(samples, vec![0.0; 3]);
+    }
+
+    #[test]
+    fn an_unflagged_packet_is_left_alone() {
+        let mut samples = vec![0.5f32, -0.25];
+        // Some other flag bit (DATA_DISCONTINUITY = 1) doesn't silence it.
+        apply_silent_flag(&mut samples, 1);
+        assert_eq!(samples, vec![0.5, -0.25]);
     }
 }
