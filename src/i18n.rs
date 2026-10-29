@@ -12,10 +12,16 @@
 //! the technical detail itself stays in whatever language the OS/API
 //! reported it in, same as most apps leave raw exception text untranslated.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Display language, stored in `config.toml` as "en" | "ja"; an unknown
+/// stored value loads as English.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Lang {
-    En,
     Ja,
+    /// Last because serde's `other` fallback variant has to be.
+    #[default]
+    #[serde(other)]
+    En,
 }
 
 impl Lang {
@@ -23,15 +29,6 @@ impl Lang {
         match self {
             Lang::En => Lang::Ja,
             Lang::Ja => Lang::En,
-        }
-    }
-
-    /// Config value to persist (`Config::language`) — round-trips through
-    /// `Config::lang()`.
-    pub fn config_value(self) -> &'static str {
-        match self {
-            Lang::En => "en",
-            Lang::Ja => "ja",
         }
     }
 
@@ -600,9 +597,24 @@ mod tests {
     }
 
     #[test]
-    fn config_value_round_trips_through_toggle() {
-        assert_eq!(Lang::En.config_value(), "en");
-        assert_eq!(Lang::Ja.config_value(), "ja");
+    fn lang_round_trips_through_its_stored_string() {
+        for (lang, stored) in [(Lang::En, "\"en\""), (Lang::Ja, "\"ja\"")] {
+            assert_eq!(stored_value(lang), stored);
+        }
+    }
+
+    /// `Lang` serialized as a bare TOML value (`toml` only serializes whole
+    /// documents, so wrap it in a one-field table and strip the key).
+    fn stored_value(lang: Lang) -> String {
+        #[derive(serde::Serialize)]
+        struct One {
+            v: Lang,
+        }
+        toml::to_string(&One { v: lang })
+            .unwrap()
+            .trim()
+            .trim_start_matches("v = ")
+            .to_string()
     }
 
     #[test]

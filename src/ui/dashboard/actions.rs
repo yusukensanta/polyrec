@@ -373,11 +373,11 @@ impl App {
             app_sources,
             app_audio_only: self.app_audio_only,
             encode: EncodeSettings {
-                codec: self.config.encode.codec.clone(),
+                codec: self.config.encode.codec,
                 fps: self.config.encode.fps(),
                 resolution_mode: self.config.encode.resolution_mode(),
                 bitrate_mode: self.config.encode.bitrate_mode(),
-                encoder_mode: self.config.encode.encoder_mode(),
+                encoder_mode: self.config.encode.encoder_mode,
             },
         }
     }

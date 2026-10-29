@@ -275,6 +275,7 @@ impl StreamLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Codec;
     use crate::encode::{EncoderParams, RecordingWriter};
     use crate::types::{AudioSamples, TrackId, VideoFrame};
 
@@ -282,7 +283,7 @@ mod tests {
         let path = dir.join(name);
         let writer = RecordingWriter::new(
             &path,
-            &EncoderParams::tiny_test("h264", &[(48000u32, 2u16)]),
+            &EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16)]),
         )
         .expect("RecordingWriter::new");
         writer.begin_writing().expect("begin_writing");

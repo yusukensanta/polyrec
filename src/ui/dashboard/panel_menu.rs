@@ -56,7 +56,7 @@ impl App {
                         .on_hover_text(s.language_toggle_tooltip)
                         .clicked()
                     {
-                        self.config.language = lang.toggle().config_value().to_string();
+                        self.config.language = lang.toggle();
                         self.save_config_or_report(s);
                     }
                     if let Some(update) = self.update_available.clone() {
