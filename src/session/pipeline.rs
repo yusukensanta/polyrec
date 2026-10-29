@@ -29,6 +29,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 const VIDEO_CHANNEL_CAPACITY: usize = 4;
+/// Frames one video track may have queued for its actor at once -- about a
+/// second at 60 fps. See `spawn_video_pump`.
+const MAX_VIDEO_FRAMES_IN_FLIGHT: usize = 64;
 const AUDIO_CHANNEL_CAPACITY: usize = 64;
 
 /// What to record, resolved by the dashboard from its checkboxes and
@@ -241,7 +244,12 @@ impl CapturePipeline {
                 show_border,
             )
         });
-        let pump = spawn_video_pump(video_rx, dest_tx.clone(), frame_count);
+        let pump = spawn_video_pump(
+            video_rx,
+            dest_tx.clone(),
+            frame_count,
+            MAX_VIDEO_FRAMES_IN_FLIGHT,
+        );
         self.track(capture, pump);
     }
 

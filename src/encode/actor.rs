@@ -1,5 +1,5 @@
 use crate::disk_space::DiskSpaceGuard;
-use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter};
+use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter, VideoSlot};
 use crate::error::{AppError, ResultExt};
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
 use crate::types::{AudioSamples, VideoFrame};
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
 /// How often the recording loop re-checks free disk space -- see
@@ -46,7 +46,7 @@ pub fn spawn_recording_actor(
 
         while let Some(cmd) = rx.blocking_recv() {
             match cmd {
-                RecordingCommand::WriteVideo(frame) => {
+                RecordingCommand::WriteVideo(frame, _slot) => {
                     if let Err(e) = writer.write_video(frame) {
                         tracing::error!("write_video error: {e}");
                     }
@@ -81,16 +81,32 @@ pub fn spawn_recording_actor(
 
 /// Spawns a pump task forwarding video frames to the recording actor.
 /// Increments `frame_count` for each frame forwarded.
+///
+/// At most `max_in_flight` of its frames are queued for (or being written
+/// by) the actor at once: each forwarded frame holds a slot until the actor
+/// has written it. The actor's command channel is shared with every audio
+/// track and is deep enough for audio bursts (256 commands) -- without this
+/// cap, a stalled encoder or disk could fill all of it with full frames
+/// (8.3 MB each at 1080p, 33 MB at 4K) before capture felt any backpressure.
+/// With it, a stall makes this pump wait for a slot, its 4-frame input
+/// channel fills, and the capture loop blocks on its send -- the same
+/// eventual backpressure as before, reached after far less memory. Audio
+/// commands never wait on video slots.
 pub fn spawn_video_pump(
     mut video_rx: mpsc::Receiver<VideoFrame>,
     recording_tx: mpsc::Sender<RecordingCommand>,
     frame_count: Arc<AtomicU64>,
+    max_in_flight: usize,
 ) -> JoinHandle<()> {
+    let slots = Arc::new(Semaphore::new(max_in_flight));
     tokio::spawn(async move {
         while let Some(frame) = video_rx.recv().await {
             frame_count.fetch_add(1, Ordering::Relaxed);
+            let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
+                break;
+            };
             if recording_tx
-                .send(RecordingCommand::WriteVideo(frame))
+                .send(RecordingCommand::WriteVideo(frame, VideoSlot::held(slot)))
                 .await
                 .is_err()
             {
@@ -130,7 +146,7 @@ mod tests {
         let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(8);
         let frame_count = Arc::new(AtomicU64::new(0));
 
-        let pump = spawn_video_pump(cap_rx, rec_tx, Arc::clone(&frame_count));
+        let pump = spawn_video_pump(cap_rx, rec_tx, Arc::clone(&frame_count), 8);
 
         cap_tx
             .send(VideoFrame {
@@ -145,7 +161,7 @@ mod tests {
         assert_eq!(frame_count.load(Ordering::Relaxed), 1);
         assert!(matches!(
             rec_rx.recv().await,
-            Some(RecordingCommand::WriteVideo(_))
+            Some(RecordingCommand::WriteVideo(..))
         ));
     }
 
@@ -173,5 +189,95 @@ mod tests {
             rec_rx.recv().await,
             Some(RecordingCommand::WriteAudio(_))
         ));
+    }
+
+    fn tiny_frame() -> VideoFrame {
+        VideoFrame {
+            pts: Duration::ZERO,
+            data: vec![0u8; 16].into(),
+        }
+    }
+
+    /// Lets spawned pump tasks run until they block.
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    fn drain_video(rx: &mut mpsc::Receiver<RecordingCommand>) -> Vec<RecordingCommand> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(matches!(cmd, RecordingCommand::WriteVideo(..)));
+            out.push(cmd);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn video_pump_holds_at_most_max_in_flight_frames_for_the_actor() {
+        let (cap_tx, cap_rx) = mpsc::channel::<VideoFrame>(16);
+        // Far deeper than the cap, so only the cap can be what stops it.
+        let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(64);
+        let frame_count = Arc::new(AtomicU64::new(0));
+        let _pump = spawn_video_pump(cap_rx, rec_tx, Arc::clone(&frame_count), 3);
+        for _ in 0..10 {
+            cap_tx.send(tiny_frame()).await.unwrap();
+        }
+        settle().await;
+
+        // Held (not yet "written"): their slots stay taken.
+        let mut queued = drain_video(&mut rec_rx);
+        assert_eq!(queued.len(), 3);
+
+        // The actor finishing one frame frees exactly one slot.
+        drop(queued.pop());
+        settle().await;
+        queued.extend(drain_video(&mut rec_rx));
+        assert_eq!(queued.len(), 3);
+
+        // Finishing all of them lets the rest through.
+        drop(queued);
+        settle().await;
+        let rest = drain_video(&mut rec_rx);
+        assert_eq!(rest.len(), 3, "next batch, still capped");
+        drop(rest);
+        settle().await;
+        assert_eq!(drain_video(&mut rec_rx).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn audio_keeps_flowing_while_video_slots_are_exhausted() {
+        let (video_tx, video_rx) = mpsc::channel::<VideoFrame>(16);
+        let (audio_tx, audio_rx) = mpsc::channel::<AudioSamples>(16);
+        let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(64);
+        let _video = spawn_video_pump(video_rx, rec_tx.clone(), Arc::new(AtomicU64::new(0)), 1);
+        let _audio = spawn_audio_pump(audio_rx, rec_tx);
+
+        video_tx.send(tiny_frame()).await.unwrap();
+        video_tx.send(tiny_frame()).await.unwrap(); // blocked: no slot
+        for _ in 0..5 {
+            audio_tx
+                .send(AudioSamples {
+                    track_id: TrackId::new(0),
+                    pts: Duration::ZERO,
+                    samples: vec![0.0f32; 4],
+                    sample_rate: 48000,
+                    channels: 2,
+                })
+                .await
+                .unwrap();
+        }
+        settle().await;
+
+        let mut video = Vec::new();
+        let mut audio = 0;
+        while let Ok(cmd) = rec_rx.try_recv() {
+            match cmd {
+                RecordingCommand::WriteVideo(..) => video.push(cmd),
+                RecordingCommand::WriteAudio(_) => audio += 1,
+                RecordingCommand::Stop => unreachable!(),
+            }
+        }
+        assert_eq!(video.len(), 1);
+        assert_eq!(audio, 5);
     }
 }

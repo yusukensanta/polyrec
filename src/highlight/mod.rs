@@ -99,7 +99,7 @@ pub fn spawn_highlight_actor(
 
             loop {
                 match rx.blocking_recv() {
-                    Some(RecordingCommand::WriteVideo(mut frame)) => {
+                    Some(RecordingCommand::WriteVideo(mut frame, _slot)) => {
                         let base = *pts_base.get_or_insert(frame.pts);
                         frame.pts = frame.pts.saturating_sub(base);
                         last_pts = last_pts.max(frame.pts);
@@ -219,7 +219,7 @@ mod tests {
 
         // Send frames spaced out past several 1s segment boundaries.
         for i in 0..8u64 {
-            tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
+            tx.send(RecordingCommand::video(tiny_video_frame(
                 Duration::from_millis(i * 400),
             )))
             .await
@@ -269,11 +269,9 @@ mod tests {
             Arc::clone(&segments),
             disk_full_flag,
         );
-        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
-            Duration::ZERO,
-        )))
-        .await
-        .unwrap();
+        tx.send(RecordingCommand::video(tiny_video_frame(Duration::ZERO)))
+            .await
+            .unwrap();
         tx.send(RecordingCommand::Stop).await.unwrap();
         handle
             .await
@@ -308,11 +306,9 @@ mod tests {
             disk_full_flag,
         );
 
-        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
-            Duration::ZERO,
-        )))
-        .await
-        .unwrap();
+        tx.send(RecordingCommand::video(tiny_video_frame(Duration::ZERO)))
+            .await
+            .unwrap();
 
         let (reply_tx, reply_rx) = oneshot::channel();
         save_now_tx.send(reply_tx).unwrap();
@@ -331,11 +327,9 @@ mod tests {
         // save -- write to it before stopping so this second segment is a
         // real one to confirm rotation actually continued, not just that the
         // first segment closed correctly.
-        tx.send(RecordingCommand::WriteVideo(tiny_video_frame(
-            Duration::ZERO,
-        )))
-        .await
-        .unwrap();
+        tx.send(RecordingCommand::video(tiny_video_frame(Duration::ZERO)))
+            .await
+            .unwrap();
         tx.send(RecordingCommand::Stop).await.unwrap();
         handle
             .await
