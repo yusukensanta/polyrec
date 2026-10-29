@@ -237,7 +237,7 @@ impl App {
                 }
                 match action {
                     Some("now") => {
-                        let version = update.version.clone();
+                        let version = update.version;
                         self.self_update.handle = Some(tokio::spawn(
                             crate::self_update::perform_self_update(version),
                         ));

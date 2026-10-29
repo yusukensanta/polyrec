@@ -93,7 +93,7 @@ impl App {
                                 s.config_save_failed_prefix,
                                 &mut self.selected_audio[i],
                                 label,
-                                dev_id,
+                                &dev_id,
                                 None,
                             );
                             // Persisted immediately on toggle so it survives
@@ -140,7 +140,7 @@ impl App {
                                 s.config_save_failed_prefix,
                                 &mut self.selected_app_audio[i],
                                 src.display_name.clone(),
-                                Config::app_audio_gain_key(&src.exe_name),
+                                &Config::app_audio_gain_key(&src.exe_name),
                                 Some(s.remove_registered_app_tooltip),
                             );
                             // Every entry here is already registered (see

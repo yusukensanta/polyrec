@@ -25,6 +25,11 @@ pub(super) const ACCENT_IDLE: egui::Color32 = egui::Color32::from_rgb(74, 222, 1
 pub(super) const ACCENT_PAUSE: egui::Color32 = egui::Color32::from_rgb(224, 178, 56);
 pub(super) const BG_BTN_STOP: egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
 pub(super) const BG_BTN_IDLE: egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
+/// The small pause button next to STOP.
+pub(super) const BG_BTN_PAUSE: egui::Color32 = egui::Color32::from_rgb(30, 30, 46);
+/// The recording HUD overlay's translucent backdrop (premultiplied alpha).
+pub(super) const BG_OVERLAY: egui::Color32 =
+    egui::Color32::from_rgba_premultiplied(20, 20, 20, 200);
 /// Larger, pill-like rounding used only for the primary REC/STOP/RESUME
 /// action buttons, so they read as the one clearly primary action instead
 /// of blending into every other rounded rectangle in the UI.

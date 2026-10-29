@@ -12,7 +12,7 @@ pub fn transition(current: &SessionState, action: &SessionAction) -> Option<Sess
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionAction {
     Start,
     Pause,
