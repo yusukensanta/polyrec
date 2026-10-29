@@ -233,7 +233,47 @@ pub(crate) fn display_name_from_exe_name(exe_name: &str) -> String {
 /// Best-effort: returns `None` on any failure rather than propagating an error —
 /// a missing icon just means the source list row shows no icon, not a broken list.
 /// `pub(crate)` -- see `get_exe_path`'s doc comment.
+///
+/// Memoized per exe path: the periodic source refresh asks for the icon of
+/// every open window every 2 s, and the shell extraction dominated that
+/// refresh's cost. A cached icon is only reused while the file's size and
+/// modification time still match what they were when it was extracted, so
+/// an exe replaced on disk (an app update) is re-extracted, exactly as if
+/// nothing were cached. Failures are never cached -- they're retried on the
+/// next call, same as before the cache existed.
 pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
+    type Icon = (Vec<u8>, u32, u32);
+    type Stamp = (std::time::SystemTime, u64);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (Stamp, Icon)>>,
+    > = std::sync::OnceLock::new();
+
+    let Some(stamp) = std::fs::metadata(exe_path)
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())))
+    else {
+        return extract_exe_icon_rgba_uncached(exe_path);
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((cached_stamp, icon)) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(exe_path)
+        && *cached_stamp == stamp
+    {
+        return Some(icon.clone());
+    }
+    // Extracted with the lock released -- the shell call is the slow part
+    // and callers on other threads shouldn't queue behind it.
+    let icon = extract_exe_icon_rgba_uncached(exe_path)?;
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(exe_path.to_owned(), (stamp, icon.clone()));
+    Some(icon)
+}
+
+fn extract_exe_icon_rgba_uncached(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
         let wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
         let mut info = SHFILEINFOW::default();
@@ -850,5 +890,22 @@ mod tests {
             Some("Discord.exe")
         );
         assert_eq!(exe_file_name("").as_deref(), None);
+    }
+
+    #[test]
+    fn cached_icon_is_identical_to_a_fresh_extraction() {
+        let path = r"C:\Windows\explorer.exe";
+        let fresh = extract_exe_icon_rgba_uncached(path).expect("explorer.exe has an icon");
+        let first = extract_exe_icon_rgba(path).expect("first call");
+        let cached = extract_exe_icon_rgba(path).expect("second call, from the cache");
+        assert_eq!(first, fresh);
+        assert_eq!(cached, fresh);
+    }
+
+    #[test]
+    fn icon_for_a_missing_file_is_none_and_stays_none() {
+        let path = r"C:\definitely\not\here\nothing.exe";
+        assert_eq!(extract_exe_icon_rgba(path), None);
+        assert_eq!(extract_exe_icon_rgba(path), None);
     }
 }

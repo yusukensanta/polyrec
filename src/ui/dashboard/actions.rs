@@ -8,6 +8,7 @@ use crate::recording_naming::RecordingNaming;
 use crate::session::{CaptureInputs, EncodeSettings};
 use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
+use eframe::egui;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -36,7 +37,17 @@ use std::time::Instant;
 /// other non-interactive background saves in this codebase) so the walk
 /// that found it doesn't need repeating on every future idle rebuild.
 pub(super) fn build_app_audio_sources(config: &mut Config) -> Vec<AppAudioSource> {
-    let live = enumerate_app_audio_sessions().unwrap_or_default();
+    build_app_audio_sources_from(enumerate_app_audio_sessions().unwrap_or_default(), config)
+}
+
+/// `build_app_audio_sources` over an already-taken `live` session list --
+/// lets the periodic refresh enumerate sessions on its worker thread (see
+/// `take_refresh_snapshot`) while the `config`-mutating merge below stays on
+/// the UI thread that owns `config`.
+fn build_app_audio_sources_from(
+    live: Vec<AppAudioSource>,
+    config: &mut Config,
+) -> Vec<AppAudioSource> {
     let mut healed_any = false;
     let sources = config
         .registered_app_audio
@@ -97,6 +108,83 @@ fn app_audio_fingerprint(sources: &[AppAudioSource]) -> Vec<(String, Vec<u32>)> 
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
+}
+
+/// Everything one periodic refresh enumerates -- taken off the UI thread
+/// (see `refresh_sources_and_audio_if_due`) and applied back on it by
+/// `App::apply_refresh_snapshot`.
+pub(super) struct RefreshSnapshot {
+    sources: Vec<CaptureSource>,
+    audio_devices: Vec<AudioDevice>,
+    live_app_audio: Vec<AppAudioSource>,
+}
+
+/// The same three enumerations, in the same order, that the refresh used to
+/// run inline on the UI thread.
+fn take_refresh_snapshot() -> RefreshSnapshot {
+    RefreshSnapshot {
+        sources: enumerate_sources(),
+        audio_devices: enumerate_audio_devices().unwrap_or_default(),
+        live_app_audio: enumerate_app_audio_sessions().unwrap_or_default(),
+    }
+}
+
+/// Runs `take_refresh_snapshot` on a short-lived worker thread and hands
+/// the result back through the returned channel, waking the UI when it
+/// lands. The worker joins a single-threaded apartment -- the same one the
+/// UI thread these calls used to run on is in (winit's `OleInitialize`) --
+/// so `SHGetFileInfoW` icon extraction and the MMDevice calls behave
+/// exactly as they did there. A dedicated thread rather than
+/// `spawn_blocking` keeps that apartment off the tokio pool threads the
+/// recording actors run on. `None` if the thread couldn't be spawned.
+fn spawn_refresh_worker(ctx: &egui::Context) -> Option<std::sync::mpsc::Receiver<RefreshSnapshot>> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wake_ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("polyrec-source-refresh".into())
+        .spawn(move || {
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let snapshot = take_refresh_snapshot();
+            if com.is_ok() {
+                unsafe { CoUninitialize() };
+            }
+            let _ = tx.send(snapshot);
+            wake_ctx.request_repaint();
+        })
+        .inspect_err(|e| {
+            tracing::warn!("failed to spawn source-refresh thread, refreshing inline: {e}")
+        })
+        .ok()
+        .map(|_| rx)
+}
+
+/// `None` when `new` covers exactly the same window/monitor handles as `old`
+/// (order and titles aren't compared), so nothing needs replacing.
+/// Otherwise `new` plus the selection re-pointed at the same handle it
+/// pointed at in `old` (`None` if that source is gone).
+fn reconcile_sources(
+    old: &[CaptureSource],
+    selected: Option<usize>,
+    new: Vec<CaptureSource>,
+) -> Option<(Vec<CaptureSource>, Option<usize>)> {
+    let old_hwnds: std::collections::HashSet<usize> = old.iter().map(|s| s.hwnd).collect();
+    let new_hwnds: std::collections::HashSet<usize> = new.iter().map(|s| s.hwnd).collect();
+    if new_hwnds == old_hwnds {
+        return None;
+    }
+    let previously_selected_hwnd = selected.and_then(|i| old.get(i)).map(|src| src.hwnd);
+    let selected =
+        previously_selected_hwnd.and_then(|hwnd| new.iter().position(|src| src.hwnd == hwnd));
+    Some((new, selected))
+}
+
+/// Whether the set of endpoint ids differs (order isn't compared).
+fn audio_device_ids_changed(old: &[AudioDevice], new: &[AudioDevice]) -> bool {
+    let old_ids: std::collections::HashSet<&str> = old.iter().map(|d| d.id.as_str()).collect();
+    let new_ids: std::collections::HashSet<&str> = new.iter().map(|d| d.id.as_str()).collect();
+    new_ids != old_ids
 }
 
 /// Display label for each audio track a recording with these sources will
@@ -215,8 +303,29 @@ impl App {
     ///
     /// Both preserve the current selection by hwnd, same as the old Refresh
     /// button did.
-    pub(super) fn refresh_sources_and_audio_if_due(&mut self) {
+    /// Every `SOURCES_CHECK_INTERVAL`, re-enumerates capture sources, audio
+    /// devices and live app-audio sessions. The enumeration itself (~26 ms
+    /// measured, mostly per-window icon extraction and the process
+    /// snapshot) runs on a worker thread (`spawn_refresh_worker`) so it
+    /// doesn't stall a UI frame every interval; its result is applied here
+    /// on a later frame by `apply_refresh_snapshot`. At most one refresh is
+    /// in flight at a time.
+    pub(super) fn refresh_sources_and_audio_if_due(&mut self, ctx: &egui::Context) {
         const SOURCES_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+        if let Some(rx) = &self.refresh_rx {
+            match rx.try_recv() {
+                Ok(snapshot) => {
+                    self.refresh_rx = None;
+                    self.apply_refresh_snapshot(snapshot);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                // The worker died without sending (it panicked) -- drop it
+                // and let the interval check below schedule the next one.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.refresh_rx = None,
+            }
+        }
+
         if self
             .sources_checked_at
             .is_some_and(|t| t.elapsed() < SOURCES_CHECK_INTERVAL)
@@ -225,28 +334,23 @@ impl App {
         }
         self.sources_checked_at = Some(Instant::now());
 
-        let new_sources = enumerate_sources();
-        let current_hwnds: std::collections::HashSet<usize> =
-            self.sources.iter().map(|s| s.hwnd).collect();
-        let new_hwnds: std::collections::HashSet<usize> =
-            new_sources.iter().map(|s| s.hwnd).collect();
-        if new_hwnds != current_hwnds {
-            let previously_selected_hwnd = self
-                .selected_source
-                .and_then(|i| self.sources.get(i))
-                .map(|src| src.hwnd);
-            self.sources = new_sources;
+        match spawn_refresh_worker(ctx) {
+            Some(rx) => self.refresh_rx = Some(rx),
+            None => self.apply_refresh_snapshot(take_refresh_snapshot()),
+        }
+    }
+
+    fn apply_refresh_snapshot(&mut self, snapshot: RefreshSnapshot) {
+        if let Some((sources, selected)) =
+            reconcile_sources(&self.sources, self.selected_source, snapshot.sources)
+        {
+            self.sources = sources;
             self.source_icon_textures.clear();
-            self.selected_source = previously_selected_hwnd
-                .and_then(|hwnd| self.sources.iter().position(|src| src.hwnd == hwnd));
+            self.selected_source = selected;
         }
 
-        let new_audio_devices = enumerate_audio_devices().unwrap_or_default();
-        let current_ids: std::collections::HashSet<&str> =
-            self.audio_devices.iter().map(|d| d.id.as_str()).collect();
-        let new_ids: std::collections::HashSet<&str> =
-            new_audio_devices.iter().map(|d| d.id.as_str()).collect();
-        if new_ids != current_ids {
+        let new_audio_devices = snapshot.audio_devices;
+        if audio_device_ids_changed(&self.audio_devices, &new_audio_devices) {
             self.selected_audio = resolve_selected_audio(&new_audio_devices, &self.config);
             self.audio_devices = new_audio_devices;
             // export.track_selection is NOT reset here -- same reasoning as the
@@ -260,7 +364,8 @@ impl App {
         // devices have -- being in the list at all already means "record
         // this", always. Only the live process_ids (idle vs running) can
         // change between refreshes.
-        let new_app_audio_sources = build_app_audio_sources(&mut self.config);
+        let new_app_audio_sources =
+            build_app_audio_sources_from(snapshot.live_app_audio, &mut self.config);
         if app_audio_fingerprint(&new_app_audio_sources)
             != app_audio_fingerprint(&self.app_audio_sources)
         {
@@ -573,6 +678,7 @@ fn foreground_capture_source() -> Option<CaptureSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::CaptureKind;
 
     fn mic() -> AudioDevice {
         AudioDevice {
@@ -640,5 +746,82 @@ mod tests {
             ],
         );
         assert_eq!(labels, vec!["🎙 Mic".to_string(), "Live App".to_string()]);
+    }
+
+    fn window(hwnd: usize, title: &str) -> CaptureSource {
+        CaptureSource {
+            kind: CaptureKind::Window,
+            process_id: 1,
+            window_title: title.into(),
+            exe_name: "app.exe".into(),
+            hwnd,
+            icon_rgba: None,
+        }
+    }
+
+    fn device(id: &str) -> AudioDevice {
+        AudioDevice {
+            id: id.into(),
+            name: id.into(),
+            is_loopback: false,
+        }
+    }
+
+    #[test]
+    fn reconcile_sources_keeps_the_old_list_when_the_handle_set_is_unchanged() {
+        let old = vec![window(1, "a"), window(2, "b")];
+        // Reordered and retitled, same handles -- not a change.
+        let new = vec![window(2, "b renamed"), window(1, "a")];
+        assert!(reconcile_sources(&old, Some(1), new).is_none());
+    }
+
+    #[test]
+    fn reconcile_sources_re_points_the_selection_at_the_same_handle() {
+        let old = vec![window(1, "a"), window(2, "b")];
+        let new = vec![window(3, "c"), window(2, "b"), window(1, "a")];
+        let (sources, selected) = reconcile_sources(&old, Some(1), new).expect("changed");
+        assert_eq!(sources.len(), 3);
+        assert_eq!(selected, Some(1));
+        assert_eq!(sources[1].hwnd, 2);
+    }
+
+    #[test]
+    fn reconcile_sources_clears_the_selection_when_its_source_is_gone() {
+        let old = vec![window(1, "a"), window(2, "b")];
+        let new = vec![window(1, "a")];
+        let (_, selected) = reconcile_sources(&old, Some(1), new).expect("changed");
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn reconcile_sources_with_no_selection_stays_unselected() {
+        let old = vec![window(1, "a")];
+        let new = vec![window(1, "a"), window(2, "b")];
+        let (_, selected) = reconcile_sources(&old, None, new).expect("changed");
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn audio_device_ids_changed_ignores_order_but_not_membership() {
+        let old = vec![device("a"), device("b")];
+        assert!(!audio_device_ids_changed(&old, &[device("b"), device("a")]));
+        assert!(audio_device_ids_changed(&old, &[device("a")]));
+        assert!(audio_device_ids_changed(&old, &[device("a"), device("c")]));
+    }
+
+    #[test]
+    fn refresh_snapshot_is_produced_on_the_worker_thread() {
+        let ctx = egui::Context::default();
+        let rx = spawn_refresh_worker(&ctx).expect("worker spawned");
+        let snapshot = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("worker sent a snapshot");
+        // Every connected display is always a capture source.
+        assert!(
+            snapshot
+                .sources
+                .iter()
+                .any(|s| matches!(s.kind, CaptureKind::Monitor))
+        );
     }
 }
