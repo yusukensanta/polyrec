@@ -135,7 +135,7 @@ mod tests {
         cap_tx
             .send(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64],
+                data: vec![0u8; 64].into(),
             })
             .await
             .unwrap();

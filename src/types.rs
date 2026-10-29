@@ -1,3 +1,4 @@
+use crate::capture::frame_pool::FrameBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,8 +53,9 @@ pub struct CaptureSource {
 #[derive(Debug)]
 pub struct VideoFrame {
     pub pts: Duration,
-    /// Raw BGRA pixel data, row-major, width*height*4 bytes.
-    pub data: Vec<u8>,
+    /// Raw BGRA pixel data, row-major, width*height*4 bytes -- usually a
+    /// recycled buffer from the capture loop's `FramePool`.
+    pub data: FrameBuf,
 }
 
 #[derive(Debug)]

@@ -1,19 +1,23 @@
+use crate::capture::frame_pool::FrameBuf;
 use crate::config::Codec;
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
 use crate::types::{AudioSamples, VideoFrame};
 use std::path::{Path, PathBuf};
+use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER};
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
-    MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
-    MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFAudioFormat_AAC, MFAudioFormat_PCM,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
-    MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_ARGB32, MFVideoFormat_H264,
-    MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
+    IMFMediaBuffer, IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter,
+    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
+    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
+    MFMediaType_Video, MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC,
+    MFVideoInterlace_Progressive,
 };
 use windows::core::GUID;
 use windows::core::HSTRING;
+use windows::core::implement;
 
 const AUDIO_BITRATE_BPS: u32 = 192_000;
 
@@ -170,9 +174,8 @@ impl RecordingWriter {
     pub fn write_video(&self, frame: VideoFrame) -> Result<(), AppError> {
         let pts_hns = frame.pts.as_nanos() as i64 / 100;
         let duration_hns = 10_000_000i64 / self.fps as i64;
-        let data = frame.data;
         unsafe {
-            let sample = make_sample(&data, pts_hns, duration_hns)?;
+            let sample = make_frame_sample(frame.data, pts_hns, duration_hns)?;
             self.writer
                 .WriteSample(self.video_stream, &sample)
                 .encode_ctx("WriteSample video")
@@ -347,6 +350,102 @@ pub(crate) unsafe fn make_sample(
     }
 }
 
+/// `make_sample` for a captured video frame, without its copy: the frame's
+/// own bytes become the sample's buffer (see `FrameMediaBuffer`).
+unsafe fn make_frame_sample(
+    data: FrameBuf,
+    pts_hns: i64,
+    duration_hns: i64,
+) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, AppError> {
+    unsafe {
+        let buffer: IMFMediaBuffer = FrameMediaBuffer::new(data)?.into();
+        let sample = MFCreateSample().encode_ctx("MFCreateSample")?;
+        sample.AddBuffer(&buffer).encode_ctx("AddBuffer")?;
+        sample.SetSampleTime(pts_hns).encode_ctx("SetSampleTime")?;
+        sample
+            .SetSampleDuration(duration_hns)
+            .encode_ctx("SetSampleDuration")?;
+        Ok(sample)
+    }
+}
+
+/// An `IMFMediaBuffer` over a captured frame's own bytes. `make_sample`
+/// copies its input into a freshly allocated `MFCreateMemoryBuffer`; for
+/// video that was a second full-frame copy (8.3 MB at 1080p, 33 MB at 4K)
+/// plus a fresh large allocation on every frame. This hands the encoder the
+/// bytes the capture loop already read back instead. Media Foundation
+/// releases the buffer once the encoder is done with the sample, which
+/// drops the `FrameBuf` and returns it to its `FramePool`.
+///
+/// Like `MFCreateMemoryBuffer`'s buffers, this is a plain (non-2D) system
+/// memory buffer whose current length starts at its full size.
+#[implement(IMFMediaBuffer)]
+struct FrameMediaBuffer {
+    data: std::cell::UnsafeCell<FrameBuf>,
+    max_len: u32,
+    current_len: std::sync::atomic::AtomicU32,
+}
+
+impl FrameMediaBuffer {
+    fn new(data: FrameBuf) -> Result<Self, AppError> {
+        let max_len = u32::try_from(data.len())
+            .map_err(|_| AppError::Encode(format!("frame too large: {} bytes", data.len())))?;
+        Ok(Self {
+            data: std::cell::UnsafeCell::new(data),
+            max_len,
+            current_len: std::sync::atomic::AtomicU32::new(max_len),
+        })
+    }
+}
+
+impl IMFMediaBuffer_Impl for FrameMediaBuffer_Impl {
+    fn Lock(
+        &self,
+        ppbbuffer: *mut *mut u8,
+        pcbmaxlength: *mut u32,
+        pcbcurrentlength: *mut u32,
+    ) -> windows::core::Result<()> {
+        if ppbbuffer.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: the out-pointers are the caller's, checked non-null (the
+        // two lengths are optional per the IMFMediaBuffer contract). The
+        // FrameBuf is never moved or resized while this object lives, so
+        // the pointer stays valid until Media Foundation releases it.
+        unsafe {
+            *ppbbuffer = (*self.data.get()).as_mut_ptr();
+            if !pcbmaxlength.is_null() {
+                *pcbmaxlength = self.max_len;
+            }
+            if !pcbcurrentlength.is_null() {
+                *pcbcurrentlength = self.current_len.load(std::sync::atomic::Ordering::Acquire);
+            }
+        }
+        Ok(())
+    }
+
+    fn Unlock(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn GetCurrentLength(&self) -> windows::core::Result<u32> {
+        Ok(self.current_len.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    fn SetCurrentLength(&self, cbcurrentlength: u32) -> windows::core::Result<()> {
+        if cbcurrentlength > self.max_len {
+            return Err(E_INVALIDARG.into());
+        }
+        self.current_len
+            .store(cbcurrentlength, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn GetMaxLength(&self) -> windows::core::Result<u32> {
+        Ok(self.max_len)
+    }
+}
+
 fn pack_u64(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
@@ -388,7 +487,7 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
+                data: vec![0u8; 64 * 64 * 4].into(),
             })
             .expect("write_video failed");
         let path = writer.finalize().expect("finalize failed");
@@ -412,7 +511,7 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
+                data: vec![0u8; 64 * 64 * 4].into(),
             })
             .expect("write_video failed");
         let path = writer.finalize().expect("finalize failed");
@@ -465,7 +564,7 @@ mod tests {
         // One blank BGRA frame (64×64×4 bytes)
         let frame = VideoFrame {
             pts: Duration::ZERO,
-            data: vec![0u8; 64 * 64 * 4],
+            data: vec![0u8; 64 * 64 * 4].into(),
         };
         writer.write_video(frame).expect("write_video failed");
 
@@ -514,7 +613,7 @@ mod tests {
             writer
                 .write_video(VideoFrame {
                     pts: Duration::ZERO,
-                    data: vec![0u8; 64 * 64 * 4],
+                    data: vec![0u8; 64 * 64 * 4].into(),
                 })
                 .expect("write_video failed");
 
@@ -547,5 +646,80 @@ mod tests {
                  samples appears to hang IMFSinkWriter::Finalize"
             ),
         }
+    }
+
+    /// The sample bytes Media Foundation reads, via the generic
+    /// ConvertToContiguousBuffer + Lock path every consumer uses.
+    unsafe fn sample_bytes(sample: &windows::Win32::Media::MediaFoundation::IMFSample) -> Vec<u8> {
+        unsafe {
+            let buffer = sample.ConvertToContiguousBuffer().unwrap();
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut len: u32 = 0;
+            buffer.Lock(&mut ptr, None, Some(&mut len)).unwrap();
+            let bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+            buffer.Unlock().unwrap();
+            bytes
+        }
+    }
+
+    #[test]
+    fn frame_sample_matches_the_copying_sample_byte_for_byte() {
+        let _mf = MfSession::start_mta().unwrap();
+        let pixels: Vec<u8> = (0..64 * 64 * 4).map(|i| (i % 251) as u8).collect();
+        unsafe {
+            let copied = make_sample(&pixels, 1234, 166_666).unwrap();
+            let zero_copy = make_frame_sample(pixels.clone().into(), 1234, 166_666).unwrap();
+            assert_eq!(sample_bytes(&zero_copy), sample_bytes(&copied));
+            assert_eq!(sample_bytes(&zero_copy), pixels);
+            assert_eq!(
+                zero_copy.GetSampleTime().unwrap(),
+                copied.GetSampleTime().unwrap()
+            );
+            assert_eq!(
+                zero_copy.GetSampleDuration().unwrap(),
+                copied.GetSampleDuration().unwrap()
+            );
+            assert_eq!(
+                zero_copy.GetTotalLength().unwrap(),
+                copied.GetTotalLength().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn frame_media_buffer_reports_lengths_like_a_memory_buffer() {
+        let buffer: IMFMediaBuffer = FrameMediaBuffer::new(vec![5u8; 16].into()).unwrap().into();
+        unsafe {
+            assert_eq!(buffer.GetMaxLength().unwrap(), 16);
+            assert_eq!(buffer.GetCurrentLength().unwrap(), 16);
+            buffer.SetCurrentLength(8).unwrap();
+            assert_eq!(buffer.GetCurrentLength().unwrap(), 8);
+            assert!(buffer.SetCurrentLength(17).is_err());
+
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut max: u32 = 0;
+            let mut cur: u32 = 0;
+            buffer
+                .Lock(&mut ptr, Some(&mut max), Some(&mut cur))
+                .unwrap();
+            assert_eq!((max, cur), (16, 8));
+            assert_eq!(std::slice::from_raw_parts(ptr, 16), &[5u8; 16]);
+            buffer.Unlock().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_released_frame_sample_returns_its_buffer_to_the_pool() {
+        let _mf = MfSession::start_mta().unwrap();
+        let pool = crate::capture::frame_pool::FramePool::new();
+        let frame = pool.take(64);
+        let frame_ptr = frame.as_ptr();
+        let sample = unsafe { make_frame_sample(frame, 0, 1).unwrap() };
+        drop(sample);
+        assert_eq!(
+            pool.take(64).as_ptr(),
+            frame_ptr,
+            "the sample's buffer should be back in the pool once released"
+        );
     }
 }
