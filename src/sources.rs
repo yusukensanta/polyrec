@@ -2,20 +2,19 @@ use crate::types::{CaptureKind, CaptureSource};
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject,
-    EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, HDC, HMONITOR, MONITORINFO,
-    ReleaseDC,
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, EnumDisplayMonitors, GetDC,
+    GetDIBits, GetMonitorInfoW, GetObjectW, HDC, HMONITOR, MONITORINFO, ReleaseDC,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGetFileInfoW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, EnumWindows, GetIconInfo, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, ICONINFO, IsWindowVisible, MONITORINFOF_PRIMARY,
+    EnumWindows, GetIconInfo, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    ICONINFO, IsWindowVisible, MONITORINFOF_PRIMARY,
 };
-use windows::core::BOOL;
 use windows::core::PCWSTR;
+use windows::core::{BOOL, Owned};
 
 /// Displays first, then windows -- a monitor is the "record everything"
 /// fallback a user reaches for before narrowing down to a specific window,
@@ -134,9 +133,7 @@ pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
         let exe_path = get_exe_path(process_id);
         let exe_name = exe_path
             .as_deref()
-            .and_then(|p| std::path::Path::new(p).file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
+            .and_then(exe_file_name)
             .unwrap_or_else(|| "Unknown".into());
         let icon_rgba = exe_path.as_deref().and_then(extract_exe_icon_rgba);
 
@@ -157,7 +154,8 @@ pub fn capture_source_for_hwnd(hwnd: HWND) -> CaptureSource {
 /// source's exe name/icon are resolved from its window's process id here.
 pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+        let handle =
+            Owned::new(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?);
         // Starts at MAX_PATH (the common case) and doubles up to Windows'
         // long-path limit if the return value suggests truncation --
         // GetModuleFileNameExW returns the buffer length (not a distinct
@@ -167,35 +165,60 @@ pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
         // deeply-nested OneDrive path silently truncates, showing as
         // "Unknown" with no icon instead of its real name.
         let mut buf_len: usize = 260;
-        let path = loop {
+        loop {
             let mut buf = vec![0u16; buf_len];
-            let len = GetModuleFileNameExW(Some(handle), None, &mut buf);
+            let len = GetModuleFileNameExW(Some(*handle), None, &mut buf);
             if len == 0 {
-                break None;
+                return None;
             }
             if (len as usize) < buf_len || buf_len >= 32768 {
-                break Some(String::from_utf16_lossy(&buf[..len as usize]));
+                return Some(String::from_utf16_lossy(&buf[..len as usize]));
             }
             buf_len *= 2;
-        };
-        let _ = windows::Win32::Foundation::CloseHandle(handle);
-        path
+        }
     }
 }
 
-/// Strips a trailing `.exe`/`.EXE` from an exe filename for display (e.g.
-/// "Discord.exe" -> "Discord") -- falls back to the input unchanged if it
-/// doesn't end in either case variant. `pub(crate)` -- shared by every
-/// exe_name-to-display_name derivation in the app-audio path
+/// The exe file name of `pid`'s image (e.g. "Discord.exe"), or `None` if
+/// the process can't be opened (already exited, or access denied) -- the
+/// identity both capture sources and per-app audio sessions are keyed on.
+pub(crate) fn exe_name_for_pid(pid: u32) -> Option<String> {
+    get_exe_path(pid).as_deref().and_then(exe_file_name)
+}
+
+/// The file-name part of an exe path (e.g. `C:\...\Discord.exe` ->
+/// "Discord.exe").
+pub(crate) fn exe_file_name(exe_path: &str) -> Option<String> {
+    std::path::Path::new(exe_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+}
+
+/// `name` without a trailing `.exe` in any letter case (e.g. "Discord.Exe"
+/// -> "Discord"), unchanged if it has none. Shared by every exe-name-derived
+/// label and filename prefix so the convention lives in one place. Never
+/// slices inside a multi-byte character, whatever `name` contains.
+pub(crate) fn strip_exe_suffix(name: &str) -> &str {
+    match name.len().checked_sub(4) {
+        Some(i)
+            if name
+                .get(i..)
+                .is_some_and(|ext| ext.eq_ignore_ascii_case(".exe")) =>
+        {
+            &name[..i]
+        }
+        _ => name,
+    }
+}
+
+/// Display label for an exe filename (e.g. "Discord.exe" -> "Discord") --
+/// used by every exe_name-to-display_name derivation in the app-audio path
 /// (`capture::audio::enumerate_app_audio_sessions`,
 /// `ui::dashboard::actions::build_app_audio_sources`, the add-app picker's
-/// open-window candidates) so the casing convention lives in one place.
+/// open-window candidates).
 pub(crate) fn display_name_from_exe_name(exe_name: &str) -> String {
-    exe_name
-        .strip_suffix(".exe")
-        .or_else(|| exe_name.strip_suffix(".EXE"))
-        .unwrap_or(exe_name)
-        .to_string()
+    strip_exe_suffix(exe_name).to_string()
 }
 
 /// Extracts the exe's small shell icon as straight-alpha, top-down RGBA bytes.
@@ -216,25 +239,23 @@ pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32
         if result == 0 || info.hIcon.is_invalid() {
             return None;
         }
-        let hicon = info.hIcon;
+        // Every handle below is owned from here on and released on every
+        // return path (DestroyIcon / DeleteObject), early returns included.
+        let hicon = Owned::new(info.hIcon);
 
         let mut icon_info = ICONINFO::default();
-        if GetIconInfo(hicon, &mut icon_info).is_err() {
-            let _ = DestroyIcon(hicon);
-            return None;
-        }
-        let _ = DeleteObject(icon_info.hbmMask.into());
+        GetIconInfo(*hicon, &mut icon_info).ok()?;
+        let _mask = Owned::new(icon_info.hbmMask);
+        let color = Owned::new(icon_info.hbmColor);
 
         let mut bmp = BITMAP::default();
         let bmp_size = std::mem::size_of::<BITMAP>() as i32;
         if GetObjectW(
-            icon_info.hbmColor.into(),
+            (*color).into(),
             bmp_size,
             Some(&mut bmp as *mut _ as *mut _),
         ) == 0
         {
-            let _ = DeleteObject(icon_info.hbmColor.into());
-            let _ = DestroyIcon(hicon);
             return None;
         }
         // BITMAP's width/height are signed (LONG); bmHeight in particular is
@@ -248,18 +269,11 @@ pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32
         let height = bmp.bmHeight.unsigned_abs();
         const MAX_ICON_DIMENSION: u32 = 512;
         if width == 0 || height == 0 || width > MAX_ICON_DIMENSION || height > MAX_ICON_DIMENSION {
-            let _ = DeleteObject(icon_info.hbmColor.into());
-            let _ = DestroyIcon(hicon);
             return None;
         }
-        let Some(buffer_len) = (width as usize)
+        let buffer_len = (width as usize)
             .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-        else {
-            let _ = DeleteObject(icon_info.hbmColor.into());
-            let _ = DestroyIcon(hicon);
-            return None;
-        };
+            .and_then(|px| px.checked_mul(4))?;
 
         let hdc = GetDC(None);
         let mut bmi = BITMAPINFO {
@@ -277,7 +291,7 @@ pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32
         let mut pixels = vec![0u8; buffer_len];
         let lines = GetDIBits(
             hdc,
-            icon_info.hbmColor,
+            *color,
             0,
             height,
             Some(pixels.as_mut_ptr() as *mut _),
@@ -285,8 +299,6 @@ pub(crate) fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32
             DIB_RGB_COLORS,
         );
         ReleaseDC(None, hdc);
-        let _ = DeleteObject(icon_info.hbmColor.into());
-        let _ = DestroyIcon(hicon);
 
         if lines == 0 {
             return None;
@@ -739,5 +751,37 @@ mod tests {
         std::fs::create_dir_all(&old_dir).unwrap();
         let stale_path = old_dir.join("App.exe").to_string_lossy().into_owned();
         assert_eq!(resolve_possibly_stale_exe_path(&stale_path), stale_path);
+    }
+
+    #[test]
+    fn strip_exe_suffix_is_case_insensitive() {
+        assert_eq!(strip_exe_suffix("Discord.exe"), "Discord");
+        assert_eq!(strip_exe_suffix("Notepad.EXE"), "Notepad");
+        assert_eq!(strip_exe_suffix("Game.Exe"), "Game");
+        assert_eq!(strip_exe_suffix(".exe"), "");
+    }
+
+    #[test]
+    fn strip_exe_suffix_leaves_other_names_alone() {
+        assert_eq!(strip_exe_suffix("Discord"), "Discord");
+        assert_eq!(strip_exe_suffix("exe"), "exe");
+        assert_eq!(strip_exe_suffix(""), "");
+        assert_eq!(strip_exe_suffix("archive.zip"), "archive.zip");
+    }
+
+    #[test]
+    fn strip_exe_suffix_never_splits_a_multibyte_character() {
+        // 9 bytes: slicing at len - 4 would land inside "ー" and panic.
+        assert_eq!(strip_exe_suffix("ゲーム"), "ゲーム");
+        assert_eq!(strip_exe_suffix("ゲーム.exe"), "ゲーム");
+    }
+
+    #[test]
+    fn exe_file_name_takes_the_last_path_component() {
+        assert_eq!(
+            exe_file_name(r"C:\Program Files\Discord\Discord.exe").as_deref(),
+            Some("Discord.exe")
+        );
+        assert_eq!(exe_file_name("").as_deref(), None);
     }
 }

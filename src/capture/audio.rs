@@ -23,7 +23,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::Variant::VT_BLOB;
-use windows::core::{Interface, implement};
+use windows::core::{Interface, Owned, implement};
 
 /// Fixed target format all captured audio is normalized to before it reaches the
 /// encoder. Devices report all kinds of native mix formats (e.g. 96kHz/8ch);
@@ -130,46 +130,41 @@ impl LinearResampler {
 
 /// Enumerate default render (loopback) and default capture (microphone) endpoints.
 pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
+    let enumerator = device_enumerator()?;
     let mut devices = Vec::new();
-    unsafe {
-        // COINIT_MULTITHREADED is fine — S_FALSE (already init'd) is also OK
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                .windows_ctx("CoCreateInstance MMDeviceEnumerator")?;
-
-        // Default render endpoint — used for loopback capture
-        if let Ok(dev) = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+    // Default render endpoint (loopback capture), then default capture
+    // endpoint (microphone).
+    for (flow, role, fallback_name, is_loopback) in [
+        (eRender, eMultimedia, "Default Output", true),
+        (eCapture, eConsole, "Default Input", false),
+    ] {
+        unsafe {
+            let Ok(dev) = enumerator.GetDefaultAudioEndpoint(flow, role) else {
+                continue;
+            };
             let id = dev
                 .GetId()
                 .map(|p| p.to_string().unwrap_or_default())
                 .unwrap_or_default();
-            let name =
-                get_device_friendly_name(&dev).unwrap_or_else(|| "Default Output".to_string());
+            let name = get_device_friendly_name(&dev).unwrap_or_else(|| fallback_name.to_string());
             devices.push(AudioDevice {
                 id,
                 name,
-                is_loopback: true,
-            });
-        }
-
-        // Default capture endpoint — microphone
-        if let Ok(dev) = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
-            let id = dev
-                .GetId()
-                .map(|p| p.to_string().unwrap_or_default())
-                .unwrap_or_default();
-            let name =
-                get_device_friendly_name(&dev).unwrap_or_else(|| "Default Input".to_string());
-            devices.push(AudioDevice {
-                id,
-                name,
-                is_loopback: false,
+                is_loopback,
             });
         }
     }
     Ok(devices)
+}
+
+/// Best-effort `CoInitializeEx(MTA)` (S_FALSE -- already initialized -- is
+/// fine too) and the endpoint enumerator every device lookup here starts from.
+fn device_enumerator() -> Result<IMMDeviceEnumerator, AppError> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .windows_ctx("CoCreateInstance MMDeviceEnumerator")
+    }
 }
 
 /// Enumerate running applications that currently have a WASAPI audio session
@@ -204,12 +199,8 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
 pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
     let mut sources = Vec::new();
     let parent_of = build_parent_pid_map();
+    let enumerator = device_enumerator()?;
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                .windows_ctx("CoCreateInstance MMDeviceEnumerator")?;
         let device = enumerator
             .GetDefaultAudioEndpoint(eRender, eMultimedia)
             .windows_ctx("GetDefaultAudioEndpoint")?;
@@ -247,12 +238,7 @@ pub fn enumerate_app_audio_sessions() -> Result<Vec<AppAudioSource>, AppError> {
             }
 
             let exe_path = crate::sources::get_exe_path(pid);
-            let Some(exe_name) = exe_path
-                .as_deref()
-                .and_then(|p| std::path::Path::new(p).file_name())
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-            else {
+            let Some(exe_name) = exe_path.as_deref().and_then(crate::sources::exe_file_name) else {
                 // Can't identify the process (already exited, or access
                 // denied) -- not worth listing an audio source with no name.
                 continue;
@@ -315,19 +301,19 @@ fn build_parent_pid_map() -> std::collections::HashMap<u32, u32> {
         let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
             return map;
         };
+        let snapshot = Owned::new(snapshot);
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
+        if Process32FirstW(*snapshot, &mut entry).is_ok() {
             loop {
                 map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
-                if Process32NextW(snapshot, &mut entry).is_err() {
+                if Process32NextW(*snapshot, &mut entry).is_err() {
                     break;
                 }
             }
         }
-        let _ = windows::Win32::Foundation::CloseHandle(snapshot);
     }
     map
 }
@@ -349,13 +335,7 @@ fn canonical_root_pid(
     exe_name: &str,
     parent_of: &std::collections::HashMap<u32, u32>,
 ) -> u32 {
-    canonical_root_pid_with(pid, exe_name, parent_of, |ancestor_pid| {
-        crate::sources::get_exe_path(ancestor_pid)
-            .as_deref()
-            .and_then(|p| std::path::Path::new(p).file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
-    })
+    canonical_root_pid_with(pid, exe_name, parent_of, crate::sources::exe_name_for_pid)
 }
 
 /// `canonical_root_pid`'s logic, parameterized over the ancestor-exe-name
@@ -426,13 +406,8 @@ pub async fn run_audio_capture(
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
 ) -> Result<(), AppError> {
+    let enumerator = device_enumerator()?;
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                .windows_ctx("CoCreateInstance")?;
-
         let device = if device_id.is_empty() {
             let flow = if is_loopback { eRender } else { eCapture };
             enumerator
@@ -551,10 +526,6 @@ pub async fn run_process_loopback_capture(
     }
 }
 
-/// Shared buffer-read loop: starts the (already-initialized) client, unpacks each
-/// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
-/// encoder target, and forwards `AudioSamples` until the receiver drops or the client
-/// is stopped from outside (abort).
 /// Best-effort: `OpenProcess` succeeding is enough to call `pid` alive,
 /// doesn't need real query rights. A pid getting reused by an unrelated
 /// process right after the original exits is the standard, accepted caveat
@@ -562,13 +533,9 @@ pub async fn run_process_loopback_capture(
 /// this is checked on not to matter here.
 fn process_is_alive(pid: u32) -> bool {
     unsafe {
-        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-            Ok(handle) => {
-                let _ = windows::Win32::Foundation::CloseHandle(handle);
-                true
-            }
-            Err(_) => false,
-        }
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map(|handle| Owned::new(handle))
+            .is_ok()
     }
 }
 
@@ -581,6 +548,11 @@ struct StreamFormat {
     bytes_per_frame: usize,
 }
 
+/// Shared buffer-read loop: starts the (already-initialized) client, unpacks each
+/// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
+/// encoder target, and forwards `AudioSamples` until the receiver drops, the
+/// stop signal is set, or the device/target process goes away.
+///
 /// `watch_pid` is `Some` only for process-loopback capture -- a target
 /// process simply exiting mid-recording isn't a WASAPI device error (unlike
 /// `AUDCLNT_E_DEVICE_INVALIDATED`, handled below), so `GetBuffer` just

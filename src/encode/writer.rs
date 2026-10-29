@@ -87,10 +87,7 @@ impl RecordingWriter {
         } = *params;
         let mf = MfSession::start()?;
         unsafe {
-            let path_str = output_path
-                .to_str()
-                .ok_or_else(|| AppError::Encode("output path is not valid UTF-8".into()))?;
-            let url = HSTRING::from(path_str);
+            let url = HSTRING::from(output_path);
             // `allow_hardware_encode` should be true for every real recording -- false
             // here previously (unconditionally, for every caller including the actual
             // shipped app) forced Media Foundation onto a pure-software encoder even

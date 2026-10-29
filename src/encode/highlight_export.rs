@@ -7,7 +7,7 @@
 //! seams that a single-input remux never has to do.
 
 use crate::encode::mf::MfSession;
-use crate::encode::remux::{StreamLayout, discover_stream_layout};
+use crate::encode::remux::{ALL_STREAMS, ANY_STREAM, StreamLayout, discover_stream_layout};
 use crate::error::{AppError, ResultExt};
 use crate::highlight::SegmentInfo;
 use std::path::{Path, PathBuf};
@@ -21,9 +21,6 @@ use windows::Win32::System::Com::StructuredStorage::{
 };
 use windows::Win32::System::Variant::VT_I8;
 use windows::core::{GUID, HSTRING};
-
-const MF_SOURCE_READER_ALL_STREAMS: u32 = 0xFFFF_FFFE;
-const MF_SOURCE_READER_ANY_STREAM: u32 = 0xFFFF_FFFE;
 
 pub fn concat_and_trim(
     segments: &[SegmentInfo],
@@ -50,10 +47,7 @@ unsafe fn open_passthrough_reader(
     AppError,
 > {
     unsafe {
-        let url = HSTRING::from(
-            path.to_str()
-                .ok_or_else(|| AppError::Encode("segment path not valid UTF-8".into()))?,
-        );
+        let url = HSTRING::from(path);
         let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, None).encode_ctx(
             format_args!("MFCreateSourceReaderFromURL({})", path.display()),
         )?;
@@ -61,7 +55,7 @@ unsafe fn open_passthrough_reader(
         let layout = discover_stream_layout(&reader)?;
 
         reader
-            .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false)
+            .SetStreamSelection(ALL_STREAMS, false)
             .encode_ctx("SetStreamSelection(all,false)")?;
         reader
             .SetStreamSelection(layout.video, true)
@@ -145,11 +139,7 @@ unsafe fn do_concat_and_trim(
         let skip = total.saturating_sub(target);
         let skip_hns: i64 = (skip.as_nanos() / 100).min(i64::MAX as u128) as i64;
 
-        let output_url = HSTRING::from(
-            output
-                .to_str()
-                .ok_or_else(|| AppError::Encode("output path not valid UTF-8".into()))?,
-        );
+        let output_url = HSTRING::from(output);
 
         // ── Sink writer, built from the oldest contributing segment's types --
         // every segment shares identical encode settings (same buffering
@@ -175,7 +165,7 @@ unsafe fn do_concat_and_trim(
         for (i, seg) in contributing.iter().enumerate() {
             let baseline_hns = if i == 0 { skip_hns } else { 0 };
             let (reader, layout) = if i == 0 {
-                (first_reader.clone(), first_layout.clone_layout())
+                (first_reader.clone(), first_layout.clone())
             } else {
                 let (r, l, _video_type, _audio_types) =
                     open_passthrough_reader(seg.path.as_path())?;
@@ -206,7 +196,7 @@ unsafe fn do_concat_and_trim(
 
                 reader
                     .ReadSample(
-                        MF_SOURCE_READER_ANY_STREAM,
+                        ANY_STREAM,
                         0,
                         Some(&mut actual_idx),
                         Some(&mut stream_flags),
@@ -255,20 +245,6 @@ fn write_sample(
         writer
             .WriteSample(stream_idx, sample)
             .encode_ctx(format_args!("WriteSample(stream {stream_idx})"))
-    }
-}
-
-impl StreamLayout {
-    /// `remux.rs`'s `StreamLayout` has no `Clone` derive since its only other
-    /// caller never needs to reuse one across two calls -- this reuses the
-    /// already-opened first segment's reader for its own passthrough pass
-    /// (`open_passthrough_reader` is only called once for it), so its layout
-    /// needs to be duplicated rather than moved.
-    fn clone_layout(&self) -> StreamLayout {
-        StreamLayout {
-            video: self.video,
-            audio: self.audio.clone(),
-        }
     }
 }
 
