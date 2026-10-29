@@ -1,9 +1,10 @@
+use super::App;
+use super::state::SelfUpdateState;
 use super::theme::{
     ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
 };
 use super::util::{open_url, take_if_finished};
 use super::widgets::{accent_button, section_header};
-use super::{App, SelfUpdateState};
 use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
 use eframe::egui;
@@ -184,13 +185,13 @@ impl App {
         // showing both at once would draw them stacked on top of each other.
         // Deferring here means clicking Update while Highlight buffering was
         // active shows `update_highlight_disabled_notice` first; this popup
-        // only appears once that's dismissed, even though `self_update_state`
+        // only appears once that's dismissed, even though `self_update.state`
         // was already set to `Confirming` in the same click (see
         // `render_menu_bar`).
         if self.error_message.is_some() {
             return;
         }
-        match &self.self_update_state {
+        match &self.self_update.state {
             SelfUpdateState::Idle => {}
             SelfUpdateState::Confirming(update) => {
                 let update = update.clone();
@@ -243,12 +244,12 @@ impl App {
                 match action {
                     Some("now") => {
                         let version = update.version.clone();
-                        self.self_update_handle = Some(tokio::spawn(
+                        self.self_update.handle = Some(tokio::spawn(
                             crate::self_update::perform_self_update(version),
                         ));
-                        self.self_update_state = SelfUpdateState::Working;
+                        self.self_update.state = SelfUpdateState::Working;
                     }
-                    Some("not_now") => self.self_update_state = SelfUpdateState::Idle,
+                    Some("not_now") => self.self_update.state = SelfUpdateState::Idle,
                     _ => {}
                 }
             }
@@ -284,7 +285,7 @@ impl App {
                         }
                     });
                 if close {
-                    self.self_update_state = SelfUpdateState::Idle;
+                    self.self_update.state = SelfUpdateState::Idle;
                 }
             }
         }
@@ -298,13 +299,13 @@ impl App {
     /// until we do; the installed path also wants this process's file lock
     /// on polyrec.exe released as soon as possible for the installer).
     pub(super) fn poll_self_update_result(&mut self, ctx: &egui::Context) {
-        let Some(handle) = take_if_finished(&mut self.self_update_handle) else {
+        let Some(handle) = take_if_finished(&mut self.self_update.handle) else {
             return;
         };
         match tokio::runtime::Handle::current().block_on(handle) {
             Ok(Ok(())) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Ok(Err(e)) => self.self_update_state = SelfUpdateState::Failed(e.to_string()),
-            Err(e) => self.self_update_state = SelfUpdateState::Failed(e.to_string()),
+            Ok(Err(e)) => self.self_update.state = SelfUpdateState::Failed(e.to_string()),
+            Err(e) => self.self_update.state = SelfUpdateState::Failed(e.to_string()),
         }
     }
 }

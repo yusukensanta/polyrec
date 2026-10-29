@@ -1,5 +1,6 @@
+use super::App;
+use super::state::HighlightSaveState;
 use super::widgets::audio_device_icon;
-use super::{App, HighlightSaveState};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -174,7 +175,7 @@ impl App {
         }
     }
 
-    /// Refreshes `free_space_bytes` for `config.output_dir`'s volume, at most
+    /// Refreshes `free_space.bytes` for `config.output_dir`'s volume, at most
     /// every `FREE_SPACE_CHECK_INTERVAL` -- or immediately if the output dir
     /// itself changed since the last check (typing a new path, or Browse...),
     /// so switching drives doesn't show a stale number from the old one.
@@ -182,17 +183,18 @@ impl App {
         const FREE_SPACE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
         let dir_changed =
-            self.free_space_checked_dir.as_deref() != Some(self.config.output_dir.as_path());
+            self.free_space.checked_dir.as_deref() != Some(self.config.output_dir.as_path());
         let due = self
-            .free_space_checked_at
+            .free_space
+            .checked_at
             .is_none_or(|t| t.elapsed() >= FREE_SPACE_CHECK_INTERVAL);
         if !dir_changed && !due {
             return;
         }
 
-        self.free_space_bytes = crate::disk_space::free_bytes(&self.config.output_dir).ok();
-        self.free_space_checked_at = Some(Instant::now());
-        self.free_space_checked_dir = Some(self.config.output_dir.clone());
+        self.free_space.bytes = crate::disk_space::free_bytes(&self.config.output_dir).ok();
+        self.free_space.checked_at = Some(Instant::now());
+        self.free_space.checked_dir = Some(self.config.output_dir.clone());
     }
 
     /// Keeps the source/audio-device lists live without a manual Refresh
@@ -247,7 +249,7 @@ impl App {
         if new_ids != current_ids {
             self.selected_audio = resolve_selected_audio(&new_audio_devices, &self.config);
             self.audio_devices = new_audio_devices;
-            // export_track_selection is NOT reset here -- same reasoning as the
+            // export.track_selection is NOT reset here -- same reasoning as the
             // old Refresh button: it's tied to the last finished recording's
             // actually-probed track count, not the live device list.
         }
@@ -319,12 +321,12 @@ impl App {
             tracing::info!("recording stop requested, finalizing: {}", p.display());
         }
         let disk_full = self.session.active().map(|a| Arc::clone(&a.disk_full_flag));
-        self.finalizing_handle = self.session.stop_capture();
-        self.finalizing_path = path;
-        self.finalizing_disk_full = disk_full;
+        self.finalizing.handle = self.session.stop_capture();
+        self.finalizing.path = path;
+        self.finalizing.disk_full = disk_full;
         self.recording_start = None;
         self.frame_count.store(0, Ordering::Relaxed);
-        // export_track_selection/export_available_tracks are set once finalize
+        // export.track_selection/export.available_tracks are set once finalize
         // actually succeeds and the file can be probed (poll_background_work) --
         // not here, since what's selected pre-recording isn't a guarantee of
         // what ends up in the file.
@@ -495,7 +497,8 @@ impl App {
         // every frame -- also naturally rate-limits retrying after a
         // disk-full stop to that same ~3s cadence instead of every frame.
         let has_room = self
-            .free_space_bytes
+            .free_space
+            .bytes
             .is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
         if !self.session.is_highlighting() && has_room {
             self.start_highlight_buffering_for(source);
@@ -526,7 +529,7 @@ impl App {
             self.error_message = Some(s.highlight_save_not_active.to_string());
             return;
         };
-        if matches!(self.highlight_save_state, HighlightSaveState::Saving) {
+        if matches!(self.highlight_save.state, HighlightSaveState::Saving) {
             return;
         }
         let real_hwnd = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
@@ -538,11 +541,11 @@ impl App {
             .save_highlight(&self.config.output_dir, &app_name, naming)
         {
             Ok(handle) => {
-                self.highlight_save_state = HighlightSaveState::Saving;
-                self.highlight_save_handle = Some(handle);
+                self.highlight_save.state = HighlightSaveState::Saving;
+                self.highlight_save.handle = Some(handle);
             }
             Err(e) => {
-                self.highlight_save_state = HighlightSaveState::Failed(e.to_string());
+                self.highlight_save.state = HighlightSaveState::Failed(e.to_string());
             }
         }
     }

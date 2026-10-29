@@ -1,3 +1,5 @@
+use super::App;
+use super::state::{ExportState, HighlightSaveState};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_STOP, BG_FAINT,
     BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY,
@@ -5,7 +7,6 @@ use super::theme::{
 };
 use super::util::open_folder;
 use super::widgets::{accent_button, centered_action_row, format_bytes_free, section_header};
-use super::{App, ExportState, HighlightSaveState};
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
 use crate::types::SessionState;
@@ -132,7 +133,7 @@ impl App {
                         .color(TEXT_MUTED),
                     );
                 }
-            } else if self.finalizing_handle.is_some() {
+            } else if self.finalizing.handle.is_some() {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(s.saving_recording)
@@ -240,10 +241,10 @@ impl App {
                 });
             }
 
-            let show_free_space = self.free_space_bytes.is_some();
+            let show_free_space = self.free_space.bytes.is_some();
             let show_highlight_active = self.session.is_highlighting();
             let show_highlight_save =
-                !matches!(self.highlight_save_state, HighlightSaveState::Idle);
+                !matches!(self.highlight_save.state, HighlightSaveState::Idle);
             // Grouped into one visually distinct region (rather than a flat
             // pile of same-size lines distinguished only by color) so it
             // reads as "the status area" separate from the output-dir
@@ -259,7 +260,7 @@ impl App {
                         ui.set_min_width(ui.available_width());
                         let mut first = true;
 
-                        if let Some(free) = self.free_space_bytes {
+                        if let Some(free) = self.free_space.bytes {
                             // Same threshold the recording loop itself refuses
                             // to start/continue below (disk_space::MIN_FREE_BYTES)
                             // -- flagging it here too means the user sees it
@@ -294,7 +295,7 @@ impl App {
                         if !first && show_highlight_save {
                             ui.add_space(SPACE_TIGHT);
                         }
-                        match &self.highlight_save_state {
+                        match &self.highlight_save.state {
                             HighlightSaveState::Idle => {}
                             HighlightSaveState::Saving => {
                                 ui.label(
@@ -439,7 +440,7 @@ impl App {
         // could meaningfully remove -- the raw recording already IS the most
         // that could be exported, so the export button/track list would just
         // be a confusing no-op. Still offer Open Folder either way.
-        if self.export_available_tracks < 2 {
+        if self.export.available_tracks < 2 {
             if ui
                 .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
                 .on_hover_text(s.open_folder_tooltip)
@@ -458,7 +459,7 @@ impl App {
         // thinks of "Discord" as multiple audio sources. Toggling a group
         // checkbox sets every track in that group together, so they can
         // never end up selected inconsistently.
-        let resolved_labels: Vec<String> = (0..self.export_track_selection.len())
+        let resolved_labels: Vec<String> = (0..self.export.track_selection.len())
             .map(|i| match self.last_recording_audio_labels.get(i) {
                 Some(name) => name.clone(),
                 None => format!("{} {}", s.track_label_fallback, i + 1),
@@ -466,30 +467,30 @@ impl App {
             .collect();
         let track_groups = group_tracks_by_label(&resolved_labels);
         for (label, indices) in &track_groups {
-            let mut checked = indices.iter().all(|&i| self.export_track_selection[i]);
+            let mut checked = indices.iter().all(|&i| self.export.track_selection[i]);
             if ui.checkbox(&mut checked, label.clone()).changed() {
                 for &i in indices {
-                    self.export_track_selection[i] = checked;
+                    self.export.track_selection[i] = checked;
                 }
             }
         }
-        ui.checkbox(&mut self.export_mix_tracks, s.export_mix_tracks_label)
+        ui.checkbox(&mut self.export.mix_tracks, s.export_mix_tracks_label)
             .on_hover_text(s.export_mix_tracks_tooltip);
 
         ui.add_space(8.0);
 
-        let done_path = if let ExportState::Done(p) = &self.export_state {
+        let done_path = if let ExportState::Done(p) = &self.export.state {
             Some(p.clone())
         } else {
             None
         };
-        let failed_msg = if let ExportState::Failed(m) = &self.export_state {
+        let failed_msg = if let ExportState::Failed(m) = &self.export.state {
             Some(m.clone())
         } else {
             None
         };
-        let is_idle = matches!(self.export_state, ExportState::Idle);
-        let is_running = matches!(self.export_state, ExportState::Running);
+        let is_idle = matches!(self.export.state, ExportState::Idle);
+        let is_running = matches!(self.export.state, ExportState::Running);
 
         if is_idle {
             ui.horizontal(|ui| {
@@ -517,7 +518,8 @@ impl App {
                         // merged, everything else kept separate) is only
                         // used when that's off.
                         let indices: Vec<usize> = self
-                            .export_track_selection
+                            .export
+                            .track_selection
                             .iter()
                             .enumerate()
                             .filter(|&(_, &sel)| sel)
@@ -528,12 +530,12 @@ impl App {
                             .map(|(_, idxs)| {
                                 idxs.iter()
                                     .copied()
-                                    .filter(|&i| self.export_track_selection[i])
+                                    .filter(|&i| self.export.track_selection[i])
                                     .collect::<Vec<usize>>()
                             })
                             .filter(|g: &Vec<usize>| !g.is_empty())
                             .collect();
-                        let mix = self.export_mix_tracks;
+                        let mix = self.export.mix_tracks;
                         let (tx, rx) = mpsc::channel();
                         std::thread::spawn(move || {
                             let result = if mix {
@@ -544,8 +546,8 @@ impl App {
                             .map_err(|e| e.to_string());
                             let _ = tx.send(result);
                         });
-                        self.export_result_rx = Some(rx);
-                        self.export_state = ExportState::Running;
+                        self.export.result_rx = Some(rx);
+                        self.export.state = ExportState::Running;
                     }
                 }
                 if ui

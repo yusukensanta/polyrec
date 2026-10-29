@@ -1,5 +1,6 @@
+use super::App;
+use super::state::SelfUpdateState;
 use super::widgets::accent_button;
-use super::{App, SelfUpdateState};
 use crate::i18n::Strings;
 use eframe::egui;
 
@@ -92,7 +93,7 @@ impl App {
                                     self.error_message =
                                         Some(s.update_highlight_disabled_notice.to_string());
                                 }
-                                self.self_update_state = SelfUpdateState::Confirming(update);
+                                self.self_update.state = SelfUpdateState::Confirming(update);
                             }
                         }
                     }
