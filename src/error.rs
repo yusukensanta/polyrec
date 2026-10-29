@@ -21,11 +21,10 @@ pub enum AppError {
     #[error("Update error: {0}")]
     Update(String),
 
-    // The MB figure is a plain string literal, not computed from
-    // disk_space::MIN_FREE_BYTES -- thiserror's #[error(...)] can't mix a
-    // field reference ({0}) with an extra formatted expression unambiguously.
-    // Keep this in sync with MIN_FREE_BYTES if that constant ever changes.
-    #[error("Not enough disk space on {0} (less than 500 MB free)")]
+    #[error(
+        "Not enough disk space on {0} (less than {mb} MB free)",
+        mb = crate::disk_space::MIN_FREE_BYTES / (1024 * 1024)
+    )]
     DiskFull(std::path::PathBuf),
 }
 
@@ -91,6 +90,19 @@ mod tests {
     fn ctx_passes_ok_values_through_untouched() {
         let ok: Result<u32, &str> = Ok(7);
         assert_eq!(ok.encode_ctx("unused").unwrap(), 7);
+    }
+
+    #[test]
+    fn disk_full_message_reports_the_threshold_from_min_free_bytes() {
+        let e = AppError::DiskFull(std::path::PathBuf::from(r"D:\recordings"));
+        assert_eq!(
+            e.to_string(),
+            format!(
+                r"Not enough disk space on D:\recordings (less than {} MB free)",
+                crate::disk_space::MIN_FREE_BYTES / (1024 * 1024)
+            )
+        );
+        assert!(e.to_string().contains("500 MB"));
     }
 
     #[test]
