@@ -630,7 +630,7 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
+                data: vec![0u8; 64 * 64 * 4].into(),
             })
             .expect("write_video");
         writer
@@ -659,7 +659,7 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
+                data: vec![0u8; 64 * 64 * 4].into(),
             })
             .expect("write_video");
         for track_idx in 0..2 {
@@ -693,7 +693,7 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
+                data: vec![0u8; 64 * 64 * 4].into(),
             })
             .expect("write_video");
         for track_idx in 0..3 {
@@ -781,7 +781,7 @@ mod tests {
         writer
             .write_video(VideoFrame {
                 pts: Duration::ZERO,
-                data: vec![0u8; 64 * 64 * 4],
+                data: vec![0u8; 64 * 64 * 4].into(),
             })
             .expect("write_video");
         // ~3s of audio per track -- long enough that real-time throttling
@@ -933,7 +933,7 @@ mod tests {
             writer
                 .write_video(VideoFrame {
                     pts: Duration::from_millis(33 * i as u64),
-                    data: vec![0u8; 64 * 64 * 4],
+                    data: vec![0u8; 64 * 64 * 4].into(),
                 })
                 .expect("write_video");
         }

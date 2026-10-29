@@ -198,7 +198,7 @@ mod tests {
     fn tiny_video_frame(pts: Duration) -> VideoFrame {
         VideoFrame {
             pts,
-            data: vec![0u8; 64 * 64 * 4],
+            data: vec![0u8; 64 * 64 * 4].into(),
         }
     }
 

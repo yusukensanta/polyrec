@@ -270,7 +270,7 @@ mod tests {
             writer
                 .write_video(VideoFrame {
                     pts,
-                    data: vec![0u8; 64 * 64 * 4],
+                    data: vec![0u8; 64 * 64 * 4].into(),
                 })
                 .expect("write_video");
             writer
