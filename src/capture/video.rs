@@ -394,7 +394,9 @@ pub async fn run_video_capture(
             let src_res: ID3D11Resource = texture
                 .cast()
                 .map_err(|e| AppError::Capture(format!("cast texture to ID3D11Resource: {e}")))?;
-            device.d3d_context.CopyResource(&staging[write_idx], &src_res);
+            device
+                .d3d_context
+                .CopyResource(&staging[write_idx], &src_res);
         }
         pending[write_idx] = Some(clock.elapsed());
 
@@ -422,7 +424,13 @@ pub async fn run_video_capture(
             };
             if pixel_data.is_none() {
                 pixel_data = unsafe {
-                    map_staging(&device, &staging[read_idx], capture_width, capture_height, 0)?
+                    map_staging(
+                        &device,
+                        &staging[read_idx],
+                        capture_width,
+                        capture_height,
+                        0,
+                    )?
                 };
             }
             if let Some(pixel_data) = pixel_data {
@@ -479,7 +487,10 @@ mod tests {
     fn ping_pong_indices_alternate_and_never_collide() {
         for frame_counter in 0..8u64 {
             let (write_idx, read_idx) = ping_pong_indices(frame_counter);
-            assert_ne!(write_idx, read_idx, "must never write and read the same slot");
+            assert_ne!(
+                write_idx, read_idx,
+                "must never write and read the same slot"
+            );
             assert!(write_idx < 2 && read_idx < 2);
             // write_idx alternates 0,1,0,1,...
             assert_eq!(write_idx, (frame_counter % 2) as usize);

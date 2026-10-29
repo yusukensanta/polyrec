@@ -351,7 +351,13 @@ impl App {
     /// nothing here can fully guarantee it.
     fn resolve_capture_inputs(
         &self,
-    ) -> (Vec<AudioDevice>, Vec<f32>, Vec<AppAudioSource>, Vec<f32>, EncodeSettings) {
+    ) -> (
+        Vec<AudioDevice>,
+        Vec<f32>,
+        Vec<AppAudioSource>,
+        Vec<f32>,
+        EncodeSettings,
+    ) {
         let mut selected_devices: Vec<_> = self
             .audio_devices
             .iter()

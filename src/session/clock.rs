@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
@@ -37,7 +37,9 @@ impl RecordingClock {
             QueryPerformanceCounter(&mut now).expect("QueryPerformanceCounter failed");
         }
         // Only store if not already paused (pause_tick == 0 means running)
-        let _ = self.pause_tick.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+        let _ = self
+            .pause_tick
+            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
     }
 
     /// Resume the clock, accumulating the paused duration. Idempotent.
@@ -69,8 +71,7 @@ impl RecordingClock {
         } else {
             now - self.start_ticks
         };
-        let total_nanos =
-            (running_ticks as u128 * 1_000_000_000) / self.frequency as u128;
+        let total_nanos = (running_ticks as u128 * 1_000_000_000) / self.frequency as u128;
         let paused_nanos = self.accumulated_paused_nanos.load(Ordering::SeqCst) as u128;
         Duration::from_nanos((total_nanos.saturating_sub(paused_nanos)) as u64)
     }
@@ -85,7 +86,10 @@ mod tests {
     fn clock_starts_near_zero() {
         let clock = RecordingClock::new();
         let elapsed = clock.elapsed();
-        assert!(elapsed.as_millis() < 100, "elapsed should be < 100ms right after creation");
+        assert!(
+            elapsed.as_millis() < 100,
+            "elapsed should be < 100ms right after creation"
+        );
     }
 
     #[test]
@@ -106,7 +110,10 @@ mod tests {
         let t1 = clock.elapsed();
         let t2 = clone.elapsed();
         let diff = t1.abs_diff(t2);
-        assert!(diff.as_micros() < 1000, "two reads of same clock should be within 1ms");
+        assert!(
+            diff.as_micros() < 1000,
+            "two reads of same clock should be within 1ms"
+        );
     }
 
     #[test]
@@ -118,7 +125,10 @@ mod tests {
         thread::sleep(Duration::from_millis(60));
         let t2 = clock.elapsed();
         let diff = if t2 > t1 { (t2 - t1).as_millis() } else { 0 };
-        assert!(diff < 5, "elapsed should not advance while paused, advanced by {diff}ms");
+        assert!(
+            diff < 5,
+            "elapsed should not advance while paused, advanced by {diff}ms"
+        );
     }
 
     #[test]

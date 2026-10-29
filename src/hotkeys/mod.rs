@@ -9,16 +9,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey,
     UnregisterHotKey, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9,
     VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_D, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_F, VK_F1,
-    VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F2, VK_F20,
-    VK_F21, VK_F22, VK_F23, VK_F24, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_G, VK_H,
+    VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14,
+    VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24, VK_G, VK_H,
     VK_HOME, VK_I, VK_INSERT, VK_J, VK_K, VK_L, VK_LEFT, VK_M, VK_MENU, VK_N, VK_NEXT, VK_O, VK_P,
     VK_PRIOR, VK_Q, VK_R, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP,
     VK_V, VK_W, VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PM_NOREMOVE, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-    MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG,
+    PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// `MOD_NOREPEAT` (0x4000) — only relevant to [`try_register`]'s `RegisterHotKey`
@@ -51,7 +51,13 @@ impl HotkeyListener {
     /// doesn't poll for work on its own -- it blocks in `GetMessageW` between
     /// real window events and explicit repaint requests). Callers must pass
     /// something equivalent to `egui::Context::request_repaint`.
-    pub fn spawn(start_stop: &str, pause: &str, toggle_overlay: &str, save_highlight: &str, wake: impl Fn() + Send + 'static) -> Self {
+    pub fn spawn(
+        start_stop: &str,
+        pause: &str,
+        toggle_overlay: &str,
+        save_highlight: &str,
+        wake: impl Fn() + Send + 'static,
+    ) -> Self {
         let start_stop_hk = parse_hotkey(start_stop);
         let pause_hk = parse_hotkey(pause);
         let toggle_overlay_hk = parse_hotkey(toggle_overlay);
@@ -83,10 +89,19 @@ impl HotkeyListener {
                 let _ = PeekMessageW(&mut dummy, None, 0, 0, PM_NOREMOVE);
             }
             id_tx.send(tid).ok();
-            run_hook_loop(event_tx, start_stop_hk, pause_hk, toggle_overlay_hk, save_highlight_hk, Box::new(wake));
+            run_hook_loop(
+                event_tx,
+                start_stop_hk,
+                pause_hk,
+                toggle_overlay_hk,
+                save_highlight_hk,
+                Box::new(wake),
+            );
         });
 
-        let thread_id = id_rx.recv().expect("hotkey thread panicked before sending thread ID");
+        let thread_id = id_rx
+            .recv()
+            .expect("hotkey thread panicked before sending thread ID");
 
         Self {
             rx: event_rx,
@@ -204,7 +219,11 @@ fn parse_base_key(s: &str) -> Option<VIRTUAL_KEY> {
 /// (see `egui::Modifiers`), only as a standalone key, which is a poor global
 /// hotkey component anyway (Win+key combos are frequently OS-reserved).
 pub fn parse_hotkey(s: &str) -> Option<(VIRTUAL_KEY, HOT_KEY_MODIFIERS)> {
-    let mut parts: Vec<&str> = s.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let mut parts: Vec<&str> = s
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     let base = parts.pop()?;
     let vk = parse_base_key(base)?;
 
@@ -327,8 +346,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                     hc.held.remove(&vk_code);
                 } else if !hc.held.contains(&vk_code) {
                     let current_mods = live_modifiers();
-                    if let Some(binding) =
-                        hc.bindings.iter().find(|b| b.vk.0 as u32 == vk_code && b.mods.0 == current_mods.0)
+                    if let Some(binding) = hc
+                        .bindings
+                        .iter()
+                        .find(|b| b.vk.0 as u32 == vk_code && b.mods.0 == current_mods.0)
                     {
                         hc.held.insert(vk_code);
                         hc.tx.send(binding.event).ok();
@@ -355,30 +376,52 @@ fn run_hook_loop(
 ) {
     let mut bindings = Vec::new();
     if let Some((vk, mods)) = start_stop_hk {
-        bindings.push(Binding { vk, mods, event: HotkeyEvent::StartStop });
+        bindings.push(Binding {
+            vk,
+            mods,
+            event: HotkeyEvent::StartStop,
+        });
     }
     if let Some((vk, mods)) = pause_hk {
-        bindings.push(Binding { vk, mods, event: HotkeyEvent::Pause });
+        bindings.push(Binding {
+            vk,
+            mods,
+            event: HotkeyEvent::Pause,
+        });
     }
     if let Some((vk, mods)) = toggle_overlay_hk {
-        bindings.push(Binding { vk, mods, event: HotkeyEvent::ToggleOverlay });
+        bindings.push(Binding {
+            vk,
+            mods,
+            event: HotkeyEvent::ToggleOverlay,
+        });
     }
     if let Some((vk, mods)) = save_highlight_hk {
-        bindings.push(Binding { vk, mods, event: HotkeyEvent::SaveHighlight });
+        bindings.push(Binding {
+            vk,
+            mods,
+            event: HotkeyEvent::SaveHighlight,
+        });
     }
 
     HOOK_CTX.with(|ctx| {
-        *ctx.borrow_mut() = Some(HookContext { bindings, held: HashSet::new(), tx, wake });
+        *ctx.borrow_mut() = Some(HookContext {
+            bindings,
+            held: HashSet::new(),
+            tx,
+            wake,
+        });
     });
 
-    let hook: HHOOK = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) } {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
-            HOOK_CTX.with(|ctx| *ctx.borrow_mut() = None);
-            return;
-        }
-    };
+    let hook: HHOOK =
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) } {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
+                HOOK_CTX.with(|ctx| *ctx.borrow_mut() = None);
+                return;
+            }
+        };
 
     // GetMessageW blocks this thread (which owns no window) until either the
     // stop() signal (WM_QUIT via PostThreadMessageW) arrives, or Windows
@@ -426,7 +469,11 @@ mod tests {
     fn parse_base_key_letters_digits_and_extended_keys() {
         // VK_A=0x41, VK_Z=0x5A, VK_0=0x30, VK_9=0x39 (ASCII-aligned by Win32 design)
         assert_eq!(parse_base_key("A").map(|v| v.0), Some(0x41));
-        assert_eq!(parse_base_key("a").map(|v| v.0), Some(0x41), "case-insensitive");
+        assert_eq!(
+            parse_base_key("a").map(|v| v.0),
+            Some(0x41),
+            "case-insensitive"
+        );
         assert_eq!(parse_base_key("Z").map(|v| v.0), Some(0x5A));
         assert_eq!(parse_base_key("0").map(|v| v.0), Some(0x30));
         assert_eq!(parse_base_key("9").map(|v| v.0), Some(0x39));
@@ -467,7 +514,10 @@ mod tests {
 
     #[test]
     fn parse_hotkey_rejects_unknown_modifier_or_missing_base() {
-        assert!(parse_hotkey("WIN+F9").is_none(), "Win/Super isn't a supported modifier here");
+        assert!(
+            parse_hotkey("WIN+F9").is_none(),
+            "Win/Super isn't a supported modifier here"
+        );
         assert!(parse_hotkey("CTRL+").is_none());
         assert!(parse_hotkey("").is_none());
         assert!(parse_hotkey("CTRL+NOTAKEY").is_none());
@@ -480,7 +530,10 @@ mod tests {
         // not a bug here, but that's an acceptable, very low-probability risk
         // for exercising the real RegisterHotKey round-trip.
         let vk = parse_base_key("F24").expect("F24 should be a known key");
-        assert!(try_register(vk, HOT_KEY_MODIFIERS(0)), "expected an unused key to register successfully");
+        assert!(
+            try_register(vk, HOT_KEY_MODIFIERS(0)),
+            "expected an unused key to register successfully"
+        );
     }
 
     #[test]
@@ -496,7 +549,10 @@ mod tests {
     #[test]
     fn try_register_with_modifier_succeeds_for_an_unused_combo() {
         let (vk, mods) = parse_hotkey("CTRL+ALT+F22").expect("should parse");
-        assert!(try_register(vk, mods), "expected an unused modifier combo to register successfully");
+        assert!(
+            try_register(vk, mods),
+            "expected an unused modifier combo to register successfully"
+        );
     }
 
     #[test]

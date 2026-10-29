@@ -26,6 +26,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      # Cheapest check first -- fails in seconds, before the multi-minute
+      # build, when a PR forgot to run `cargo fmt`. rustfmt itself comes from
+      # rust-toolchain.toml's `components`, so it's the same pinned version
+      # locally and here.
+      - name: Format
+        run: cargo fmt --all --check
+
       - name: Build
         run: cargo build --locked --all-targets
 

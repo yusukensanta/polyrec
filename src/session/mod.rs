@@ -190,10 +190,11 @@ impl SessionManager {
         // total_audio_track_count's doc comment for why the count (not a
         // per-track value) is the only thing that needs to match
         // spawn_app_audio_tracks's track-ID assignment.
-        let audio_specs: Vec<(u32, u16)> = vec![
-            (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-            total_audio_track_count(&audio_devices, &app_audio_sources)
-        ];
+        let audio_specs: Vec<(u32, u16)> =
+            vec![
+                (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+                total_audio_track_count(&audio_devices, &app_audio_sources)
+            ];
 
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
             resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
@@ -434,10 +435,11 @@ impl SessionManager {
         // See total_audio_track_count's doc comment for why the count (not
         // a per-track value) is the only thing that needs to match
         // spawn_app_audio_tracks's track-ID assignment.
-        let audio_specs: Vec<(u32, u16)> = vec![
-            (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-            total_audio_track_count(&audio_devices, &app_audio_sources)
-        ];
+        let audio_specs: Vec<(u32, u16)> =
+            vec![
+                (TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+                total_audio_track_count(&audio_devices, &app_audio_sources)
+            ];
 
         let (capture_width, capture_height, output_width, output_height, bitrate_bps) =
             resolve_capture_and_output_dimensions(source.kind, source.hwnd, &encode);
@@ -750,7 +752,10 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
 /// keeping both derived from the same function (rather than two
 /// independently-written iterations over the same data) is what keeps them
 /// from silently drifting apart if either one's filtering logic changes.
-fn total_audio_track_count(audio_devices: &[AudioDevice], app_audio_sources: &[AppAudioSource]) -> usize {
+fn total_audio_track_count(
+    audio_devices: &[AudioDevice],
+    app_audio_sources: &[AppAudioSource],
+) -> usize {
     audio_devices.len()
         + app_audio_sources
             .iter()
@@ -1365,7 +1370,12 @@ mod tests {
             Some("e2e_stream_001.mp4"),
             "first custom-prefix recording should start the sequence at 001"
         );
-        assert!(std::fs::metadata(&first_path).expect("first output missing").len() > 0);
+        assert!(
+            std::fs::metadata(&first_path)
+                .expect("first output missing")
+                .len()
+                > 0
+        );
 
         let frame_count2 = Arc::new(AtomicU64::new(0));
         let temp_path2 = sm
@@ -1396,7 +1406,12 @@ mod tests {
             Some("e2e_stream_002.mp4"),
             "second custom-prefix recording in the same dir should continue the sequence at 002, scanned from disk"
         );
-        assert!(std::fs::metadata(&second_path).expect("second output missing").len() > 0);
+        assert!(
+            std::fs::metadata(&second_path)
+                .expect("second output missing")
+                .len()
+                > 0
+        );
     }
 
     /// DIAGNOSTIC (temporary): records real window + default audio devices while a
@@ -1895,7 +1910,11 @@ mod tests {
         );
 
         let handle = sm
-            .save_highlight(dir.path(), "e2e_highlight_test", RecordingNaming::ProcessName)
+            .save_highlight(
+                dir.path(),
+                "e2e_highlight_test",
+                RecordingNaming::ProcessName,
+            )
             .expect("save_highlight failed");
         let saved_path = handle
             .await
