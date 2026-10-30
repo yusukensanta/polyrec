@@ -203,7 +203,12 @@ impl App {
             return;
         }
         let achieved_fps = self.frame_count.load(Ordering::Relaxed) as f64 / elapsed_secs;
-        let target_fps = self.config.encode.fps() as f64;
+        // The rate this recording really runs at, which can be below the
+        // setting when the display refreshes slower or the encoder turns the
+        // rate down -- see `LiveFps`.
+        let Some(target_fps) = self.session.active().map(|a| f64::from(a.fps.get())) else {
+            return;
+        };
         if achieved_fps < target_fps * SHORTFALL_THRESHOLD {
             self.fps_shortfall_warned = true;
             self.error_message = Some(format!(

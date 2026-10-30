@@ -131,6 +131,18 @@ impl App {
                                 .response
                                 .interact(egui::Sense::click())
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            // A selectable button, the way egui describes its own
+                            // selectable labels -- without it, screen readers (and
+                            // UI Automation) saw only the card's text, with no way
+                            // to pick it as the source.
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::Role::Button,
+                                    true,
+                                    selected,
+                                    &source.window_title,
+                                )
+                            });
                             ui.data_mut(|d| d.insert_temp(hover_id, response.hovered()));
                             if response.clicked() {
                                 self.selected_source = Some(i);

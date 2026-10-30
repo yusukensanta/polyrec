@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- FPS presets 120, 144 and 240, alongside 30 and 60. Some presets are greyed out, with the reason on hover:
+  - a rate above the selected source's display refresh rate;
+  - a rate this PC's encoder can't handle for the chosen codec and resolution, e.g. H264 at 240 fps in 1440p.
+
+  A recording set higher than its source allows steps down to the highest rate that works, and the Quality popup says which rate that will be.
+- Source cards are now exposed to screen readers as selectable buttons.
+
+### Changed
+
+- Recordings run at the frame rate set in Quality settings. Previously every frame Windows delivered was recorded, up to the display's refresh rate: on a 144 or 240 Hz display, a "60 fps" recording captured, copied and encoded every refresh. Measured on a 1440p 240 Hz display, a 60 fps capture now uses 62% less CPU.
+- Quality settings now list Codec, Encoder and Resolution before FPS, since the available frame rates depend on them.
+
 ## [v0.5.93] - 2026-10-31
 
 ### Changed

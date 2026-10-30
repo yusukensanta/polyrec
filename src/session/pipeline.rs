@@ -13,12 +13,13 @@ use crate::capture::CaptureControl;
 use crate::capture::audio::{
     TARGET_CHANNELS, TARGET_SAMPLE_RATE, run_audio_capture, run_process_loopback_capture,
 };
+use crate::capture::frame_rate::{FPS_PRESETS, LiveFps, effective_fps, highest_encodable_fps};
 use crate::capture::video::{
-    CaptureTarget, query_capture_size, query_display_size, run_video_capture,
+    CaptureTarget, display_refresh_hz, query_capture_size, query_display_size, run_video_capture,
 };
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_video_pump};
-use crate::encode::writer::video_bitrate_bps;
+use crate::encode::writer::{video_bitrate_bps, video_encoder_accepts};
 use crate::encode::{EncoderParams, RecordingCommand};
 use crate::error::AppError;
 use crate::types::{AppAudioSource, AudioDevice, CaptureKind, CaptureSource, TrackId};
@@ -71,12 +72,17 @@ impl CaptureInputs {
     }
 }
 
-/// Capture-side staging size, encoder output size and bitrate for one source.
-#[derive(Debug, Clone, Copy)]
+/// Capture-side staging size, encoder output size, bitrate and frame rate for
+/// one source.
+#[derive(Debug, Clone)]
 pub(super) struct CaptureDimensions {
     pub capture: (u32, u32),
     pub output: (u32, u32),
     pub bitrate_bps: u32,
+    /// Both the capture loop's fps cap and the encoder's frame rate: the
+    /// requested rate clamped to the display (`effective_fps`), lowered by
+    /// the writer actor if the encoder turns it down (`LiveFps`).
+    pub fps: LiveFps,
 }
 
 impl CaptureDimensions {
@@ -94,45 +100,28 @@ impl CaptureDimensions {
     /// `query_display_size` -- which resolves a *window*'s monitor via
     /// `MonitorFromWindow` -- is skipped entirely; the already-queried capture
     /// size is reused as the display size too.
+    ///
+    /// The frame rate starts at `encode.fps`, lowered when the source's
+    /// display can't refresh that fast (`effective_fps`). Whether the encoder
+    /// takes it is only found out by the writer actor, on its own thread (see
+    /// `RecordingWriter::new_at_highest_fps`), so this never waits on an
+    /// encoder.
     pub(super) fn resolve(source: &CaptureSource, encode: &EncodeSettings) -> Self {
         let target = CaptureTarget::from_raw(source.kind, source.hwnd);
-        let capture = match query_capture_size(target) {
-            Ok((w, h)) => (even_at_least_2(w), even_at_least_2(h)),
-            Err(e) => {
-                tracing::warn!(
-                    "query_capture_size failed for handle {:x}: {e}; using 1920x1080",
-                    source.hwnd
-                );
-                (1920, 1080)
-            }
-        };
-        let display_size = match target {
-            CaptureTarget::Monitor(_) => Some(capture),
-            CaptureTarget::Window(hwnd)
-                if matches!(encode.resolution_mode, ResolutionMode::Display) =>
-            {
-                match query_display_size(hwnd) {
-                    Ok((w, h)) => Some((even_at_least_2(w), even_at_least_2(h))),
-                    Err(e) => {
-                        tracing::warn!(
-                            "query_display_size failed for hwnd {:x}: {e}; using capture size",
-                            source.hwnd
-                        );
-                        None
-                    }
-                }
-            }
-            CaptureTarget::Window(_) => None,
-        };
-        let output = resolve_output_size(&encode.resolution_mode, capture, display_size);
-        let bitrate_bps = match encode.bitrate_mode {
-            BitrateMode::Auto => video_bitrate_bps(output.0, output.1, encode.fps),
-            BitrateMode::Manual(bps) => bps,
-        };
+        let (capture, output) = resolve_sizes(source, target, encode);
+        let display_hz = display_refresh_hz(target);
+        let fps = effective_fps(encode.fps, display_hz);
+        if fps != encode.fps {
+            tracing::info!(
+                "recording at {fps} fps instead of {}: the display refreshes at {display_hz:?} Hz",
+                encode.fps
+            );
+        }
         Self {
             capture,
             output,
-            bitrate_bps,
+            bitrate_bps: bitrate_bps(encode, output, fps),
+            fps: LiveFps::new(fps),
         }
     }
 
@@ -140,15 +129,138 @@ impl CaptureDimensions {
     /// writer(s) from.
     pub(super) fn encoder_params(&self, inputs: &CaptureInputs) -> EncoderParams {
         EncoderParams {
-            width: self.output.0,
-            height: self.output.1,
-            fps: inputs.encode.fps,
-            codec: inputs.encode.codec,
-            bitrate_bps: self.bitrate_bps,
             audio_tracks: inputs.audio_track_specs(),
-            allow_hardware_encode: matches!(inputs.encode.encoder_mode, EncoderMode::Hardware),
+            ..video_params(
+                &inputs.encode,
+                self.output,
+                self.fps.get(),
+                self.bitrate_bps,
+            )
         }
     }
+}
+
+/// What the Quality popup needs to offer only the fps presets a source can
+/// really be recorded at with the chosen codec, encoder and resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FpsSupport {
+    /// The source's display refresh rate, if Windows reports one.
+    pub display_hz: Option<u32>,
+    /// The size frames would be encoded at.
+    pub output: (u32, u32),
+    /// Rates above 60 the encoder accepts at `output`, out of the presets and
+    /// the display's own rate.
+    encodable: Vec<u32>,
+}
+
+impl FpsSupport {
+    /// Whether the encoder takes `fps` at `output`.
+    pub fn encoder_accepts(&self, fps: u32) -> bool {
+        highest_encodable_fps(fps, |fps| self.encodable.contains(&fps)) == fps
+    }
+
+    /// The rate a recording set to `requested` really runs at -- the same
+    /// steps `CaptureDimensions::resolve` takes.
+    pub fn recorded_fps(&self, requested: u32) -> u32 {
+        highest_encodable_fps(effective_fps(requested, self.display_hz), |fps| {
+            self.encodable.contains(&fps)
+        })
+    }
+}
+
+/// Probes what `source` can be recorded at with `encode`'s codec, encoder
+/// and resolution settings. Creates real (scratch) encoders, so run it off
+/// the UI thread; answers are cached (see `video_encoder_accepts`).
+pub fn probe_fps_support(source: &CaptureSource, encode: &EncodeSettings) -> FpsSupport {
+    let target = CaptureTarget::from_raw(source.kind, source.hwnd);
+    let (_, output) = resolve_sizes(source, target, encode);
+    let display_hz = display_refresh_hz(target);
+    let mut candidates: Vec<u32> = FPS_PRESETS.into_iter().chain(display_hz).collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    let encodable = candidates
+        .into_iter()
+        .filter(|&fps| fps > 60 && encoder_accepts(encode, output, fps))
+        .collect();
+    FpsSupport {
+        display_hz,
+        output,
+        encodable,
+    }
+}
+
+fn bitrate_bps(encode: &EncodeSettings, (width, height): (u32, u32), fps: u32) -> u32 {
+    match encode.bitrate_mode {
+        BitrateMode::Auto => video_bitrate_bps(width, height, fps),
+        BitrateMode::Manual(bps) => bps,
+    }
+}
+
+/// The video half of the encoder config (no audio tracks).
+fn video_params(
+    encode: &EncodeSettings,
+    (width, height): (u32, u32),
+    fps: u32,
+    bitrate_bps: u32,
+) -> EncoderParams {
+    EncoderParams {
+        width,
+        height,
+        fps,
+        codec: encode.codec,
+        bitrate_bps,
+        audio_tracks: Vec::new(),
+        allow_hardware_encode: matches!(encode.encoder_mode, EncoderMode::Hardware),
+    }
+}
+
+/// Whether the encoder `encode` selects takes video at `output` and `fps`.
+fn encoder_accepts(encode: &EncodeSettings, output: (u32, u32), fps: u32) -> bool {
+    video_encoder_accepts(&video_params(
+        encode,
+        output,
+        fps,
+        bitrate_bps(encode, output, fps),
+    ))
+}
+
+/// The capture-side staging size and the encoder output size for `source`
+/// -- see `CaptureDimensions::resolve`.
+fn resolve_sizes(
+    source: &CaptureSource,
+    target: CaptureTarget,
+    encode: &EncodeSettings,
+) -> ((u32, u32), (u32, u32)) {
+    let capture = match query_capture_size(target) {
+        Ok((w, h)) => (even_at_least_2(w), even_at_least_2(h)),
+        Err(e) => {
+            tracing::warn!(
+                "query_capture_size failed for handle {:x}: {e}; using 1920x1080",
+                source.hwnd
+            );
+            (1920, 1080)
+        }
+    };
+    let display_size = match target {
+        CaptureTarget::Monitor(_) => Some(capture),
+        CaptureTarget::Window(hwnd)
+            if matches!(encode.resolution_mode, ResolutionMode::Display) =>
+        {
+            match query_display_size(hwnd) {
+                Ok((w, h)) => Some((even_at_least_2(w), even_at_least_2(h))),
+                Err(e) => {
+                    tracing::warn!(
+                        "query_display_size failed for hwnd {:x}: {e}; using capture size",
+                        source.hwnd
+                    );
+                    None
+                }
+            }
+        }
+        CaptureTarget::Window(_) => None,
+    };
+    let output = resolve_output_size(&encode.resolution_mode, capture, display_size);
+    (capture, output)
 }
 
 /// Encoders need even dimensions; WGC can report odd (or degenerate) ones.
@@ -239,6 +351,7 @@ impl CapturePipeline {
                 CaptureTarget::from_raw(kind, handle),
                 dims.capture,
                 dims.output,
+                dims.fps.clone(),
                 ctrl,
                 video_tx,
                 show_border,
@@ -437,6 +550,60 @@ mod tests {
         assert!(CaptureInputs::default().audio_track_specs().is_empty());
     }
 
+    /// End-to-end: probes the primary display with the default encode
+    /// settings. Creates real encoders, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn probe_fps_support_reports_the_primary_displays_limits() {
+        let source = crate::sources::enumerate_sources()
+            .into_iter()
+            .find(|s| s.kind == CaptureKind::Monitor)
+            .expect("no monitor source");
+        let start = std::time::Instant::now();
+        let support = probe_fps_support(&source, &EncodeSettings::default());
+        println!("probed in {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let _ = probe_fps_support(&source, &EncodeSettings::default());
+        println!("again (cached encoders) in {:?}", start.elapsed());
+        println!("{support:?}");
+        assert!(support.display_hz.is_some());
+        assert!(support.encoder_accepts(60));
+    }
+
+    fn fps_support(display_hz: Option<u32>, encodable: &[u32]) -> FpsSupport {
+        FpsSupport {
+            display_hz,
+            output: (2560, 1440),
+            encodable: encodable.to_vec(),
+        }
+    }
+
+    #[test]
+    fn fps_support_accepts_60_and_below_and_only_probed_rates_above() {
+        let support = fps_support(Some(239), &[120, 144]);
+        assert!(support.encoder_accepts(30));
+        assert!(support.encoder_accepts(60));
+        assert!(support.encoder_accepts(144));
+        assert!(!support.encoder_accepts(240));
+    }
+
+    #[test]
+    fn fps_support_recorded_fps_takes_the_same_steps_as_recording_start() {
+        // H264 at 1440p on a 240 Hz display: 240 isn't encodable, 144 is.
+        assert_eq!(fps_support(Some(239), &[120, 144]).recorded_fps(240), 144);
+        // A 60 Hz display caps it before the encoder matters.
+        assert_eq!(
+            fps_support(Some(60), &[120, 144, 240]).recorded_fps(144),
+            60
+        );
+        // A 165 Hz display whose own rate the encoder takes.
+        assert_eq!(
+            fps_support(Some(165), &[120, 144, 165]).recorded_fps(240),
+            165
+        );
+        assert_eq!(fps_support(None, &[]).recorded_fps(60), 60);
+    }
+
     #[test]
     fn encoder_params_carry_output_size_bitrate_and_encode_settings() {
         let inputs = CaptureInputs {
@@ -447,11 +614,16 @@ mod tests {
             capture: (1282, 722),
             output: (1280, 720),
             bitrate_bps: 5_000_000,
+            fps: LiveFps::new(144),
         };
         let params = dims.encoder_params(&inputs);
         assert_eq!((params.width, params.height), (1280, 720));
         assert_eq!(params.bitrate_bps, 5_000_000);
-        assert_eq!(params.fps, inputs.encode.fps);
+        assert_eq!(
+            params.fps,
+            dims.fps.get(),
+            "the encoder starts at the capture cap"
+        );
         assert_eq!(params.codec, inputs.encode.codec);
         assert_eq!(params.audio_tracks.len(), 1);
         assert!(

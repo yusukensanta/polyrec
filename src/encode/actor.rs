@@ -1,3 +1,4 @@
+use crate::capture::frame_rate::LiveFps;
 use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter, VideoSlot};
 use crate::error::{AppError, ResultExt};
@@ -32,6 +33,7 @@ pub fn spawn_recording_actor(
     naming: RecordingNaming,
     params: EncoderParams,
     disk_full_flag: Arc<AtomicBool>,
+    fps: LiveFps,
 ) -> (
     mpsc::Sender<RecordingCommand>,
     JoinHandle<Result<PathBuf, AppError>>,
@@ -39,7 +41,8 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let writer = RecordingWriter::new(&temp_path, &params)?;
+        let (writer, settled_fps) = RecordingWriter::new_at_highest_fps(&temp_path, &params)?;
+        fps.set(settled_fps);
         writer.begin_writing()?;
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);

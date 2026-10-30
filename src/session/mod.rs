@@ -2,8 +2,9 @@ pub mod clock;
 mod pipeline;
 pub mod state;
 
-pub use pipeline::CaptureInputs;
+pub use pipeline::{CaptureInputs, FpsSupport, probe_fps_support};
 
+use crate::capture::frame_rate::LiveFps;
 use crate::config::{BitrateMode, Codec, EncoderMode, ResolutionMode};
 use crate::encode::RecordingCommand;
 use crate::encode::actor::spawn_recording_actor;
@@ -76,6 +77,11 @@ pub struct ActiveCapture {
     /// can call `MonitorFromWindow(hwnd)` (only valid for `Window`) or should
     /// use `hwnd` directly as the monitor (`Monitor`).
     pub kind: CaptureKind,
+    /// The frame rate this recording actually runs at: the configured fps,
+    /// lowered to what the display and then the encoder can do (see
+    /// `effective_fps` and `LiveFps`). What the fps-shortfall check measures
+    /// against.
+    pub fps: LiveFps,
 }
 
 impl ActiveCapture {
@@ -179,6 +185,7 @@ impl SessionManager {
         }
 
         let dims = CaptureDimensions::resolve(&source, &inputs.encode);
+        let fps = dims.fps.clone();
         let disk_full_flag = Arc::new(AtomicBool::new(false));
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
@@ -187,6 +194,7 @@ impl SessionManager {
             naming.clone(),
             dims.encoder_params(&inputs),
             Arc::clone(&disk_full_flag),
+            fps.clone(),
         );
         let pipeline = CapturePipeline::spawn(
             &source,
@@ -209,6 +217,7 @@ impl SessionManager {
             disk_full_flag,
             hwnd: source.hwnd,
             kind: source.kind,
+            fps,
         });
         self.apply(SessionAction::Start);
 
@@ -317,6 +326,7 @@ impl SessionManager {
             max_segments,
             Arc::clone(&segments),
             Arc::clone(&disk_full_flag),
+            dims.fps.clone(),
         );
         let pipeline = CapturePipeline::spawn(
             source,

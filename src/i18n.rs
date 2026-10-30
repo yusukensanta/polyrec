@@ -202,6 +202,18 @@ pub struct Strings {
     // Quality popup
     pub quality_title: &'static str,
     pub fps_header: &'static str,
+    /// Caption under the fps presets: "{hz}" is the selected source's
+    /// display refresh rate.
+    pub fps_display_caption_template: &'static str,
+    /// Hover text on an fps preset the selected source's display can't
+    /// reach; "{hz}" is its refresh rate.
+    pub fps_above_display_template: &'static str,
+    /// Hover text on an fps preset the encoder rejects at the source's
+    /// output size; fills in "{codec}", "{fps}", "{w}" and "{h}".
+    pub fps_encoder_limit_template: &'static str,
+    /// Caption when the chosen fps can't be used for the selected source;
+    /// "{fps}" is what a recording from it will run at instead.
+    pub fps_recorded_template: &'static str,
     pub codec_header: &'static str,
     pub encoder_mode_header: &'static str,
     pub encoder_mode_hardware: &'static str,
@@ -375,6 +387,10 @@ pub static EN: Strings = Strings {
 
     quality_title: "Quality Settings",
     fps_header: "FPS",
+    fps_display_caption_template: "The selected source's display refreshes at {hz} Hz.",
+    fps_above_display_template: "Above this display's {hz} Hz refresh rate. It can't deliver more frames than it draws, so a recording from it runs at {hz} fps.",
+    fps_encoder_limit_template: "This PC's {codec} encoder can't record {fps} fps at {w}×{h}. Try H265 or a lower resolution.",
+    fps_recorded_template: "This source will record at {fps} fps.",
     codec_header: "CODEC",
     encoder_mode_header: "ENCODER",
     encoder_mode_hardware: "Hardware",
@@ -521,6 +537,10 @@ pub static JA: Strings = Strings {
 
     quality_title: "画質設定",
     fps_header: "FPS",
+    fps_display_caption_template: "選択中のソースのディスプレイのリフレッシュレートは {hz} Hz です。",
+    fps_above_display_template: "このディスプレイのリフレッシュレート（{hz} Hz）を超えています。描画される以上のフレームは取得できないため、このソースの録画は {hz} fps になります。",
+    fps_encoder_limit_template: "この PC の {codec} エンコーダーは {w}×{h} で {fps} fps を録画できません。H265 にするか解像度を下げてください。",
+    fps_recorded_template: "このソースは {fps} fps で録画されます。",
     codec_header: "コーデック",
     encoder_mode_header: "エンコーダー",
     encoder_mode_hardware: "ハードウェア",
