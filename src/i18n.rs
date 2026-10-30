@@ -154,7 +154,8 @@ pub struct Strings {
     pub state_paused: &'static str,
     pub state_recording: &'static str,
     pub tracks_word: &'static str, // used as "{n} {tracks_word}"
-    pub frames_word: &'static str, // used as "{n} {frames_word}"
+    /// Hover text on the recording stats line (tracks · fps · size).
+    pub recording_stats_tooltip: &'static str,
     pub saving_recording: &'static str,
     pub select_source_prompt: &'static str,
     // Only shown while Idle -- Recording/Paused already show their state via
@@ -174,10 +175,10 @@ pub struct Strings {
     /// is readable without opening the popup -- otherwise moving AUDIO out
     /// of the always-visible source panel would hide that state entirely.
     pub no_audio_selected: &'static str,
-    /// "{n} {audio_sources_word}" -- same pattern as `tracks_word`/`frames_word`.
+    /// "{n} {audio_sources_word}" -- same pattern as `tracks_word`.
     pub audio_sources_word: &'static str,
     pub browse_button: &'static str,
-    /// "{free_space_prefix}{formatted bytes}" -- see format_bytes_free in dashboard.rs.
+    /// "{free_space_prefix}{formatted bytes}" -- see format_bytes in dashboard/widgets.rs.
     pub free_space_prefix: &'static str,
     pub resume_button: &'static str,
     pub stop_button: &'static str,
@@ -362,7 +363,7 @@ pub static EN: Strings = Strings {
     state_paused: "PAUSED",
     state_recording: "RECORDING",
     tracks_word: "tracks",
-    frames_word: "frames",
+    recording_stats_tooltip: "Audio tracks, frames per second achieved so far, and the file size so far. Frames are only captured when the picture changes, so a still screen records fewer per second than the setting.",
     saving_recording: "Saving recording…",
     select_source_prompt: "Select a source and press REC to start.",
     state_prefix: "State: ",
@@ -516,7 +517,7 @@ pub static JA: Strings = Strings {
     state_paused: "一時停止中",
     state_recording: "録画中",
     tracks_word: "トラック",
-    frames_word: "フレーム",
+    recording_stats_tooltip: "音声トラック数、ここまでの実フレームレート、ここまでのファイルサイズです。フレームは画面が変化したときだけ取り込まれるため、静止した画面では設定より少なくなります。",
     saving_recording: "録画を保存中…",
     select_source_prompt: "ソースを選択して REC を押すと開始します。",
     state_prefix: "状態: ",

@@ -46,6 +46,20 @@ pub(super) struct FreeSpaceCache {
     pub checked_dir: Option<PathBuf>,
 }
 
+/// The recording status lines' slow parts, refreshed only when the elapsed
+/// time ticks over to a new second, not every frame. Previewing a
+/// `RecordingNaming::CustomPrefix` name lists a directory
+/// (`recording_naming::next_sequence_number`), and the size is a
+/// filesystem call.
+pub(super) struct RecordingStatusCache {
+    /// The elapsed second this was computed at.
+    pub secs: u64,
+    /// The name the recording will be saved as.
+    pub name: String,
+    /// The recording file's size so far, if it could be read.
+    pub file_bytes: Option<u64>,
+}
+
 /// A stopped recording whose recorder is still finalizing the file in the
 /// background -- see `stop_recording` / `poll_background_work`.
 #[derive(Default)]

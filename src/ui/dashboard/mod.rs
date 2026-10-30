@@ -24,7 +24,10 @@ use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use eframe::egui;
 use fps_support::FpsSupportProbe;
 use hotkeys_popup::HotkeySlot;
-use state::{AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, SelfUpdate};
+use state::{
+    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, RecordingStatusCache,
+    SelfUpdate,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -78,13 +81,9 @@ pub struct App {
     /// sustained shortfall to the user; it just silently degraded. One-shot
     /// per recording so it doesn't re-fire every frame once triggered.
     fps_shortfall_warned: bool,
-    /// Cached preview of the filename the active recording will be saved as
-    /// (elapsed-seconds it was computed at, and the name itself) -- recomputed
-    /// only when `elapsed` ticks over to a new second (see
-    /// `render_center_panel`), not every frame, since previewing
-    /// `RecordingNaming::CustomPrefix` does a directory listing
-    /// (`recording_naming::next_sequence_number`).
-    displayed_recording_name: Option<(u64, String)>,
+    /// The active recording's saved-name preview and size so far -- see
+    /// `RecordingStatusCache`.
+    recording_status: Option<RecordingStatusCache>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
     /// Last time `refresh_sources_and_audio_if_due` actually ran (see there
@@ -208,7 +207,7 @@ impl App {
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             fps_shortfall_warned: false,
-            displayed_recording_name: None,
+            recording_status: None,
             last_output_path: None,
             output_dir_input,
             sources_checked_at: None,

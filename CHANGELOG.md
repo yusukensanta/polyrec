@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- While recording, the status line shows the frame rate achieved so far and the file size so far ("2 tracks · 58 fps · 120 MB") instead of a raw frame count. Its tooltip explains that a still screen records fewer frames per second than the setting.
+
 ## [v0.5.99] - 2026-10-31
 
 ### Added

@@ -153,11 +153,12 @@ pub(super) fn checkbox_with_volume_slider(
     }
 }
 
-/// Formats a byte count as a human-readable GB/MB string for the free-space
-/// display -- GB with one decimal once it's large enough for that decimal to
+/// Formats a byte count as a human-readable GB/MB string (free space, a
+/// recording's size so far)
+/// -- GB with one decimal once it's large enough for that decimal to
 /// be meaningful, otherwise a whole-number MB (matches how Windows' own disk
 /// space displays don't bother with GB fractions for small values).
-pub(super) fn format_bytes_free(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     const MB: f64 = 1024.0 * 1024.0;
     const GB: f64 = MB * 1024.0;
     let bytes = bytes as f64;
@@ -173,14 +174,14 @@ mod free_space_display_tests {
     use super::*;
 
     #[test]
-    fn format_bytes_free_uses_mb_below_one_gb() {
-        assert_eq!(format_bytes_free(500 * 1024 * 1024), "500 MB");
+    fn format_bytes_uses_mb_below_one_gb() {
+        assert_eq!(format_bytes(500 * 1024 * 1024), "500 MB");
     }
 
     #[test]
-    fn format_bytes_free_uses_gb_with_one_decimal_at_or_above_one_gb() {
-        assert_eq!(format_bytes_free(1024 * 1024 * 1024), "1.0 GB");
+    fn format_bytes_uses_gb_with_one_decimal_at_or_above_one_gb() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
         // 2.5 GB exactly: 2.5 * 1024^3 = 2684354560, an exact integer.
-        assert_eq!(format_bytes_free(2_684_354_560), "2.5 GB");
+        assert_eq!(format_bytes(2_684_354_560), "2.5 GB");
     }
 }

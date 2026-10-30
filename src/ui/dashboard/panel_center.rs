@@ -1,14 +1,12 @@
 use super::App;
-use super::state::{ExportState, HighlightSaveState};
+use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
     BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT,
     TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
 };
 use super::util::open_folder;
-use super::widgets::{
-    accent_button, caption, centered_action_row, format_bytes_free, section_header,
-};
+use super::widgets::{accent_button, caption, centered_action_row, format_bytes, section_header};
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
 use crate::types::SessionState;
@@ -113,40 +111,47 @@ impl App {
 
             ui.add_space(4.0);
 
-            // Stats row
-            let track_count = self.recording_track_count();
-            ui.horizontal(|ui| {
-                ui.label(caption(
-                    format!("{track_count} {}", s.tracks_word),
-                    TEXT_MUTED,
-                ));
-                ui.label(caption("  ·  ", TEXT_MUTED));
-                ui.label(caption(format!("{frames} {}", s.frames_word), TEXT_MUTED));
-            });
-
-            if let Some(active) = self.session.active() {
-                let naming = active.naming.clone();
-                let app_name = active.app_name.clone();
-                let output_dir = active.output_dir.clone();
-                // Recomputed only on a new elapsed second, not every
-                // frame -- see `displayed_recording_name`'s doc comment.
-                if self.displayed_recording_name.as_ref().map(|(s, _)| *s) != Some(secs) {
-                    let stem = crate::recording_naming::resolve_finished_recording_stem(
-                        &naming,
-                        &app_name,
-                        &output_dir,
-                    );
-                    self.displayed_recording_name = Some((secs, format!("{stem}.mp4")));
-                }
-                ui.add_space(4.0);
-                ui.label(caption(
-                    self.displayed_recording_name
-                        .as_ref()
-                        .map(|(_, name)| name.as_str())
-                        .unwrap_or("recording.mp4"),
-                    TEXT_MUTED,
-                ));
+            // Recomputed only on a new elapsed second, not every frame --
+            // see `RecordingStatusCache`.
+            if let Some(active) = self.session.active()
+                && self.recording_status.as_ref().map(|c| c.secs) != Some(secs)
+            {
+                let stem = crate::recording_naming::resolve_finished_recording_stem(
+                    &active.naming,
+                    &active.app_name,
+                    &active.output_dir,
+                );
+                self.recording_status = Some(RecordingStatusCache {
+                    secs,
+                    name: format!("{stem}.mp4"),
+                    file_bytes: std::fs::metadata(&active.output_path).ok().map(|m| m.len()),
+                });
             }
+
+            // Stats row: tracks · achieved fps · size so far. Fps and size
+            // say how the recording is going; the raw frame count it used to
+            // show said neither.
+            let mut stats = vec![format!(
+                "{} {}",
+                self.recording_track_count(),
+                s.tracks_word
+            )];
+            if let Some(fps) = achieved_fps(frames, elapsed) {
+                stats.push(format!("{fps:.0} fps"));
+            }
+            if let Some(bytes) = self.recording_status.as_ref().and_then(|c| c.file_bytes) {
+                stats.push(format_bytes(bytes));
+            }
+            ui.label(caption(stats.join("  ·  "), TEXT_MUTED))
+                .on_hover_text(s.recording_stats_tooltip);
+
+            ui.add_space(4.0);
+            ui.label(caption(
+                self.recording_status
+                    .as_ref()
+                    .map_or("recording.mp4", |c| c.name.as_str()),
+                TEXT_MUTED,
+            ));
         } else if self.finalizing.handle.is_some() {
             ui.add_space(8.0);
             ui.label(
@@ -286,7 +291,7 @@ impl App {
                         let low = free < crate::disk_space::MIN_FREE_BYTES;
                         let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
                         ui.label(caption(
-                            format!("{}{}", s.free_space_prefix, format_bytes_free(free)),
+                            format!("{}{}", s.free_space_prefix, format_bytes(free)),
                             color,
                         ));
                         first = false;
@@ -610,6 +615,14 @@ impl App {
     }
 }
 
+/// Frames per second the recording has achieved so far, averaged over its
+/// recorded (pause-excluded) time. `None` for the first second, when a
+/// handful of frames over a fraction of a second says little.
+fn achieved_fps(frames: u64, elapsed: std::time::Duration) -> Option<f64> {
+    let secs = elapsed.as_secs_f64();
+    (secs >= 1.0).then(|| frames as f64 / secs)
+}
+
 /// The hotkey line under the action buttons, for `state`. Idle explains what
 /// the start key really does (it records the window in front, not the
 /// selected source -- see `handle_hotkey_start_stop`). Recording and paused
@@ -713,6 +726,24 @@ mod default_export_tests {
             default_export_file_name("", now),
             "recording_2026-07-17-14-18-11.mp4"
         );
+    }
+}
+
+#[cfg(test)]
+mod achieved_fps_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn achieved_fps_averages_over_the_recorded_time() {
+        assert_eq!(achieved_fps(600, Duration::from_secs(10)), Some(60.0));
+        assert_eq!(achieved_fps(45, Duration::from_millis(1500)), Some(30.0));
+    }
+
+    #[test]
+    fn achieved_fps_waits_for_the_first_second() {
+        assert_eq!(achieved_fps(20, Duration::from_millis(400)), None);
+        assert_eq!(achieved_fps(0, Duration::ZERO), None);
     }
 }
 
