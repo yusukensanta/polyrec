@@ -463,8 +463,11 @@ pub async fn run_audio_capture(
             track_id,
             ctrl,
             tx,
-            gain,
-            None,
+            TrackOptions {
+                gain,
+                watch_pid: None,
+                fill_silence: is_loopback,
+            },
         )
         .await
     }
@@ -533,8 +536,11 @@ pub async fn run_process_loopback_capture(
             track_id,
             ctrl,
             tx,
-            gain,
-            Some(target_pid),
+            TrackOptions {
+                gain,
+                watch_pid: Some(target_pid),
+                fill_silence: true,
+            },
         )
         .await
     }
@@ -560,6 +566,68 @@ struct StreamFormat {
     sample_rate: u32,
     channels: u16,
     bytes_per_frame: usize,
+}
+
+/// Per-track settings for `run_capture_loop`.
+struct TrackOptions {
+    gain: f32,
+    /// Stop the track once this process exits (process loopback).
+    watch_pid: Option<u32>,
+    /// Fill stretches without packets with silence -- see `SilenceFill`.
+    fill_silence: bool,
+}
+
+/// How long a loopback track may go without packets before it gets silence.
+/// WASAPI hands out a packet about every 10 ms while audio flows, so this is
+/// well clear of normal packet spacing.
+const SILENCE_FILL_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
+/// The most silence handed out at once, so a long gap is filled in pieces.
+const SILENCE_FILL_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Duration of `frames` at `TARGET_SAMPLE_RATE`.
+fn frames_duration(frames: usize) -> std::time::Duration {
+    std::time::Duration::from_nanos(frames as u64 * 1_000_000_000 / u64::from(TARGET_SAMPLE_RATE))
+}
+
+/// Keeps a loopback track's audio continuous. Loopback capture (desktop or
+/// per-app) delivers no packets at all while nothing is playing; that's how
+/// WASAPI works. A track that stops getting samples stalls the whole
+/// recording: the MP4 sink writer can't interleave the other streams past
+/// it, holds their data in memory, and its throttling then slows every
+/// `WriteSample` to about a second. So the recording falls further behind,
+/// and stopping takes minutes. This tracks how far the track's audio covers
+/// the recording clock and hands out silence for the gaps.
+struct SilenceFill {
+    /// Recording time the track's samples so far reach up to.
+    covered_until: std::time::Duration,
+}
+
+impl SilenceFill {
+    fn new(start: std::time::Duration) -> Self {
+        Self {
+            covered_until: start,
+        }
+    }
+
+    /// A real packet stamped `pts`, lasting `duration`, was sent.
+    fn on_packet(&mut self, pts: std::time::Duration, duration: std::time::Duration) {
+        self.covered_until = self.covered_until.max(pts + duration);
+    }
+
+    /// Silence to send at `now`, if the track has gone quiet: its pts and
+    /// length in frames. It starts exactly where the track's audio ends, so
+    /// the track stays contiguous.
+    fn gap_to_fill(&mut self, now: std::time::Duration) -> Option<(std::time::Duration, usize)> {
+        let gap = now.checked_sub(self.covered_until)?;
+        if gap < SILENCE_FILL_AFTER {
+            return None;
+        }
+        let gap = gap.min(SILENCE_FILL_MAX);
+        let frames = (gap.as_nanos() * u128::from(TARGET_SAMPLE_RATE) / 1_000_000_000) as usize;
+        let pts = self.covered_until;
+        self.covered_until += frames_duration(frames);
+        Some((pts, frames))
+    }
 }
 
 /// `AUDCLNT_BUFFERFLAGS_SILENT` -- WASAPI's "this packet is silence" flag.
@@ -690,8 +758,7 @@ async unsafe fn run_capture_loop(
     track_id: TrackId,
     ctrl: CaptureControl,
     tx: mpsc::Sender<AudioSamples>,
-    gain: f32,
-    watch_pid: Option<u32>,
+    options: TrackOptions,
 ) -> Result<(), AppError> {
     unsafe {
         let capture_client: IAudioCaptureClient = audio_client
@@ -704,6 +771,7 @@ async unsafe fn run_capture_loop(
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
         let mut diagnostics = PacketDiagnostics::new();
+        let mut silence = SilenceFill::new(ctrl.clock.elapsed());
         // Rate-limited like the disk-space guard elsewhere -- OpenProcess is
         // a real syscall, not worth doing on every 10ms idle poll.
         let mut last_pid_check = std::time::Instant::now();
@@ -766,7 +834,11 @@ async unsafe fn run_capture_loop(
                     let pts = ctrl.clock.elapsed();
                     let stereo = to_stereo(&samples, channels);
                     let mut resampled = resampler.process(&stereo);
-                    apply_gain(&mut resampled, gain);
+                    apply_gain(&mut resampled, options.gain);
+                    silence.on_packet(
+                        pts,
+                        frames_duration(resampled.len() / usize::from(TARGET_CHANNELS)),
+                    );
                     let audio = AudioSamples {
                         track_id,
                         pts,
@@ -782,7 +854,22 @@ async unsafe fn run_capture_loop(
                 }
                 Ok(()) => {
                     diagnostics.check_no_packets_yet(track_id);
-                    if let Some(pid) = watch_pid
+                    if options.fill_silence
+                        && !ctrl.is_paused()
+                        && let Some((pts, frames)) = silence.gap_to_fill(ctrl.clock.elapsed())
+                    {
+                        let audio = AudioSamples {
+                            track_id,
+                            pts,
+                            samples: vec![0.0; frames * usize::from(TARGET_CHANNELS)],
+                            sample_rate: TARGET_SAMPLE_RATE,
+                            channels: TARGET_CHANNELS,
+                        };
+                        if tx.send(audio).await.is_err() {
+                            break;
+                        }
+                    }
+                    if let Some(pid) = options.watch_pid
                         && last_pid_check.elapsed() >= std::time::Duration::from_secs(1)
                     {
                         last_pid_check = std::time::Instant::now();
@@ -968,6 +1055,65 @@ unsafe fn try_activate_process_loopback_audio_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// Feeds `SilenceFill` an idle stretch, polled every 10 ms like the
+    /// capture loop does, and returns the fills it asked for.
+    fn idle_fills(fill: &mut SilenceFill, from: Duration, to: Duration) -> Vec<(Duration, usize)> {
+        let mut out = Vec::new();
+        let mut now = from;
+        while now <= to {
+            out.extend(fill.gap_to_fill(now));
+            now += ms(10);
+        }
+        out
+    }
+
+    #[test]
+    fn silence_fill_covers_a_track_that_never_delivers_a_packet() {
+        let mut fill = SilenceFill::new(Duration::ZERO);
+        let fills = idle_fills(&mut fill, Duration::ZERO, ms(3000));
+        // Contiguous: each fill starts exactly where the previous one ended.
+        let mut cursor = Duration::ZERO;
+        for &(pts, frames) in &fills {
+            assert_eq!(pts, cursor);
+            cursor += frames_duration(frames);
+        }
+        // ...and keeps the track within one fill threshold of the clock.
+        assert!(
+            ms(3000) - cursor <= SILENCE_FILL_AFTER,
+            "covered {cursor:?}"
+        );
+    }
+
+    #[test]
+    fn silence_fill_stays_out_of_the_way_while_packets_arrive() {
+        let mut fill = SilenceFill::new(Duration::ZERO);
+        // 10 ms packets, each received as it ends.
+        for i in 1..=300u64 {
+            fill.on_packet(ms(i * 10), ms(10));
+            assert_eq!(fill.gap_to_fill(ms(i * 10 + 5)), None);
+        }
+    }
+
+    #[test]
+    fn silence_fill_starts_where_the_last_packet_ended() {
+        let mut fill = SilenceFill::new(Duration::ZERO);
+        fill.on_packet(ms(990), ms(10)); // audio up to 1.0 s
+        let fills = idle_fills(&mut fill, ms(1010), ms(1500));
+        assert_eq!(fills.first().map(|&(pts, _)| pts), Some(ms(1000)));
+    }
+
+    #[test]
+    fn silence_fill_never_hands_out_more_than_a_second_at_once() {
+        let mut fill = SilenceFill::new(Duration::ZERO);
+        let (_, frames) = fill.gap_to_fill(ms(5000)).expect("a 5 s gap gets filled");
+        assert!(frames_duration(frames) <= ms(1000));
+    }
 
     /// Exercises the Process Loopback Capture API end to end (activation,
     /// IAudioClient::Initialize, GetService/Start, buffer reads) against our own
