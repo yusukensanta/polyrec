@@ -107,6 +107,7 @@ impl App {
     fn set_output_dir(&mut self, dir: PathBuf, s: &'static Strings) {
         self.output_dir_problem = output_dir_problem(&dir);
         self.config.output_dir = dir;
+        self.refresh_recent();
         self.save_config_or_report(s);
     }
 
@@ -122,17 +123,28 @@ impl App {
             // window just reopens empty right-side space rather than the
             // window becoming more useful.
             ui.set_max_width(440.0);
-            self.render_notice(ui, s);
-            section_header(ui, s.status_header);
+            // The REC row gets its own bottom panel, so it keeps its space
+            // however tall the content above gets (e.g. a finished
+            // recording's export controls); that content scrolls instead.
+            // Laid out in the same ui, the two used to overlap.
+            egui::Panel::bottom("action_row")
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| self.render_action_row(ui, s, is_recording));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                self.render_notice(ui, s);
+                section_header(ui, s.status_header);
 
-            self.render_status(ui, s, is_recording, frames);
+                self.render_status(ui, s, is_recording, frames);
 
-            ui.add_space(16.0);
-            section_header(ui, s.output_header);
+                ui.add_space(16.0);
+                section_header(ui, s.output_header);
 
-            self.render_output_settings(ui, s);
-            self.render_status_box(ui, s);
-            self.render_action_row(ui, s, is_recording);
+                self.render_output_settings(ui, s);
+                self.render_status_box(ui, s);
+                self.render_recent(ui, s);
+            });
         });
     }
 
