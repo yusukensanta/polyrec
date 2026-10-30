@@ -137,6 +137,7 @@ jobs:
           Copy-Item target/release/polyrec.exe $stagingDir/
           Copy-Item README.md $stagingDir/
           Copy-Item LICENSE $stagingDir/
+          Copy-Item assets/fonts/OFL.txt $stagingDir/LICENSE-IBM-Plex.txt
           Compress-Archive -Path $stagingDir/* -DestinationPath "$stagingDir.zip"
 
       # Alternative to the portable zip for users who don't want to unzip and

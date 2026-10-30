@@ -71,7 +71,7 @@ fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), AppError> {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

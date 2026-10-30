@@ -66,42 +66,49 @@ pub(super) const SPACE_NORMAL: f32 = 8.0;
 /// rendered, and never return to `default_width` afterward.
 pub(super) const POPUP_WIDTH: f32 = 320.0;
 
-/// egui's bundled default font only covers Latin + a small symbol set — window
-/// titles/exe names containing CJK or other multi-byte characters (and any
-/// future localized UI text) render as tofu boxes without a fallback font.
-/// Loads MS Gothic — a fixed-pitch (single-width per cell) CJK font bundled
-/// with every Windows release since the 9x/NT era, so it's a correct fit for
-/// the Monospace family (unlike a proportional font such as Yu Gothic) and
-/// more universally present than newer CJK fonts — and appends it after the
-/// default font in both families, so it's only used for glyphs the default
-/// font can't cover; Latin text keeps its existing appearance. Best-effort:
-/// if the font file isn't present on this Windows install, logs a warning
-/// and leaves the default (Latin-only) fonts in place.
+/// The product typeface: IBM Plex Sans for Latin text, IBM Plex Sans JP for
+/// Japanese. Both are compiled into the exe, so the UI looks the same on
+/// every machine. They are the unmodified upstream files: the SIL OFL 1.1
+/// they ship under reserves the name "Plex", so a subset (a modified version)
+/// would have to be renamed. See `assets/fonts/README.md` for the upstream
+/// release, checksums and license.
+const PLEX_SANS_KEY: &str = "IBMPlexSans-Regular";
+const PLEX_SANS_JP_KEY: &str = "IBMPlexSansJP-Regular";
+const PLEX_SANS: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf");
+const PLEX_SANS_JP: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexSansJP-Regular.ttf");
+/// egui's own Latin font: first in Proportional, and the symbol fallback
+/// (√ etc.) right after Hack in Monospace.
+const EGUI_LATIN_FONT_KEY: &str = "Ubuntu-Light";
+
 pub(super) fn setup_fonts(ctx: &egui::Context) {
-    const CJK_FONT_PATH: &str = r"C:\Windows\Fonts\msgothic.ttc";
-    const CJK_FONT_KEY: &str = "cjk_fallback";
+    ctx.set_fonts(font_definitions());
+}
 
-    let font_bytes = match std::fs::read(CJK_FONT_PATH) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!("CJK fallback font not loaded from {CJK_FONT_PATH}: {e}");
-            return;
-        }
-    };
-
+/// egui's default fonts with IBM Plex in place of Ubuntu-Light:
+/// - Plex Sans takes Ubuntu-Light's slot in both families, so it's the
+///   Proportional face and stays Monospace's symbol fallback after Hack (the
+///   recording timer keeps its Hack digits).
+/// - Plex Sans JP goes last in both, after egui's icon/emoji fonts, so the
+///   theme-tinted UI icons keep coming from those even where the much larger
+///   CJK font also has a glyph (e.g. the REC dot ● or ⬆).
+///
+/// Anything still missing (e.g. Hangul or a color emoji in a window title) is
+/// left to eframe's on-demand system-font fallback.
+fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        CJK_FONT_KEY.to_owned(),
-        egui::FontData::from_owned(font_bytes).into(),
-    );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+    fonts.font_data.remove(EGUI_LATIN_FONT_KEY);
+    for (key, bytes) in [(PLEX_SANS_KEY, PLEX_SANS), (PLEX_SANS_JP_KEY, PLEX_SANS_JP)] {
         fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push(CJK_FONT_KEY.to_owned());
+            .font_data
+            .insert(key.to_owned(), egui::FontData::from_static(bytes).into());
     }
-    ctx.set_fonts(fonts);
+    for names in fonts.families.values_mut() {
+        for name in names.iter_mut().filter(|name| *name == EGUI_LATIN_FONT_KEY) {
+            *name = PLEX_SANS_KEY.to_owned();
+        }
+        names.push(PLEX_SANS_JP_KEY.to_owned());
+    }
+    fonts
 }
 
 pub(super) fn setup_theme(ctx: &egui::Context) {
@@ -143,4 +150,68 @@ pub(super) fn setup_theme(ctx: &egui::Context) {
     s.spacing.window_margin = egui::Margin::same(16);
     s.spacing.indent = 16.0;
     ctx.set_global_style(s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::self_update::hex_encode;
+    use sha2::{Digest, Sha256};
+
+    /// The OFL's Reserved Font Name only covers the unmodified files, so pin
+    /// the exact upstream bytes listed in `assets/fonts/README.md`.
+    #[test]
+    fn bundled_plex_fonts_are_the_unmodified_upstream_files() {
+        let sha256 = |bytes: &[u8]| hex_encode(Sha256::digest(bytes).as_slice());
+        assert_eq!(
+            sha256(PLEX_SANS),
+            "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5"
+        );
+        assert_eq!(
+            sha256(PLEX_SANS_JP),
+            "0168493ae143d16e4c0d374c090b1ee5eab9ee475536d2e429368dbcfc4a6abe"
+        );
+    }
+
+    #[test]
+    fn plex_takes_ubuntu_lights_slot_and_japanese_goes_last() {
+        let fonts = font_definitions();
+        let family = |family| fonts.families[&family].as_slice();
+        let proportional = family(egui::FontFamily::Proportional);
+        let monospace = family(egui::FontFamily::Monospace);
+
+        assert_eq!(proportional.first().unwrap(), PLEX_SANS_KEY);
+        assert_eq!(monospace[..2], ["Hack", PLEX_SANS_KEY]);
+        for names in [proportional, monospace] {
+            assert_eq!(names.last().unwrap(), PLEX_SANS_JP_KEY);
+            assert!(!names.iter().any(|name| name == EGUI_LATIN_FONT_KEY));
+        }
+        assert!(!fonts.font_data.contains_key(EGUI_LATIN_FONT_KEY));
+    }
+
+    /// Every non-ASCII character in the UI strings (the Japanese UI, the
+    /// "日本語" toggle, typographic punctuation) renders from the bundled fonts
+    /// alone -- without relying on whatever system fonts the user has.
+    #[test]
+    fn bundled_fonts_cover_every_ui_string() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(font_definitions());
+        // One frame loads the fonts. No renderer is attached, so discard its
+        // texture uploads (egui asserts if they're silently dropped).
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+
+        let ui_text: String = include_str!("../../i18n.rs")
+            .chars()
+            .filter(|c| !c.is_ascii_control() && !c.is_whitespace())
+            .collect();
+        let font = egui::FontId::proportional(TEXT_BODY);
+        let missing: String = ctx.fonts_mut(|fonts| {
+            ui_text
+                .chars()
+                .filter(|&c| !fonts.has_glyph(&font, c))
+                .collect()
+        });
+        assert_eq!(missing, "", "characters with no glyph in the bundled fonts");
+    }
 }
