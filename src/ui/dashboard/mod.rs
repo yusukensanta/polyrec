@@ -93,9 +93,10 @@ pub struct App {
     /// The in-flight refresh's result channel, if one is running -- see
     /// `refresh_sources_and_audio_if_due`.
     refresh_rx: Option<mpsc::Receiver<actions::RefreshSnapshot>>,
-    /// Display label for each audio track actually used in the last
-    /// finished manual recording (devices, then app-audio sources, in the
-    /// same order `start_recording_with_source` assigns track ids) --
+    /// Display label for each audio track actually used in the current
+    /// manual recording, or the last finished one (set when a recording
+    /// starts; devices, then app-audio sources, in the same order
+    /// `start_recording_with_source` assigns track ids) --
     /// NOT the live system device list (`audio_devices`), which reflects
     /// whatever's currently plugged in and has no entries for app-audio
     /// sources at all. The export checkbox list zips this against

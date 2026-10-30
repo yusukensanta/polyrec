@@ -104,9 +104,11 @@ impl App {
 
             ui.add_space(4.0);
 
-            // Stats row
-            let track_count = self.selected_audio.iter().filter(|&&b| b).count()
-                + self.selected_app_audio.iter().filter(|&&b| b).count();
+            // Stats row. The track count is this recording's own, fixed at
+            // start: the live checkboxes can change mid-recording, and an
+            // app source records one track per running process (none while
+            // it's idle), not one per checkbox.
+            let track_count = self.last_recording_audio_labels.len();
             ui.horizontal(|ui| {
                 ui.label(caption(
                     format!("{track_count} {}", s.tracks_word),
