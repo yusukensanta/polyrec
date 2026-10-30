@@ -5,9 +5,11 @@ use crate::types::CaptureKind;
 use eframe::egui;
 
 impl App {
-    /// Whether the overlay HUD is up: recording, with Overlay turned on.
+    /// Whether the overlay HUD is up: recording or paused, with Overlay
+    /// turned on. It used to vanish while paused, which looked the same as
+    /// the recording having stopped.
     pub(super) fn overlay_visible(&self) -> bool {
-        self.session.is_recording() && self.overlay_enabled
+        (self.session.is_recording() || self.session.is_paused()) && self.overlay_enabled
     }
 
     /// Second OS window (click-through, always-on-top) showing a compact
@@ -53,10 +55,20 @@ impl App {
             }
         };
         let tracks_word = s.tracks_word;
-        let stop_word = s.overlay_hud_stop_word;
-        // Reflects whatever start/stop is actually bound to right now, not a
-        // hardcoded default -- it's freely rebindable (see render_hotkeys_popup).
-        let stop_key = self.config.hotkeys.start_stop.clone();
+        // Paused: a pause mark and how to resume. Recording: the red dot and
+        // how to stop. The key is whatever is bound right now, not a hardcoded
+        // default -- it's freely rebindable (see render_hotkeys_popup).
+        let paused = self.session.is_paused();
+        let (mark, hint_template, key) = if paused {
+            ("⏸", s.hotkey_hint_resume, &self.config.hotkeys.pause)
+        } else {
+            ("●", s.hotkey_hint_stop, &self.config.hotkeys.start_stop)
+        };
+        let key_hint = if key.is_empty() {
+            String::new()
+        } else {
+            format!("  |  {}", hint_template.replace("{key}", key))
+        };
 
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("polyrec_overlay"),
@@ -85,7 +97,7 @@ impl App {
                     .show(ctx, |ui| {
                         ui.label(
                             egui::RichText::new(format!(
-                                "● {:02}:{:02}:{:02}  |  {track_count} {tracks_word}  |  {stop_key} {stop_word}",
+                                "{mark} {:02}:{:02}:{:02}  |  {track_count} {tracks_word}{key_hint}",
                                 elapsed_secs / 3600,
                                 (elapsed_secs % 3600) / 60,
                                 elapsed_secs % 60,

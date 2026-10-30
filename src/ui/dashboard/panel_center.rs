@@ -358,8 +358,30 @@ impl App {
             };
             ui.label(caption(state_line, TEXT_MUTED));
 
+            // The global hotkeys for what the buttons above do right now.
+            // Always rendered (empty when nothing's bound), for the same
+            // stable-layout reason as the state line.
+            let hotkeys = &self.config.hotkeys;
+            ui.label(caption(
+                hotkey_hint(self.session.state(), &hotkeys.start_stop, &hotkeys.pause, s),
+                TEXT_MUTED,
+            ));
+
+            let stop_btn = || {
+                egui::Button::new(
+                    egui::RichText::new(s.stop_button)
+                        .color(ACCENT_REC)
+                        .size(TEXT_BUTTON),
+                )
+                .fill(BG_BTN_STOP)
+                .corner_radius(ROUNDING_PRIMARY_BTN)
+                .min_size(egui::Vec2::new(90.0, 52.0))
+            };
             if is_paused {
-                centered_action_row(ui, 130.0, 52.0, |ui| {
+                // Stop stays reachable while paused, next to Resume -- it used
+                // to take a Resume first, recording a moment more.
+                let content_width = 110.0 + ui.spacing().item_spacing.x + 90.0;
+                centered_action_row(ui, content_width, 52.0, |ui| {
                     let btn = egui::Button::new(
                         egui::RichText::new(s.resume_button)
                             .color(ACCENT_IDLE)
@@ -367,23 +389,18 @@ impl App {
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(130.0, 52.0));
+                    .min_size(egui::Vec2::new(110.0, 52.0));
                     if ui.add(btn).clicked() {
                         self.handle_pause_button();
+                    }
+                    if ui.add(stop_btn()).clicked() {
+                        self.handle_rec_button(is_recording);
                     }
                 });
             } else if is_recording {
                 let content_width = 90.0 + ui.spacing().item_spacing.x + 44.0;
                 centered_action_row(ui, content_width, 52.0, |ui| {
-                    let stop_btn = egui::Button::new(
-                        egui::RichText::new(s.stop_button)
-                            .color(ACCENT_REC)
-                            .size(TEXT_BUTTON),
-                    )
-                    .fill(BG_BTN_STOP)
-                    .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(90.0, 52.0));
-                    if ui.add(stop_btn).clicked() {
+                    if ui.add(stop_btn()).clicked() {
                         self.handle_rec_button(is_recording);
                     }
 
@@ -406,7 +423,14 @@ impl App {
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
-                    if ui.add(btn).clicked() {
+                    // Without a source REC used to do nothing at all when
+                    // clicked; now it says what's missing instead.
+                    let has_source = self.selected_source.is_some();
+                    if ui
+                        .add_enabled(has_source, btn)
+                        .on_disabled_hover_text(s.rec_needs_source_tooltip)
+                        .clicked()
+                    {
                         self.handle_rec_button(is_recording);
                     }
                 });
@@ -586,6 +610,35 @@ impl App {
     }
 }
 
+/// The hotkey line under the action buttons, for `state`. Idle explains what
+/// the start key really does (it records the window in front, not the
+/// selected source -- see `handle_hotkey_start_stop`). Recording and paused
+/// list stop plus pause or resume. An unbound key (empty) is left out.
+pub(super) fn hotkey_hint(
+    state: &SessionState,
+    start_stop: &str,
+    pause: &str,
+    s: &Strings,
+) -> String {
+    let parts: &[(&str, &str)] = match state {
+        SessionState::Idle => &[(s.hotkey_hint_record_front, start_stop)],
+        SessionState::Recording => &[
+            (s.hotkey_hint_stop, start_stop),
+            (s.hotkey_hint_pause, pause),
+        ],
+        SessionState::Paused => &[
+            (s.hotkey_hint_stop, start_stop),
+            (s.hotkey_hint_resume, pause),
+        ],
+    };
+    parts
+        .iter()
+        .filter(|(_, key)| !key.is_empty())
+        .map(|(template, key)| template.replace("{key}", key))
+        .collect::<Vec<_>>()
+        .join("  ·  ")
+}
+
 /// Groups raw track indices by their resolved label, preserving each
 /// group's first-appearance order -- e.g. "Discord" appearing at indices
 /// `[1, 2]` (a multi-process app; see `AppAudioSource::process_ids`'s doc
@@ -660,6 +713,39 @@ mod default_export_tests {
             default_export_file_name("", now),
             "recording_2026-07-17-14-18-11.mp4"
         );
+    }
+}
+
+#[cfg(test)]
+mod hotkey_hint_tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    #[test]
+    fn hotkey_hint_lists_the_keys_for_each_state() {
+        let s = Lang::En.strings();
+        assert_eq!(
+            hotkey_hint(&SessionState::Idle, "F9", "F10", s),
+            "F9: record the window in front"
+        );
+        assert_eq!(
+            hotkey_hint(&SessionState::Recording, "F9", "F10", s),
+            "F9 stop  ·  F10 pause"
+        );
+        assert_eq!(
+            hotkey_hint(&SessionState::Paused, "F9", "F10", s),
+            "F9 stop  ·  F10 resume"
+        );
+    }
+
+    #[test]
+    fn hotkey_hint_leaves_out_unbound_keys() {
+        let s = Lang::En.strings();
+        assert_eq!(
+            hotkey_hint(&SessionState::Recording, "F9", "", s),
+            "F9 stop"
+        );
+        assert_eq!(hotkey_hint(&SessionState::Idle, "", "F10", s), "");
     }
 }
 

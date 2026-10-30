@@ -193,8 +193,14 @@ pub struct Strings {
     /// `use_process_name_label`'s checkbox is unchecked.
     pub custom_recording_prefix_placeholder: &'static str,
 
-    // Overlay HUD
-    pub overlay_hud_stop_word: &'static str,
+    // Hotkey hints, under the action buttons and on the overlay HUD; "{key}"
+    // is the bound key.
+    pub hotkey_hint_record_front: &'static str,
+    pub hotkey_hint_stop: &'static str,
+    pub hotkey_hint_pause: &'static str,
+    pub hotkey_hint_resume: &'static str,
+    /// Hover text on REC while no source is selected.
+    pub rec_needs_source_tooltip: &'static str,
 
     // Audio popup
     pub audio_title: &'static str,
@@ -381,7 +387,11 @@ pub static EN: Strings = Strings {
     use_process_name_tooltip: "Names each finished recording after the app being recorded (e.g. \"vivaldi_2026-09-19-14-30-00.mp4\"). Uncheck to use your own prefix instead.",
     custom_recording_prefix_placeholder: "Recording prefix (e.g. MyStream) — saved as MyStream_001.mp4, MyStream_002.mp4, …",
 
-    overlay_hud_stop_word: "stop",
+    hotkey_hint_record_front: "{key}: record the window in front",
+    hotkey_hint_stop: "{key} stop",
+    hotkey_hint_pause: "{key} pause",
+    hotkey_hint_resume: "{key} resume",
+    rec_needs_source_tooltip: "Select a window or display on the left first.",
 
     audio_title: "Audio Sources",
 
@@ -531,7 +541,11 @@ pub static JA: Strings = Strings {
     use_process_name_tooltip: "録画対象のアプリ名でファイル名を付けます（例:「vivaldi_2026-09-19-14-30-00.mp4」）。チェックを外すと、独自の接頭辞を使用できます。",
     custom_recording_prefix_placeholder: "録画の接頭辞（例: MyStream）— MyStream_001.mp4, MyStream_002.mp4 … として保存されます",
 
-    overlay_hud_stop_word: "停止",
+    hotkey_hint_record_front: "{key}: 前面のウィンドウを録画",
+    hotkey_hint_stop: "{key} 停止",
+    hotkey_hint_pause: "{key} 一時停止",
+    hotkey_hint_resume: "{key} 再開",
+    rec_needs_source_tooltip: "まず左のリストからウィンドウかディスプレイを選んでください。",
 
     audio_title: "オーディオソース",
 
