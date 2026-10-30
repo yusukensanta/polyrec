@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The capture source list now follows window title changes. A browser that switched tabs, or a launcher showing progress, used to keep the title its window had when it first appeared in the list.
+
 ## [v0.5.94] - 2026-10-31
 
 ### Added

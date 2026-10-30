@@ -180,6 +180,25 @@ fn reconcile_sources(
     Some((new, selected))
 }
 
+/// Copies each window's current title from `new` onto the entry in `sources`
+/// with the same handle, leaving order, selection and icons alone. Window
+/// titles change all the time without the window itself changing (a browser
+/// switching tabs, a launcher showing progress), and the list used to keep
+/// showing whatever title a window had when it first appeared.
+fn retitle_sources(sources: &mut [CaptureSource], new: &[CaptureSource]) {
+    let titles: std::collections::HashMap<usize, &str> = new
+        .iter()
+        .map(|src| (src.hwnd, src.window_title.as_str()))
+        .collect();
+    for source in sources {
+        if let Some(&title) = titles.get(&source.hwnd)
+            && source.window_title != title
+        {
+            source.window_title = title.to_owned();
+        }
+    }
+}
+
 /// Whether the set of endpoint ids differs (order isn't compared).
 fn audio_device_ids_changed(old: &[AudioDevice], new: &[AudioDevice]) -> bool {
     let old_ids: std::collections::HashSet<&str> = old.iter().map(|d| d.id.as_str()).collect();
@@ -341,6 +360,10 @@ impl App {
     }
 
     fn apply_refresh_snapshot(&mut self, snapshot: RefreshSnapshot) {
+        // Titles first: when the handle set is unchanged (the usual case, a
+        // browser switching tabs) the list isn't replaced below, and this is
+        // the only thing that keeps its titles current.
+        retitle_sources(&mut self.sources, &snapshot.sources);
         if let Some((sources, selected)) =
             reconcile_sources(&self.sources, self.selected_source, snapshot.sources)
         {
@@ -805,6 +828,23 @@ mod tests {
         let new = vec![window(1, "a"), window(2, "b")];
         let (_, selected) = reconcile_sources(&old, None, new).expect("changed");
         assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn retitle_sources_follows_title_changes_in_place() {
+        let mut sources = vec![window(1, "a"), window(2, "b")];
+        // Same handles, reordered, one retitled: order stays, title follows.
+        retitle_sources(&mut sources, &[window(2, "b renamed"), window(1, "a")]);
+        let titles: Vec<_> = sources.iter().map(|s| s.window_title.as_str()).collect();
+        assert_eq!(titles, ["a", "b renamed"]);
+    }
+
+    #[test]
+    fn retitle_sources_leaves_windows_missing_from_the_new_list_alone() {
+        let mut sources = vec![window(1, "a"), window(2, "b")];
+        retitle_sources(&mut sources, &[window(1, "a2"), window(3, "c")]);
+        let titles: Vec<_> = sources.iter().map(|s| s.window_title.as_str()).collect();
+        assert_eq!(titles, ["a2", "b"]);
     }
 
     #[test]
