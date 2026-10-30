@@ -68,7 +68,7 @@ impl App {
                             // pattern for hover-reactive fills on this kind of
                             // dynamically-sized composite widget; the one-frame lag is
                             // imperceptible at normal repaint rates.
-                            let hover_id = ui.id().with(("source_card_hovered", i));
+                            let hover_id = ui.scope_id().with(("source_card_hovered", i));
                             let was_hovered =
                                 ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
                             let fill = if selected {
