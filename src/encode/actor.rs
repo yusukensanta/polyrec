@@ -3,7 +3,7 @@ use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter, VideoSlot};
 use crate::error::{AppError, ResultExt};
 use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
-use crate::types::{AudioSamples, VideoFrame};
+use crate::types::{AudioLevel, AudioSamples, VideoFrame};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -119,13 +119,16 @@ pub fn spawn_video_pump(
     })
 }
 
-/// Spawns a pump task forwarding audio samples to the recording actor.
+/// Spawns a pump task forwarding audio samples to the recording actor,
+/// noting each chunk's peak in `level` for the dashboard's meters.
 pub fn spawn_audio_pump(
     mut audio_rx: mpsc::Receiver<AudioSamples>,
     recording_tx: mpsc::Sender<RecordingCommand>,
+    level: AudioLevel,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(samples) = audio_rx.recv().await {
+            level.record(&samples.samples);
             if recording_tx
                 .send(RecordingCommand::WriteAudio(samples))
                 .await
@@ -173,7 +176,7 @@ mod tests {
         let (cap_tx, cap_rx) = mpsc::channel::<AudioSamples>(4);
         let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(8);
 
-        let pump = spawn_audio_pump(cap_rx, rec_tx);
+        let pump = spawn_audio_pump(cap_rx, rec_tx, AudioLevel::default());
 
         cap_tx
             .send(AudioSamples {
@@ -253,7 +256,7 @@ mod tests {
         let (audio_tx, audio_rx) = mpsc::channel::<AudioSamples>(16);
         let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(64);
         let _video = spawn_video_pump(video_rx, rec_tx.clone(), Arc::new(AtomicU64::new(0)), 1);
-        let _audio = spawn_audio_pump(audio_rx, rec_tx);
+        let _audio = spawn_audio_pump(audio_rx, rec_tx, AudioLevel::default());
 
         video_tx.send(tiny_frame()).await.unwrap();
         video_tx.send(tiny_frame()).await.unwrap(); // blocked: no slot

@@ -556,6 +556,7 @@ impl App {
                 // at 0 from -- would flash as this one's name until the
                 // first elapsed-second tick recomputes it.
                 self.recording_status = None;
+                self.meter_levels.clear();
                 // A notice about the previous recording would read as being
                 // about this one.
                 self.notice = None;

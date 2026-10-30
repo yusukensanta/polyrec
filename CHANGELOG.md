@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Live audio level meters while recording, one per track and labelled with its source, so a silent mic or a muted app shows up while there's still time to fix it rather than in the finished file. The meters read on a dBFS scale and turn amber above -12 dB and red near clipping.
+
 ## [v0.5.103] - 2026-10-31
 
 ### Added
