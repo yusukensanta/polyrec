@@ -120,6 +120,7 @@ impl App {
                     self.export.state = ExportState::Idle;
                     self.export.result_rx = None;
                     self.last_output_path = Some(path);
+                    self.refresh_recent();
                     if disk_full {
                         self.notice = Some(s.disk_full_mid_recording.to_string());
                     } else if let Some(msg) = audio_tracks_missing_message(
@@ -188,7 +189,10 @@ impl App {
             return;
         };
         self.highlight_save.state = match tokio::runtime::Handle::current().block_on(handle) {
-            Ok(Ok(path)) => HighlightSaveState::Done(path),
+            Ok(Ok(path)) => {
+                self.refresh_recent();
+                HighlightSaveState::Done(path)
+            }
             Ok(Err(e)) => HighlightSaveState::Failed(e.to_string()),
             Err(e) => HighlightSaveState::Failed(e.to_string()),
         };
