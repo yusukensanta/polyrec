@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A short on-screen confirmation after each global hotkey ("● Recording", "⏸ Paused", "▶ Resumed", "⏹ Stopped, saving", the overlay toggle, and the Highlight save), shown for 1.5 s at the top of the monitor you're working on while the dashboard isn't in front. It's click-through.
+
+### Changed
+
+- The overlay HUD and the new confirmations are excluded from screen capture, so a display recording no longer contains the HUD.
+
 ## [v0.5.102] - 2026-10-31
 
 ### Changed

@@ -1,5 +1,6 @@
 use super::App;
 use super::state::{ExportState, HighlightSaveState};
+use super::toast::{Toast, hotkey_toast};
 use super::util::take_if_finished;
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
@@ -49,6 +50,7 @@ impl App {
 
         // Poll hotkey events (non-blocking)
         while let Some(event) = self.hotkey_listener.as_ref().and_then(|h| h.try_recv()) {
+            let before = self.session.state().clone();
             match event {
                 HotkeyEvent::StartStop => self.handle_hotkey_start_stop(is_recording),
                 HotkeyEvent::Pause => self.handle_pause_button(),
@@ -57,6 +59,17 @@ impl App {
                     self.config.overlay.enabled = self.overlay_enabled;
                 }
                 HotkeyEvent::SaveHighlight => self.handle_save_highlight_hotkey(s),
+            }
+            let highlight_saving = matches!(self.highlight_save.state, HighlightSaveState::Saving);
+            if let Some(text) = hotkey_toast(
+                event,
+                &before,
+                self.session.state(),
+                self.overlay_enabled,
+                highlight_saving,
+                s,
+            ) {
+                self.toast = Some(Toast::new(text));
             }
         }
 

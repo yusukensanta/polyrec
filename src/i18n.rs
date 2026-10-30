@@ -210,6 +210,12 @@ pub struct Strings {
     pub hotkey_hint_resume: &'static str,
     /// Hover text on REC while no source is selected.
     pub rec_needs_source_tooltip: &'static str,
+    // Hotkey toasts (see `ui::dashboard::toast`)
+    pub toast_recording: &'static str,
+    pub toast_stopped: &'static str,
+    pub toast_paused: &'static str,
+    pub toast_resumed: &'static str,
+    pub toast_highlight_off: &'static str,
 
     // Audio popup
     pub audio_title: &'static str,
@@ -404,6 +410,11 @@ pub static EN: Strings = Strings {
     hotkey_hint_pause: "{key} pause",
     hotkey_hint_resume: "{key} resume",
     rec_needs_source_tooltip: "Select a window or display on the left first.",
+    toast_recording: "● Recording",
+    toast_stopped: "⏹ Stopped, saving",
+    toast_paused: "⏸ Paused",
+    toast_resumed: "▶ Resumed",
+    toast_highlight_off: "Highlight isn't on",
 
     audio_title: "Audio Sources",
 
@@ -562,6 +573,11 @@ pub static JA: Strings = Strings {
     hotkey_hint_pause: "{key} 一時停止",
     hotkey_hint_resume: "{key} 再開",
     rec_needs_source_tooltip: "まず左のリストからウィンドウかディスプレイを選んでください。",
+    toast_recording: "● 録画中",
+    toast_stopped: "⏹ 停止、保存中",
+    toast_paused: "⏸ 一時停止",
+    toast_resumed: "▶ 再開",
+    toast_highlight_off: "ハイライトは無効です",
 
     audio_title: "オーディオソース",
 
