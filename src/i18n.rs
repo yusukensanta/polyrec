@@ -178,6 +178,14 @@ pub struct Strings {
     /// "{n} {audio_sources_word}" -- same pattern as `tracks_word`.
     pub audio_sources_word: &'static str,
     pub browse_button: &'static str,
+    pub open_output_dir_button: &'static str,
+    pub open_output_dir_tooltip: &'static str,
+    /// Under the output folder (and on a disabled REC) when its drive or
+    /// network share isn't there.
+    pub output_dir_unavailable: &'static str,
+    /// Under the output folder (and on a disabled REC) when the path leads
+    /// through a file.
+    pub output_dir_not_a_folder: &'static str,
     /// "{free_space_prefix}{formatted bytes}" -- see format_bytes in dashboard/widgets.rs.
     pub free_space_prefix: &'static str,
     pub resume_button: &'static str,
@@ -379,6 +387,10 @@ pub static EN: Strings = Strings {
     no_audio_selected: "No audio selected",
     audio_sources_word: "selected",
     browse_button: "Browse…",
+    open_output_dir_button: "Open",
+    open_output_dir_tooltip: "Open the folder recordings are saved in",
+    output_dir_unavailable: "This drive or network share isn't available, so recordings can't be saved here.",
+    output_dir_not_a_folder: "Part of this path is a file, not a folder, so recordings can't be saved here.",
     free_space_prefix: "Free: ",
     resume_button: "▶ RESUME",
     stop_button: "⏹ STOP",
@@ -533,6 +545,10 @@ pub static JA: Strings = Strings {
     no_audio_selected: "オーディオ未選択",
     audio_sources_word: "選択中",
     browse_button: "参照…",
+    open_output_dir_button: "開く",
+    open_output_dir_tooltip: "録画の保存先フォルダーを開く",
+    output_dir_unavailable: "このドライブまたはネットワーク共有が見つからないため、ここには録画を保存できません。",
+    output_dir_not_a_folder: "このパスの途中がフォルダーではなくファイルのため、ここには録画を保存できません。",
     free_space_prefix: "空き容量: ",
     resume_button: "▶ 再開",
     stop_button: "⏹ 停止",

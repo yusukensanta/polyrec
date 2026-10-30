@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An Open button next to the output folder opens it in Explorer: the `polyrec` folder recordings land in once it exists, otherwise the chosen folder itself.
+
+### Changed
+
+- The output folder is checked as soon as it's set (and at startup). If its drive or network share isn't available, or the path runs through a file, a warning says so and REC is disabled with the reason. Before, this only surfaced as an error after pressing REC.
+
 ## [v0.5.100] - 2026-10-31
 
 ### Changed
