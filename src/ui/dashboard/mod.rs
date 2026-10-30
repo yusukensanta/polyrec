@@ -11,6 +11,7 @@ mod panel_source;
 mod popups;
 mod state;
 mod theme;
+mod toast;
 mod util;
 mod widgets;
 
@@ -130,6 +131,9 @@ pub struct App {
     /// has to be clicked away, which is what all of these used to be. Cleared
     /// when a new recording starts.
     notice: Option<String>,
+    /// The acknowledgement for the last global hotkey, shown briefly while
+    /// the dashboard isn't focused -- see `toast`.
+    toast: Option<toast::Toast>,
     /// Set while the Hotkeys popup is waiting for the user to press a key to
     /// bind, after clicking "Change" for that row.
     recording_hotkey: Option<HotkeySlot>,
@@ -234,6 +238,7 @@ impl App {
             update_check_rx: Some(update_check_rx),
             error_message: None,
             notice: None,
+            toast: None,
             recording_hotkey: None,
             hotkey_capture_warning: None,
             last_window_pos: None,
@@ -274,6 +279,7 @@ impl eframe::App for App {
         self.render_source_panel(ui, s);
         self.render_center_panel(ui, s);
         self.render_overlay_viewport(ctx, s);
+        self.render_toast_viewport(ctx);
         self.render_audio_popup(ctx, s);
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);

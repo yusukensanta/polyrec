@@ -117,37 +117,41 @@ impl App {
         // repaint happens to land right after the game's own re-assertion).
         // Re-asserting HWND_TOPMOST every frame the overlay is visible fights
         // that back instead of relying on a one-time flag.
-        reassert_overlay_topmost();
+        keep_on_top_and_out_of_captures(windows::core::w!("PolyRec Overlay"));
     }
 }
 
-/// Re-asserts the overlay window as topmost via a direct `SetWindowPos`, on
-/// top of egui/winit's one-time `with_always_on_top()` hint -- see the call
-/// site in `render_overlay_viewport` for why this is needed every frame
-/// rather than once. Looked up by its exact window title (set via
-/// `.with_title("PolyRec Overlay")`) since egui doesn't expose a viewport's
-/// native HWND through its public API. A miss (window not found yet, e.g.
-/// the very first frame before winit has created it) is silently ignored --
-/// the next frame's call will pick it up.
+/// For one of PolyRec's own on-screen windows (the overlay HUD, the hotkey
+/// toast), found by its exact window title, since egui doesn't expose a
+/// viewport's native HWND through its public API. A miss (the window not
+/// created yet, e.g. its very first frame) is silently ignored; the next
+/// frame's call picks it up. Two things, every frame it's shown:
+///
+/// - **Out of captures.** `WDA_EXCLUDEFROMCAPTURE` keeps the window out of
+///   screen captures, PolyRec's own included: a display recording used to
+///   contain the HUD. Windows 10 2004+; it fails harmlessly before that.
+/// - **On top.** It re-asserts the window as topmost via a direct
+///   `SetWindowPos`, on top of egui/winit's one-time `with_always_on_top()`
+///   hint; see the call site in `render_overlay_viewport` for why that's
+///   needed every frame rather than once.
 ///
 /// `SWP_ASYNCWINDOWPOS` is required here, not optional: this runs on the
-/// same thread that owns the overlay window and is mid-repaint of it via
-/// egui/winit when called. Without it, `SetWindowPos` sends
+/// same thread that owns the window and is mid-repaint of it via egui/winit
+/// when called. Without it, `SetWindowPos` sends
 /// WM_WINDOWPOSCHANGING/CHANGED synchronously to that window's own message
 /// pump on this same thread -- reentering winit's event handling from inside
 /// its own repaint reliably crashed the process in testing. The async flag
 /// posts the request instead of sending it, avoiding the reentrant call.
-fn reassert_overlay_topmost() {
+pub(super) fn keep_on_top_and_out_of_captures(title: windows::core::PCWSTR) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+        FindWindowW, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE,
     };
     unsafe {
-        let Ok(hwnd) = windows::Win32::UI::WindowsAndMessaging::FindWindowW(
-            None,
-            windows::core::w!("PolyRec Overlay"),
-        ) else {
+        let Ok(hwnd) = FindWindowW(None, title) else {
             return;
         };
+        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
