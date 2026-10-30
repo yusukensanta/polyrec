@@ -144,7 +144,10 @@ impl App {
         // background check would run, but the app would sit fully idle and
         // never repaint to pick up its result.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
-        if self.session.is_recording() {
+        let (focused, minimized) = ctx.input(|i| (i.viewport().focused, i.viewport().minimized));
+        if self.session.is_recording()
+            && recording_needs_fast_repaint(focused, minimized, self.overlay_visible())
+        {
             // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
@@ -219,6 +222,22 @@ impl App {
     }
 }
 
+/// Whether a recording's ~30 fps repaint (the pulsing dot) is worth it. Not
+/// while the dashboard is minimized or another window has focus (typically
+/// the game being recorded): nobody's watching the dot, the 1 s repaint still
+/// ticks the timer, and 30 fps of UI rendering only competes with the game
+/// for the GPU. The overlay HUD is the exception: it renders with the
+/// dashboard, and its every-frame topmost re-assertion is what keeps a
+/// fullscreen game from covering it, so it keeps the full rate. `None` (not
+/// reported yet) counts as focused and not minimized.
+fn recording_needs_fast_repaint(
+    focused: Option<bool>,
+    minimized: Option<bool>,
+    overlay_visible: bool,
+) -> bool {
+    overlay_visible || (focused != Some(false) && minimized != Some(true))
+}
+
 /// `None` when `actual >= expected` (nothing missing, or the recording
 /// legitimately ended up with more tracks than expected -- see
 /// `track_label_fallback`'s doc comment for that case, which this doesn't
@@ -239,6 +258,23 @@ fn audio_tracks_missing_message(s: &Strings, actual: usize, expected: usize) -> 
 mod tests {
     use super::*;
     use crate::i18n::Lang;
+
+    #[test]
+    fn fast_repaint_only_while_someone_can_see_the_animation() {
+        // Focused (or not reported yet): full rate.
+        assert!(recording_needs_fast_repaint(Some(true), Some(false), false));
+        assert!(recording_needs_fast_repaint(None, None, false));
+        // In the background or minimized: the 1 s tick is enough...
+        assert!(!recording_needs_fast_repaint(
+            Some(false),
+            Some(false),
+            false
+        ));
+        assert!(!recording_needs_fast_repaint(Some(true), Some(true), false));
+        // ...unless the overlay HUD is up.
+        assert!(recording_needs_fast_repaint(Some(false), Some(false), true));
+        assert!(recording_needs_fast_repaint(Some(false), Some(true), true));
+    }
 
     #[test]
     fn audio_tracks_missing_message_none_when_all_tracks_present() {
