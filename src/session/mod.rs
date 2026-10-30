@@ -90,6 +90,11 @@ impl ActiveCapture {
         self.pipeline.ctrl.clock.elapsed()
     }
 
+    /// Each audio track's live peak level, indexed by track id.
+    pub fn audio_levels(&self) -> &[crate::types::AudioLevel] {
+        self.pipeline.audio_levels()
+    }
+
     /// True once the recorder actor has exited on its own (e.g. its
     /// disk-full check tripped) rather than via `SessionManager::stop_capture`.
     pub fn recorder_finished(&self) -> bool {

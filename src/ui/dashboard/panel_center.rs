@@ -9,7 +9,7 @@ use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_prob
 use super::widgets::{accent_button, caption, centered_action_row, format_bytes, section_header};
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
-use crate::types::SessionState;
+use crate::types::{AudioLevel, SessionState};
 use eframe::egui;
 use rfd::FileDialog;
 use std::path::PathBuf;
@@ -54,6 +54,52 @@ impl App {
             self.notice = None;
         }
         ui.add_space(SPACE_NORMAL);
+    }
+
+    /// One live level meter per audio track of the running recording, each
+    /// labelled with its source, so a silent mic or a muted app shows up
+    /// while there's still time to fix it rather than in the finished file.
+    /// While paused nothing is captured, so the meters fall to empty.
+    fn render_audio_meters(&mut self, ui: &mut egui::Ui, is_paused: bool) {
+        let peaks: Vec<f32> = self
+            .session
+            .active()
+            .map(|a| a.audio_levels().iter().map(AudioLevel::peak).collect())
+            .unwrap_or_default();
+        if peaks.is_empty() {
+            return;
+        }
+        self.meter_levels.resize(peaks.len(), 0.0);
+        ui.add_space(SPACE_TIGHT);
+        for (i, peak) in peaks.into_iter().enumerate() {
+            self.meter_levels[i] =
+                meter_decay(self.meter_levels[i], if is_paused { 0.0 } else { peak });
+        }
+        let labels = &self.last_recording_audio_labels;
+        let meter_levels = &self.meter_levels;
+        ui.scope(|ui| {
+            // Compact rows: the theme's 32 px minimum control height would
+            // make each meter line as tall as a button.
+            ui.spacing_mut().interact_size.y = 16.0;
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (i, &shown) in meter_levels.iter().enumerate() {
+                let label = labels
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("#{}", i + 1));
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(90.0, 6.0), egui::Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, BG_FAINT);
+                    let fill = meter_fill(shown);
+                    let mut lit = rect;
+                    lit.set_width(rect.width() * fill);
+                    painter.rect_filled(lit, 2.0, meter_color(fill));
+                    ui.label(caption(label, TEXT_MUTED));
+                });
+            }
+        });
     }
 
     /// Makes `dir` the output folder: re-checks whether recordings can be
@@ -191,6 +237,8 @@ impl App {
                     .map_or("recording.mp4", |c| c.name.as_str()),
                 TEXT_MUTED,
             ));
+
+            self.render_audio_meters(ui, is_paused);
         } else if self.finalizing.handle.is_some() {
             ui.add_space(8.0);
             ui.label(
@@ -694,6 +742,33 @@ fn output_dir_problem_text(problem: OutputDirProblem, s: &Strings) -> &'static s
     }
 }
 
+/// How much of a level meter to fill for a linear peak: a dBFS scale from
+/// -60 dB (empty) to 0 dB (full), so quiet but present audio still shows.
+fn meter_fill(peak: f32) -> f32 {
+    if peak <= 0.0 {
+        return 0.0;
+    }
+    ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+/// The level a meter shows: up to a new peak at once, back down slowly, so a
+/// brief peak stays readable at the dashboard's frame rate.
+fn meter_decay(shown: f32, peak: f32) -> f32 {
+    peak.max(shown * 0.85)
+}
+
+/// Green normally, amber above -12 dBFS, red above -3 dBFS (close to
+/// clipping), by meter fill (see `meter_fill`).
+fn meter_color(fill: f32) -> egui::Color32 {
+    if fill >= 0.95 {
+        ACCENT_REC
+    } else if fill >= 0.8 {
+        ACCENT_PAUSE
+    } else {
+        ACCENT_IDLE
+    }
+}
+
 /// Frames per second the recording has achieved so far, averaged over its
 /// recorded (pause-excluded) time. `None` for the first second, when a
 /// handful of frames over a fraction of a second says little.
@@ -805,6 +880,33 @@ mod default_export_tests {
             default_export_file_name("", now),
             "recording_2026-07-17-14-18-11.mp4"
         );
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::*;
+
+    #[test]
+    fn meter_fill_is_a_minus_60_to_0_dbfs_scale() {
+        assert_eq!(meter_fill(0.0), 0.0);
+        assert_eq!(meter_fill(1.0), 1.0);
+        assert!((meter_fill(0.1) - 2.0 / 3.0).abs() < 1e-4, "-20 dBFS");
+        assert_eq!(meter_fill(0.0001), 0.0, "-80 dBFS is below the scale");
+    }
+
+    #[test]
+    fn meter_rises_at_once_and_falls_slowly() {
+        assert_eq!(meter_decay(0.1, 0.8), 0.8);
+        let after_one_frame = meter_decay(0.8, 0.0);
+        assert!(after_one_frame > 0.6 && after_one_frame < 0.8);
+    }
+
+    #[test]
+    fn meter_turns_amber_then_red_near_full_scale() {
+        assert_eq!(meter_color(meter_fill(0.1)), ACCENT_IDLE); // -20 dBFS
+        assert_eq!(meter_color(meter_fill(0.5)), ACCENT_PAUSE); // -6 dBFS
+        assert_eq!(meter_color(meter_fill(0.9)), ACCENT_REC); // -0.9 dBFS
     }
 }
 

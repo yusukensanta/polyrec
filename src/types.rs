@@ -1,4 +1,6 @@
 use crate::capture::frame_pool::FrameBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,6 +69,23 @@ pub struct AudioSamples {
     pub channels: u16,
 }
 
+/// The peak of an audio track's most recent chunk, as linear amplitude
+/// (0.0 to 1.0): written by the track's pump, read by the dashboard's level
+/// meters. Clones share one value.
+#[derive(Debug, Clone, Default)]
+pub struct AudioLevel(Arc<AtomicU32>);
+
+impl AudioLevel {
+    pub fn record(&self, samples: &[f32]) {
+        let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+        self.0.store(peak.min(1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn peak(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+}
+
 /// Identifies a Windows audio endpoint device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioDevice {
@@ -119,6 +138,19 @@ pub struct AppAudioSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_level_keeps_the_latest_chunks_peak() {
+        let level = AudioLevel::default();
+        assert_eq!(level.peak(), 0.0);
+        level.record(&[0.1, -0.5, 0.25]);
+        assert_eq!(level.peak(), 0.5);
+        // Shared between clones, and replaced (not maxed) by the next chunk.
+        level.clone().record(&[0.05]);
+        assert_eq!(level.peak(), 0.05);
+        level.record(&[-3.0]);
+        assert_eq!(level.peak(), 1.0, "clamped to full scale");
+    }
 
     #[test]
     fn track_id_equality() {

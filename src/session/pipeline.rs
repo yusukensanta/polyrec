@@ -22,7 +22,7 @@ use crate::encode::actor::{spawn_audio_pump, spawn_video_pump};
 use crate::encode::writer::{video_bitrate_bps, video_encoder_accepts};
 use crate::encode::{EncoderParams, RecordingCommand};
 use crate::error::AppError;
-use crate::types::{AppAudioSource, AudioDevice, CaptureKind, CaptureSource, TrackId};
+use crate::types::{AppAudioSource, AudioDevice, AudioLevel, CaptureKind, CaptureSource, TrackId};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -293,6 +293,9 @@ pub(super) struct CapturePipeline {
     pub(super) ctrl: CaptureControl,
     capture_handles: Vec<JoinHandle<()>>,
     pump_handles: Vec<JoinHandle<()>>,
+    /// Each audio track's live peak level, indexed by track id -- see
+    /// `audio_levels`.
+    audio_levels: Vec<AudioLevel>,
 }
 
 impl CapturePipeline {
@@ -314,6 +317,7 @@ impl CapturePipeline {
             ctrl: CaptureControl::new(),
             capture_handles: Vec::new(),
             pump_handles: Vec::new(),
+            audio_levels: Vec::new(),
         };
         pipeline.spawn_video_track(source, dims, dest_tx, frame_count, show_border, log_prefix);
 
@@ -404,7 +408,7 @@ impl CapturePipeline {
                     }
                 },
             );
-            let pump = spawn_audio_pump(audio_rx, dest_tx.clone());
+            let pump = spawn_audio_pump(audio_rx, dest_tx.clone(), self.new_audio_level());
             self.track(capture, pump);
         }
     }
@@ -452,7 +456,7 @@ impl CapturePipeline {
                         )
                     },
                 );
-                let pump = spawn_audio_pump(audio_rx, dest_tx.clone());
+                let pump = spawn_audio_pump(audio_rx, dest_tx.clone(), self.new_audio_level());
                 self.track(capture, pump);
             }
         }
@@ -461,6 +465,20 @@ impl CapturePipeline {
     fn track(&mut self, capture: JoinHandle<()>, pump: JoinHandle<()>) {
         self.capture_handles.push(capture);
         self.pump_handles.push(pump);
+    }
+
+    /// Each audio track's live peak level, indexed by track id. Levels are
+    /// created in the order tracks are spawned, which is track-id order
+    /// (devices, then app tracks).
+    pub(super) fn audio_levels(&self) -> &[AudioLevel] {
+        &self.audio_levels
+    }
+
+    /// A level for the next audio track spawned.
+    fn new_audio_level(&mut self) -> AudioLevel {
+        let level = AudioLevel::default();
+        self.audio_levels.push(level.clone());
+        level
     }
 
     /// Signals every capture loop to exit, then waits for each loop to

@@ -85,6 +85,9 @@ pub struct App {
     /// The active recording's saved-name preview and size so far -- see
     /// `RecordingStatusCache`.
     recording_status: Option<RecordingStatusCache>,
+    /// What each audio level meter shows right now, by track -- see
+    /// `render_audio_meters`.
+    meter_levels: Vec<f32>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
     /// Why recordings can't be saved under `config.output_dir`, if they
@@ -226,6 +229,7 @@ impl App {
             recording_start: None,
             fps_shortfall_warned: false,
             recording_status: None,
+            meter_levels: Vec::new(),
             last_output_path: None,
             output_dir_input,
             output_dir_problem,
