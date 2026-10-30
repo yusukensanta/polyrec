@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.98] - 2026-10-31
+
 ### Fixed
 
 - A recording with desktop or app audio stalled whenever that audio was silent: nothing reached the file, and pressing Stop sat on "Saving recording…" for minutes. Loopback capture delivers no data while nothing plays, which stalled the whole recording behind that track. Those stretches are now recorded as silence.
