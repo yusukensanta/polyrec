@@ -79,14 +79,13 @@ impl App {
                             // for why `config.highlight.enabled` also gets
                             // cleared, not just the running session).
                             if self.session.is_recording() || self.session.is_paused() {
-                                self.error_message =
-                                    Some(s.update_blocked_while_recording.to_string());
+                                self.notice = Some(s.update_blocked_while_recording.to_string());
                             } else {
                                 if self.session.is_highlighting() {
                                     self.session.stop_highlight_buffering(true);
                                     self.config.highlight.enabled = false;
                                     self.save_config_or_report(s);
-                                    self.error_message =
+                                    self.notice =
                                         Some(s.update_highlight_disabled_notice.to_string());
                                 }
                                 self.self_update.state = SelfUpdateState::Confirming(update);

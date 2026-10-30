@@ -556,6 +556,9 @@ impl App {
                 // at 0 from -- would flash as this one's name until the
                 // first elapsed-second tick recomputes it.
                 self.recording_status = None;
+                // A notice about the previous recording would read as being
+                // about this one.
+                self.notice = None;
                 self.last_recording_audio_labels = audio_labels;
                 self.last_recording_app_name = app_name;
             }
@@ -581,7 +584,7 @@ impl App {
             self.session.stop_highlight_buffering(true);
             if disk_full {
                 let strings = self.config.lang().strings();
-                self.error_message = Some(strings.highlight_disk_full_message.to_string());
+                self.notice = Some(strings.highlight_disk_full_message.to_string());
             }
         }
 
@@ -660,7 +663,7 @@ impl App {
     /// export-UI convention) if Highlight buffering isn't currently active.
     pub(super) fn handle_save_highlight_hotkey(&mut self, s: &'static Strings) {
         let Some(hwnd) = self.session.highlight_hwnd() else {
-            self.error_message = Some(s.highlight_save_not_active.to_string());
+            self.notice = Some(s.highlight_save_not_active.to_string());
             return;
         };
         if matches!(self.highlight_save.state, HighlightSaveState::Saving) {

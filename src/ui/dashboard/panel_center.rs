@@ -26,6 +26,36 @@ impl App {
         self.last_recording_audio_labels.len()
     }
 
+    /// The dismissible notice strip at the top of the Status panel -- see
+    /// `notice`. The text wraps beside a ✕ that clears it.
+    fn render_notice(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        let Some(text) = &self.notice else {
+            return;
+        };
+        let mut dismissed = false;
+        egui::Frame::NONE
+            .fill(BG_FAINT)
+            .stroke(egui::Stroke::new(1.0, ACCENT_PAUSE))
+            .corner_radius(CORNER_CONTROL)
+            .inner_margin(8i8)
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    let dismiss_width = 24.0;
+                    ui.allocate_ui(
+                        egui::vec2(ui.available_width() - dismiss_width, 0.0),
+                        |ui| {
+                            ui.add(egui::Label::new(caption(text.as_str(), ACCENT_PAUSE)).wrap());
+                        },
+                    );
+                    dismissed = ui.small_button("✕").on_hover_text(s.close_button).clicked();
+                });
+            });
+        if dismissed {
+            self.notice = None;
+        }
+        ui.add_space(SPACE_NORMAL);
+    }
+
     /// Makes `dir` the output folder: re-checks whether recordings can be
     /// saved there (`output_dir_problem`) and saves the config.
     fn set_output_dir(&mut self, dir: PathBuf, s: &'static Strings) {
@@ -46,6 +76,7 @@ impl App {
             // window just reopens empty right-side space rather than the
             // window becoming more useful.
             ui.set_max_width(440.0);
+            self.render_notice(ui, s);
             section_header(ui, s.status_header);
 
             self.render_status(ui, s, is_recording, frames);

@@ -229,13 +229,11 @@ impl App {
     }
 
     pub(super) fn render_self_update_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        // Both this and the error banner are CENTER_CENTER-anchored windows --
-        // showing both at once would draw them stacked on top of each other.
-        // Deferring here means clicking Update while Highlight buffering was
-        // active shows `update_highlight_disabled_notice` first; this popup
-        // only appears once that's dismissed, even though `self_update.state`
-        // was already set to `Confirming` in the same click (see
-        // `render_menu_bar`).
+        // Both this and the error modal are CENTER_CENTER-anchored windows --
+        // showing both at once would draw them stacked on top of each other,
+        // so this waits until an error is dismissed. Notices (e.g.
+        // `update_highlight_disabled_notice`) don't block it: they show in
+        // the Status panel's strip alongside this popup.
         if self.error_message.is_some() {
             return;
         }

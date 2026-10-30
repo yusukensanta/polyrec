@@ -117,10 +117,19 @@ pub struct App {
     hotkey_listener: Option<HotkeyListener>,
     update_available: Option<crate::update_check::AvailableUpdate>,
     update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
-    /// User-facing error banner (disk-full refusal to start, disk-full
-    /// mid-recording stop, or a finalize failure) — cleared by the "Close"
-    /// button in its popup.
+    /// A real error, shown as a modal (a recording that couldn't start or
+    /// finalize, a config that couldn't be saved) — cleared by the "Close"
+    /// button in its popup. Things worth knowing that don't stop anything go
+    /// to `notice` instead.
     error_message: Option<String>,
+    /// Something worth knowing that doesn't stop anything: a recording that
+    /// ran below its frame rate, came out with fewer audio tracks, or stopped
+    /// early for disk space (the file is still saved), Highlight not being on
+    /// when its hotkey is pressed, and so on. Shown as a dismissible strip at
+    /// the top of the Status panel (`render_notice`) rather than a modal that
+    /// has to be clicked away, which is what all of these used to be. Cleared
+    /// when a new recording starts.
+    notice: Option<String>,
     /// Set while the Hotkeys popup is waiting for the user to press a key to
     /// bind, after clicking "Change" for that row.
     recording_hotkey: Option<HotkeySlot>,
@@ -224,6 +233,7 @@ impl App {
             update_available: None,
             update_check_rx: Some(update_check_rx),
             error_message: None,
+            notice: None,
             recording_hotkey: None,
             hotkey_capture_warning: None,
             last_window_pos: None,
