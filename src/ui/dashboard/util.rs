@@ -50,6 +50,19 @@ pub(super) fn open_directory(dir: &std::path::Path) {
     let _ = std::process::Command::new(EXPLORER_EXE).arg(dir).spawn();
 }
 
+/// Opens the file at `path` with its default app (a recording: the video
+/// player).
+pub(super) fn open_file(path: &std::path::Path) {
+    let _ = std::process::Command::new(EXPLORER_EXE).arg(path).spawn();
+}
+
+/// Opens Explorer on the folder containing `path`, with the file selected.
+pub(super) fn show_in_folder(path: &std::path::Path) {
+    let mut select = std::ffi::OsString::from("/select,");
+    select.push(path);
+    let _ = std::process::Command::new(EXPLORER_EXE).arg(select).spawn();
+}
+
 /// Why recordings can't be saved under an output folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OutputDirProblem {

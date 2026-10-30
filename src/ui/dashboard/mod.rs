@@ -9,6 +9,7 @@ mod panel_center;
 mod panel_menu;
 mod panel_source;
 mod popups;
+mod recent;
 mod state;
 mod theme;
 mod toast;
@@ -94,6 +95,9 @@ pub struct App {
     /// can't -- checked at startup and whenever the folder is changed (see
     /// `set_output_dir`).
     output_dir_problem: Option<util::OutputDirProblem>,
+    /// The newest finished recordings, for the Recent list -- see
+    /// `refresh_recent`.
+    recent: Vec<recent::RecentRecording>,
     /// Last time `refresh_sources_and_audio_if_due` actually ran (see there
     /// for why this is throttled rather than run every frame).
     sources_checked_at: Option<Instant>,
@@ -169,6 +173,7 @@ impl App {
         let app_audio_only = config.default_app_audio_only;
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let output_dir_problem = util::output_dir_problem(&config.output_dir);
+        let recent = recent::recent_recordings(&config.output_dir, recent::RECENT_LIMIT);
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
         // Restores the user's last saved SYSTEM audio selection if there is
@@ -233,6 +238,7 @@ impl App {
             last_output_path: None,
             output_dir_input,
             output_dir_problem,
+            recent,
             sources_checked_at: None,
             refresh_rx: None,
             last_recording_audio_labels: Vec::new(),
