@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod device;
 pub mod frame_pool;
+pub mod frame_rate;
 pub mod video;
 
 use crate::session::clock::RecordingClock;

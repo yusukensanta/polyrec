@@ -3,6 +3,7 @@ mod hotkeys_popup;
 mod actions;
 mod audio_popup;
 mod background;
+mod fps_support;
 mod overlay;
 mod panel_center;
 mod panel_menu;
@@ -21,6 +22,7 @@ use crate::session::SessionManager;
 use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use eframe::egui;
+use fps_support::FpsSupportProbe;
 use hotkeys_popup::HotkeySlot;
 use state::{AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, SelfUpdate};
 use std::path::PathBuf;
@@ -60,6 +62,9 @@ pub struct App {
     /// bar button next to Overlay; persisted the same lazy, on-exit-only way.
     show_recording_border: bool,
     show_quality_popup: bool,
+    /// What the Quality popup knows about the fps the selected source can
+    /// really be recorded at -- see `FpsSupportProbe`.
+    fps_support: FpsSupportProbe,
     show_hotkeys_popup: bool,
     show_audio_popup: bool,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
@@ -195,6 +200,7 @@ impl App {
             overlay_enabled,
             show_recording_border,
             show_quality_popup: false,
+            fps_support: FpsSupportProbe::default(),
             show_hotkeys_popup: false,
             show_audio_popup: false,
             source_icon_textures: std::collections::HashMap::new(),

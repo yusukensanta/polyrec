@@ -1,9 +1,13 @@
 use crate::capture::frame_pool::FrameBuf;
+use crate::capture::frame_rate::highest_encodable_fps;
 use crate::config::Codec;
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
 use crate::types::{AudioSamples, VideoFrame};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, PoisonError};
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaBuffer, IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter,
@@ -31,6 +35,70 @@ const VIDEO_BITS_PER_PIXEL_PER_FRAME: f64 = 0.1;
 pub(crate) fn video_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
     let raw = width as f64 * height as f64 * fps as f64 * VIDEO_BITS_PER_PIXEL_PER_FRAME;
     raw.round() as u32
+}
+
+/// What the encoders have said about a video setting, for the whole process:
+/// the installed encoders don't change while it runs, and asking one means
+/// creating it (about half a second for a hardware encoder). Keyed by
+/// (is HEVC, width, height, fps, hardware allowed); the bitrate doesn't decide
+/// whether a frame rate is accepted.
+type EncoderAnswerKey = (bool, u32, u32, u32, bool);
+static ENCODER_ANSWERS: Mutex<BTreeMap<EncoderAnswerKey, bool>> = Mutex::new(BTreeMap::new());
+
+fn encoder_answer_key(params: &EncoderParams) -> EncoderAnswerKey {
+    (
+        params.codec == Codec::H265,
+        params.width,
+        params.height,
+        params.fps,
+        params.allow_hardware_encode,
+    )
+}
+
+fn encoder_answers() -> std::sync::MutexGuard<'static, BTreeMap<EncoderAnswerKey, bool>> {
+    ENCODER_ANSWERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether `RecordingWriter::new` would accept `params`' video settings.
+/// Found by creating one for real (on a scratch file, deleted again): what an
+/// encoder takes depends on the codec, the GPU vendor's encoder and H.264's
+/// level limits (1440p tops out at 144 fps), and only it knows. Answers are
+/// cached (see `ENCODER_ANSWERS`). Slow when uncached, so keep it off the UI
+/// thread.
+pub(crate) fn video_encoder_accepts(params: &EncoderParams) -> bool {
+    static PROBE_ID: AtomicU32 = AtomicU32::new(0);
+
+    let key = encoder_answer_key(params);
+    if let Some(&accepted) = encoder_answers().get(&key) {
+        return accepted;
+    }
+    let probe_path = std::env::temp_dir().join(format!(
+        "polyrec-encoder-probe-{}-{}.mp4",
+        std::process::id(),
+        PROBE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let video_only = EncoderParams {
+        audio_tracks: Vec::new(),
+        ..params.clone()
+    };
+    let accepted = match RecordingWriter::new(&probe_path, &video_only) {
+        Ok(_writer) => true,
+        Err(e) => {
+            tracing::info!(
+                "encoder rejects {:?} {}x{} at {} fps: {e}",
+                params.codec,
+                params.width,
+                params.height,
+                params.fps
+            );
+            false
+        }
+    };
+    let _ = std::fs::remove_file(&probe_path);
+    encoder_answers().insert(key, accepted);
+    accepted
 }
 
 /// Everything `RecordingWriter::new` needs to configure its sink writer --
@@ -79,6 +147,41 @@ pub struct RecordingWriter {
 }
 
 impl RecordingWriter {
+    /// `new`, but if the encoder turns `params.fps` down, steps down through
+    /// the fps presets (`highest_encodable_fps`) to the highest rate it takes,
+    /// and returns that rate with the writer. Rates already known to be
+    /// rejected (`ENCODER_ANSWERS`) are skipped without asking again. Runs on
+    /// the writer actor's thread, so recording start never waits on it.
+    pub fn new_at_highest_fps(
+        output_path: &Path,
+        params: &EncoderParams,
+    ) -> Result<(Self, u32), AppError> {
+        let at = |fps| EncoderParams {
+            fps,
+            ..params.clone()
+        };
+        let mut writer = None;
+        let fps = highest_encodable_fps(params.fps, |fps| {
+            let attempt = at(fps);
+            let key = encoder_answer_key(&attempt);
+            if encoder_answers().get(&key) == Some(&false) {
+                return false;
+            }
+            let created = Self::new(output_path, &attempt);
+            if let Err(e) = &created {
+                tracing::warn!("encoder rejects {fps} fps ({e}), trying a lower rate");
+            }
+            encoder_answers().insert(key, created.is_ok());
+            writer = created.ok();
+            writer.is_some()
+        });
+        let writer = match writer {
+            Some(writer) => writer,
+            None => Self::new(output_path, &at(fps))?,
+        };
+        Ok((writer, fps))
+    }
+
     pub fn new(output_path: &Path, params: &EncoderParams) -> Result<Self, AppError> {
         let EncoderParams {
             width,
@@ -516,6 +619,141 @@ mod tests {
             .expect("write_video failed");
         let path = writer.finalize().expect("finalize failed");
         assert!(path.metadata().unwrap().len() > 0, "output file is empty");
+    }
+
+    /// The high fps presets (120/144/240) at 1440p through the real hardware
+    /// encoder. H.264 tops out at level 5.2, which caps 1440p at 144 fps, so
+    /// not every preset is accepted. This checks `video_encoder_accepts`
+    /// agrees with the writer on which are, and that a file at an accepted
+    /// rate really carries that frame rate and every frame written. Needs a
+    /// GPU encoder, so it's ignored by default.
+    #[tokio::test]
+    #[ignore]
+    async fn writer_encodes_high_fps_presets_at_1440p() {
+        use crate::capture::frame_rate::FPS_PRESETS;
+        use crate::types::VideoFrame;
+        use std::time::Duration;
+
+        const W: u32 = 2560;
+        const H: u32 = 1440;
+        let dir = tempfile::tempdir().unwrap();
+        let _mf = crate::encode::mf::MfSession::start_mta().expect("MFStartup");
+        for codec in [Codec::H264, Codec::H265] {
+            for fps in FPS_PRESETS.into_iter().filter(|&fps| fps > 60) {
+                let output = dir.path().join(format!("{codec:?}_{fps}.mp4"));
+                let params = EncoderParams {
+                    width: W,
+                    height: H,
+                    fps,
+                    codec,
+                    bitrate_bps: video_bitrate_bps(W, H, fps),
+                    audio_tracks: vec![],
+                    allow_hardware_encode: true,
+                };
+                if !video_encoder_accepts(&params) {
+                    println!("{codec:?} {fps} fps: rejected by this PC's encoder");
+                    assert!(
+                        RecordingWriter::new(&output, &params).is_err(),
+                        "{codec:?} {fps} fps: the probe rejected what the writer accepts"
+                    );
+                    continue;
+                }
+                let writer = RecordingWriter::new(&output, &params)
+                    .unwrap_or_else(|e| panic!("{codec:?} {fps} fps: writer: {e}"));
+                writer.begin_writing().expect("begin_writing failed");
+                for i in 0..fps {
+                    // A moving bar, so the encoder can't collapse every frame
+                    // into a skip.
+                    let mut data = vec![0u8; (W * H * 4) as usize];
+                    // A 16 px (64 byte) bar sliding across the row.
+                    let x = (i * (W - 16) / fps) as usize * 4;
+                    for row in data.as_chunks_mut::<{ (W * 4) as usize }>().0 {
+                        row[x..x + 64].fill(0xFF);
+                    }
+                    writer
+                        .write_video(VideoFrame {
+                            pts: Duration::from_secs(1) * i / fps,
+                            data: data.into(),
+                        })
+                        .unwrap_or_else(|e| panic!("{codec:?} {fps} fps: frame {i}: {e}"));
+                }
+                let path = writer.finalize().expect("finalize failed");
+                let (file_fps, samples) = read_video_rate_and_sample_count(&path);
+                println!("{codec:?} {fps} fps: file says {file_fps} fps, {samples} samples");
+                assert_eq!(file_fps, fps, "{codec:?}: frame rate in the file");
+                assert_eq!(samples, fps, "{codec:?} {fps} fps: frames in the file");
+            }
+        }
+
+        // What a recording at the highest preset ends up with: the highest
+        // rate the encoder accepts, and a writer that works at it.
+        for codec in [Codec::H264, Codec::H265] {
+            let params = EncoderParams {
+                width: W,
+                height: H,
+                fps: 240,
+                codec,
+                bitrate_bps: video_bitrate_bps(W, H, 240),
+                audio_tracks: vec![],
+                allow_hardware_encode: true,
+            };
+            let output = dir.path().join(format!("{codec:?}_stepped.mp4"));
+            let (writer, fps) =
+                RecordingWriter::new_at_highest_fps(&output, &params).expect("new_at_highest_fps");
+            println!("{codec:?} asked for 240 fps, settled on {fps}");
+            assert!(
+                video_encoder_accepts(&EncoderParams {
+                    fps,
+                    ..params.clone()
+                }),
+                "{codec:?}: settled on a rate the probe rejects"
+            );
+            writer.begin_writing().expect("begin_writing failed");
+            writer
+                .write_video(VideoFrame {
+                    pts: Duration::ZERO,
+                    data: vec![0u8; (W * H * 4) as usize].into(),
+                })
+                .expect("write_video failed");
+            let (file_fps, _) = read_video_rate_and_sample_count(&writer.finalize().unwrap());
+            assert_eq!(file_fps, fps, "{codec:?}: stepped-down rate in the file");
+        }
+    }
+
+    /// The video stream's `MF_MT_FRAME_RATE` (as whole fps) and its sample
+    /// count, read back through a source reader.
+    fn read_video_rate_and_sample_count(path: &std::path::Path) -> (u32, u32) {
+        use windows::Win32::Media::MediaFoundation::{
+            MF_MT_MAJOR_TYPE, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
+            MFCreateSourceReaderFromURL, MFMediaType_Video,
+        };
+        unsafe {
+            let url = windows::core::HSTRING::from(path.to_str().unwrap());
+            let reader = MFCreateSourceReaderFromURL(&url, None).expect("source reader");
+            let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+            let native = reader.GetNativeMediaType(stream, 0).expect("native type");
+            assert_eq!(
+                native.GetGUID(&MF_MT_MAJOR_TYPE).unwrap(),
+                MFMediaType_Video
+            );
+            let packed = native.GetUINT64(&MF_MT_FRAME_RATE).expect("frame rate");
+            let fps = ((packed >> 32) as f64 / (packed & 0xFFFF_FFFF) as f64).round() as u32;
+            let mut samples = 0;
+            loop {
+                let mut flags = 0u32;
+                let mut sample = None;
+                reader
+                    .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                    .expect("ReadSample");
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    break;
+                }
+                if sample.is_some() {
+                    samples += 1;
+                }
+            }
+            (fps, samples)
+        }
     }
 
     #[test]

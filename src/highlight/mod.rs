@@ -6,6 +6,7 @@
 //! exclusion with manual recording, foreground-window tracking) lives in
 //! `session::mod` and the dashboard.
 
+use crate::capture::frame_rate::LiveFps;
 use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter};
 use crate::error::AppError;
@@ -64,6 +65,7 @@ pub fn spawn_highlight_actor(
     max_segments: usize,
     segments: Arc<Mutex<VecDeque<SegmentInfo>>>,
     disk_full_flag: Arc<AtomicBool>,
+    fps: LiveFps,
 ) -> (
     mpsc::Sender<RecordingCommand>,
     mpsc::UnboundedSender<SaveNowRequest>,
@@ -73,6 +75,7 @@ pub fn spawn_highlight_actor(
     let (save_now_tx, mut save_now_rx) = mpsc::unbounded_channel::<SaveNowRequest>();
 
     let handle = tokio::task::spawn_blocking(move || {
+        let mut params = params;
         let segment_duration = Duration::from_secs(segment_seconds.max(1) as u64);
         let mut disk_guard = DiskSpaceGuard::new(segment_dir.clone(), DISK_CHECK_INTERVAL);
 
@@ -83,7 +86,10 @@ pub fn spawn_highlight_actor(
                 .as_nanos();
             let seg_path = segment_dir.join(format!("highlight_seg_{seg_id}.mp4"));
 
-            let writer = RecordingWriter::new(&seg_path, &params)?;
+            // Later segments start straight at the rate the first one settled on.
+            let (writer, settled_fps) = RecordingWriter::new_at_highest_fps(&seg_path, &params)?;
+            params.fps = settled_fps;
+            fps.set(settled_fps);
             writer.begin_writing()?;
 
             let seg_start = Instant::now();
@@ -215,6 +221,7 @@ mod tests {
             3, // keep at most 3 segments
             Arc::clone(&segments),
             disk_full_flag,
+            LiveFps::new(30),
         );
 
         // Send frames spaced out past several 1s segment boundaries.
@@ -268,6 +275,7 @@ mod tests {
             10,
             Arc::clone(&segments),
             disk_full_flag,
+            LiveFps::new(30),
         );
         tx.send(RecordingCommand::video(tiny_video_frame(Duration::ZERO)))
             .await
@@ -304,6 +312,7 @@ mod tests {
             10,
             Arc::clone(&segments),
             disk_full_flag,
+            LiveFps::new(30),
         );
 
         tx.send(RecordingCommand::video(tiny_video_frame(Duration::ZERO)))

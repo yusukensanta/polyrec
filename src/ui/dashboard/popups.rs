@@ -3,19 +3,17 @@ use super::state::SelfUpdateState;
 use super::theme::{ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY};
 use super::util::{open_url, take_if_finished};
 use super::widgets::{accent_button, caption, section_header};
+use crate::capture::frame_rate::{FPS_PRESETS, fps_fits_display};
 use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
+use crate::session::FpsSupport;
 use eframe::egui;
 
 impl App {
-    /// Quality popup: fps, codec, encoder, resolution and bitrate.
+    /// Quality popup: codec, encoder, resolution, fps and bitrate. Fps comes
+    /// after the first three because which presets are available depends on
+    /// them.
     fn render_encode_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
-        section_header(ui, s.fps_header);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.config.encode.fps, 30, "30");
-            ui.selectable_value(&mut self.config.encode.fps, 60, "60");
-        });
-
         section_header(ui, s.codec_header);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.config.encode.codec, Codec::H264, "H264");
@@ -65,6 +63,9 @@ impl App {
             });
         }
 
+        section_header(ui, s.fps_header);
+        self.render_fps_presets(ui, s);
+
         section_header(ui, s.bitrate_header);
         ui.horizontal(|ui| {
             ui.selectable_value(
@@ -111,11 +112,59 @@ impl App {
         }
     }
 
+    /// The fps presets, limited to what the selected source can really be
+    /// recorded at with the codec, encoder and resolution chosen above (see
+    /// `FpsSupportProbe`). A preset its display can't refresh at, or the
+    /// encoder rejects at that size, is disabled with the reason on hover.
+    /// A setting that stops fitting (e.g. 240 after switching to H264) stays
+    /// selected, greyed out, with a caption saying what will be recorded
+    /// instead -- recording start steps down the same way.
+    fn render_fps_presets(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        let support = self.fps_support.result().cloned();
+        let codec = self.config.encode.codec;
+        ui.horizontal(|ui| {
+            for fps in FPS_PRESETS {
+                let blocked = support
+                    .as_ref()
+                    .and_then(|support| fps_preset_blocked(support, fps, codec, s));
+                let response = ui
+                    .add_enabled_ui(blocked.is_none(), |ui| {
+                        ui.selectable_value(&mut self.config.encode.fps, fps, fps.to_string())
+                    })
+                    .inner;
+                if let Some(reason) = blocked {
+                    response.on_disabled_hover_text(reason);
+                }
+            }
+        });
+        let Some(support) = support else {
+            return;
+        };
+        if let Some(hz) = support.display_hz {
+            ui.label(caption(
+                s.fps_display_caption_template
+                    .replace("{hz}", &hz.to_string()),
+                TEXT_MUTED,
+            ));
+        }
+        let recorded = support.recorded_fps(self.config.encode.fps());
+        if recorded != self.config.encode.fps() {
+            ui.label(caption(
+                s.fps_recorded_template
+                    .replace("{fps}", &recorded.to_string()),
+                ACCENT_PAUSE,
+            ));
+        }
+    }
+
     pub(super) fn render_quality_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
         if !self.show_quality_popup {
             return;
         }
         let mut close = false;
+        let encode = self.encode_settings();
+        let source = self.selected_source.and_then(|i| self.sources.get(i));
+        self.fps_support.update(ctx, source, &encode);
         egui::Window::new(s.quality_title)
             .collapsible(false)
             .resizable(false)
@@ -303,4 +352,20 @@ impl App {
             Err(e) => self.self_update.state = SelfUpdateState::Failed(e.to_string()),
         }
     }
+}
+
+/// Why `fps` can't be picked for the probed source, or `None` if it can.
+fn fps_preset_blocked(support: &FpsSupport, fps: u32, codec: Codec, s: &Strings) -> Option<String> {
+    if !fps_fits_display(fps, support.display_hz) {
+        let hz = support.display_hz?.to_string();
+        return Some(s.fps_above_display_template.replace("{hz}", &hz));
+    }
+    let (width, height) = support.output;
+    (!support.encoder_accepts(fps)).then(|| {
+        s.fps_encoder_limit_template
+            .replace("{codec}", &format!("{codec:?}"))
+            .replace("{fps}", &fps.to_string())
+            .replace("{w}", &width.to_string())
+            .replace("{h}", &height.to_string())
+    })
 }

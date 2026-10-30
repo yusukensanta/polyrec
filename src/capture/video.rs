@@ -1,6 +1,7 @@
 use crate::capture::CaptureControl;
 use crate::capture::device::D3dDevice;
 use crate::capture::frame_pool::{FrameBuf, FramePool};
+use crate::capture::frame_rate::{FrameRateLimiter, LiveFps};
 use crate::error::{AppError, ResultExt};
 use crate::types::{CaptureKind, VideoFrame};
 use std::sync::Arc;
@@ -20,13 +21,14 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAS_STILL_DRAWING;
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HMONITOR,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR};
 
 /// A window or a monitor -- the two things Windows.Graphics.Capture can
 /// create a `GraphicsCaptureItem` for (`CreateForWindow` / `CreateForMonitor`
@@ -122,6 +124,45 @@ pub fn monitor_rect(hmonitor: HMONITOR) -> Result<windows::Win32::Foundation::RE
     }
 }
 
+/// Refresh rate (Hz) of the display `target` is shown on: the most frames per
+/// second Windows.Graphics.Capture can deliver for it. `None` if Windows
+/// doesn't report a number.
+pub fn display_refresh_hz(target: CaptureTarget) -> Option<u32> {
+    unsafe {
+        let hmonitor = match target {
+            CaptureTarget::Window(hwnd) => MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+            CaptureTarget::Monitor(hmonitor) => hmonitor,
+        };
+        let mut info = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // `cbSize` tells GetMonitorInfoW it may fill the whole EX struct.
+        let info_ptr = (&raw mut info).cast::<MONITORINFO>();
+        if !GetMonitorInfoW(hmonitor, info_ptr).as_bool() {
+            return None;
+        }
+        let mut mode = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        if !EnumDisplaySettingsW(
+            PCWSTR(info.szDevice.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+        )
+        .as_bool()
+        {
+            return None;
+        }
+        // 0 and 1 both mean "the hardware's default rate", not an actual number.
+        (mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+    }
+}
+
 /// Nearest-neighbor resize of an interleaved BGRA8 buffer. `run_video_capture` sizes
 /// the encoder to match the capture size 1:1, so this is normally a no-op; kept as a
 /// safety net for whatever mismatch might occur between the two. Takes `src` by value
@@ -206,6 +247,7 @@ impl CaptureResources {
         target: CaptureTarget,
         (capture_width, capture_height): (u32, u32),
         show_border: bool,
+        min_update_interval: std::time::Duration,
     ) -> Result<Self, AppError> {
         let device = D3dDevice::new()?;
         let dxgi_device = device.dxgi_device()?;
@@ -261,6 +303,15 @@ impl CaptureResources {
         // fails harmlessly on older Windows, which just keeps the OS default
         // (border shown) since there's no way to suppress it there.
         let _ = session.SetIsBorderRequired(show_border);
+
+        // Asks WGC itself to deliver fewer frames on a high-refresh display, so
+        // the frames `FrameRateLimiter` would drop anyway aren't composed and
+        // handed over in the first place. Only a hint: the limiter still does
+        // the exact capping. Like the border flag, `IGraphicsCaptureSession5`
+        // only exists on Windows 11 24H2+, and this fails harmlessly before that.
+        let _ = session.SetMinUpdateInterval(windows::Foundation::TimeSpan {
+            Duration: (min_update_interval.as_nanos() / 100) as i64,
+        });
 
         session.StartCapture().capture_ctx("StartCapture")?;
 
@@ -462,10 +513,14 @@ async fn send_frame(
     tx.send(VideoFrame { pts, data }).await.is_ok()
 }
 
+/// Captures `target` and sends its frames, at most `fps` per second (see
+/// `FrameRateLimiter`), until `ctrl` is stopped or the target goes away. The
+/// cap follows `fps` if the writer lowers it while running.
 pub async fn run_video_capture(
     target: CaptureTarget,
     capture_size: (u32, u32),
     output_size: (u32, u32),
+    fps: LiveFps,
     ctrl: CaptureControl,
     tx: mpsc::Sender<VideoFrame>,
     show_border: bool,
@@ -479,7 +534,12 @@ pub async fn run_video_capture(
         .capture_ctx("CoInitializeEx")?;
     }
 
-    let res = CaptureResources::open(target, capture_size, show_border)?;
+    let mut cap = fps.get();
+    let mut limiter = FrameRateLimiter::new(cap);
+    // Half a slot, not a whole one: a minimum interval of exactly 1/fps would
+    // make WGC skip a frame whenever one lands a hair early against the
+    // display's vsync, halving a 60 Hz source recorded at 60 fps.
+    let res = CaptureResources::open(target, capture_size, show_border, limiter.interval() / 2)?;
     // Recycles each frame's pixel buffer once the encoder is done with it --
     // see `FramePool`.
     let pool = FramePool::new();
@@ -513,11 +573,21 @@ pub async fn run_video_capture(
             continue;
         }
 
+        // Over the fps cap: drop it before any GPU copy or readback.
+        if fps.get() != cap {
+            cap = fps.get();
+            limiter = FrameRateLimiter::new(cap);
+        }
+        let pts = ctrl.clock.elapsed();
+        if !limiter.admit(pts) {
+            continue;
+        }
+
         let (write_idx, read_idx) = ping_pong_indices(frame_counter);
         frame_counter += 1;
 
         res.copy_into_staging(write_idx, &frame)?;
-        pending[write_idx] = Some(ctrl.clock.elapsed());
+        pending[write_idx] = Some(pts);
 
         // Read back the slot copied last iteration -- see the ping-pong comment
         // in `CaptureResources::open`. Non-blocking first (the GPU copy from
@@ -660,6 +730,195 @@ mod tests {
         assert!(
             w > 0 && h > 0,
             "expected positive display dimensions, got {w}x{h}"
+        );
+    }
+
+    /// A small topmost window with a white bar sliding across it about once
+    /// a millisecond, so DWM -- and WGC -- produce a new frame on every display
+    /// refresh. Closed on drop.
+    struct SlidingBarWindow {
+        hwnd: usize,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl SlidingBarWindow {
+        const W: i32 = 320;
+        const H: i32 = 240;
+
+        fn spawn() -> Self {
+            use windows::Win32::Graphics::Gdi::{BLACKNESS, GetDC, PatBlt, ReleaseDC, WHITENESS};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+            };
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || unsafe {
+                let hwnd = CreateWindowExW(
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                    windows::core::w!("STATIC"),
+                    windows::core::w!("polyrec fps test"),
+                    WS_POPUP | WS_VISIBLE,
+                    0,
+                    0,
+                    Self::W,
+                    Self::H,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("CreateWindowExW");
+                tx.send(hwnd.0 as usize).unwrap();
+                let bar = 8;
+                let mut msg = MSG::default();
+                let mut x = 0;
+                while !thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        DispatchMessageW(&msg);
+                    }
+                    let dc = GetDC(Some(hwnd));
+                    let _ = PatBlt(dc, x, 0, bar, Self::H, BLACKNESS);
+                    x = (x + 1) % (Self::W - bar);
+                    let _ = PatBlt(dc, x, 0, bar, Self::H, WHITENESS);
+                    ReleaseDC(Some(hwnd), dc);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let _ = DestroyWindow(hwnd);
+            });
+            let hwnd = rx.recv().expect("window thread died");
+            Self {
+                hwnd,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for SlidingBarWindow {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Process CPU time (user + kernel) so far.
+    fn process_cpu_time() -> std::time::Duration {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+            .expect("GetProcessTimes");
+        }
+        let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+        std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+    }
+
+    /// Captures `target` (as `CaptureTarget::from_raw` takes it) for `secs` at
+    /// `fps` and returns (frames delivered, process CPU time spent meanwhile).
+    fn capture_for(
+        (kind, handle): (CaptureKind, usize),
+        fps: u32,
+        secs: u64,
+    ) -> (u64, std::time::Duration) {
+        let target = CaptureTarget::from_raw(kind, handle);
+        let (w, h) = query_capture_size(target).expect("query_capture_size");
+        let size = (w & !1, h & !1);
+        let ctrl = CaptureControl::new();
+        let (tx, mut rx) = mpsc::channel(256);
+        let capture_ctrl = ctrl.clone();
+        let cpu_before = process_cpu_time();
+        let capture = std::thread::spawn(move || {
+            let target = CaptureTarget::from_raw(kind, handle);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_video_capture(
+                    target,
+                    size,
+                    size,
+                    LiveFps::new(fps),
+                    capture_ctrl,
+                    tx,
+                    false,
+                ))
+        });
+        let counter = std::thread::spawn(move || {
+            let mut frames = 0u64;
+            while rx.blocking_recv().is_some() {
+                frames += 1;
+            }
+            frames
+        });
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        ctrl.request_stop();
+        capture.join().unwrap().expect("run_video_capture failed");
+        let frames = counter.join().unwrap();
+        (frames, process_cpu_time() - cpu_before)
+    }
+
+    /// End-to-end fps cap: a window that changes every millisecond makes WGC
+    /// deliver a frame of its monitor on every display refresh. Uncapped (what
+    /// every recording did before the cap) that's the refresh rate; capped at
+    /// 30 fps it must be about 30 (30, not 60, so a 60 Hz monitor can still
+    /// show the difference). Also prints a 60 fps run for comparison. Shows a
+    /// small window in the top-left corner for ~10 s, so it's ignored by
+    /// default.
+    #[test]
+    #[ignore]
+    fn capture_is_capped_to_the_configured_fps() {
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+        const SECS: u64 = 3;
+        const FPS: u32 = 30;
+        let window = SlidingBarWindow::spawn();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let hwnd = HWND(window.hwnd as *mut core::ffi::c_void);
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        let target = (CaptureKind::Monitor, monitor.0 as usize);
+
+        let per_sec = |n: u64| n as f64 / SECS as f64;
+        let cpu_ms_per_sec = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / SECS as f64;
+        let mut runs = Vec::new();
+        for fps in [1000, 60, FPS] {
+            let (frames, cpu) = capture_for(target, fps, SECS);
+            println!(
+                "cap {fps:>4}: {:>5.1} fps delivered, {:>4.0} ms CPU/s",
+                per_sec(frames),
+                cpu_ms_per_sec(cpu)
+            );
+            runs.push(frames);
+        }
+        let (uncapped, capped) = (runs[0], runs[2]);
+
+        let budget = u64::from(FPS) * SECS;
+        assert!(
+            per_sec(uncapped) > f64::from(FPS) * 1.5,
+            "the display didn't refresh fast enough to test a {FPS} fps cap"
+        );
+        assert!(
+            capped <= budget + 2,
+            "{capped} frames in {SECS} s at {FPS} fps"
+        );
+        assert!(
+            capped >= budget * 8 / 10,
+            "{capped} frames in {SECS} s at {FPS} fps"
         );
     }
 }
