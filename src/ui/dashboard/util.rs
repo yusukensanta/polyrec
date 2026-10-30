@@ -40,9 +40,39 @@ pub(super) fn save_config_or_report(
 /// otherwise shadow the real explorer.exe).
 const EXPLORER_EXE: &str = r"C:\Windows\explorer.exe";
 
+/// Opens the folder containing the file at `path` in Explorer.
 pub(super) fn open_folder(path: &std::path::Path) {
-    let folder = path.parent().unwrap_or(path);
-    let _ = std::process::Command::new(EXPLORER_EXE).arg(folder).spawn();
+    open_directory(path.parent().unwrap_or(path));
+}
+
+/// Opens the folder `dir` itself in Explorer.
+pub(super) fn open_directory(dir: &std::path::Path) {
+    let _ = std::process::Command::new(EXPLORER_EXE).arg(dir).spawn();
+}
+
+/// Why recordings can't be saved under an output folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutputDirProblem {
+    /// Nothing along the path exists: its drive or network share isn't there.
+    Unavailable,
+    /// The path leads through a file.
+    NotAFolder,
+}
+
+/// What would stop recordings being saved under `dir`, if anything. A folder
+/// that doesn't exist yet is fine, since starting a recording creates it
+/// (`prepare_recording_paths`). What isn't fine: nothing along the path
+/// exists (its drive or network share isn't there), or the nearest part that
+/// does exist is a file.
+pub(super) fn output_dir_problem(dir: &std::path::Path) -> Option<OutputDirProblem> {
+    let nearest_existing = dir
+        .ancestors()
+        .find(|p| !p.as_os_str().is_empty() && p.exists());
+    match nearest_existing {
+        None => Some(OutputDirProblem::Unavailable),
+        Some(p) if !p.is_dir() => Some(OutputDirProblem::NotAFolder),
+        Some(_) => None,
+    }
 }
 
 /// Only ever called with a GitHub release page URL (see `update_check.rs`), but
@@ -58,4 +88,48 @@ pub(super) fn open_url(url: &str) {
         return;
     }
     let _ = std::process::Command::new(EXPLORER_EXE).arg(url).spawn();
+}
+
+#[cfg(test)]
+mod output_dir_problem_tests {
+    use super::*;
+
+    #[test]
+    fn an_existing_folder_or_one_still_to_be_created_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(output_dir_problem(dir.path()), None);
+        assert_eq!(
+            output_dir_problem(&dir.path().join("new").join("deeper")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_path_through_a_file_is_not_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            output_dir_problem(&file),
+            Some(OutputDirProblem::NotAFolder)
+        );
+        assert_eq!(
+            output_dir_problem(&file.join("sub")),
+            Some(OutputDirProblem::NotAFolder)
+        );
+    }
+
+    #[test]
+    fn a_drive_that_isnt_there_is_unavailable() {
+        let missing_drive = ('D'..='Z')
+            .rev()
+            .map(|letter| format!("{letter}:\\"))
+            .find(|root| !std::path::Path::new(root).exists())
+            .expect("every drive letter D-Z is in use");
+        let dir = std::path::Path::new(&missing_drive).join("Recordings");
+        assert_eq!(
+            output_dir_problem(&dir),
+            Some(OutputDirProblem::Unavailable)
+        );
+    }
 }

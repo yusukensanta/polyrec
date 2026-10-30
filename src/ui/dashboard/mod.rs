@@ -86,6 +86,10 @@ pub struct App {
     recording_status: Option<RecordingStatusCache>,
     last_output_path: Option<PathBuf>,
     output_dir_input: String,
+    /// Why recordings can't be saved under `config.output_dir`, if they
+    /// can't -- checked at startup and whenever the folder is changed (see
+    /// `set_output_dir`).
+    output_dir_problem: Option<util::OutputDirProblem>,
     /// Last time `refresh_sources_and_audio_if_due` actually ran (see there
     /// for why this is throttled rather than run every frame).
     sources_checked_at: Option<Instant>,
@@ -148,6 +152,7 @@ impl App {
         let show_recording_border = config.show_recording_border;
         let app_audio_only = config.default_app_audio_only;
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
+        let output_dir_problem = util::output_dir_problem(&config.output_dir);
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         let n = audio_devices.len();
         // Restores the user's last saved SYSTEM audio selection if there is
@@ -210,6 +215,7 @@ impl App {
             recording_status: None,
             last_output_path: None,
             output_dir_input,
+            output_dir_problem,
             sources_checked_at: None,
             refresh_rx: None,
             last_recording_audio_labels: Vec::new(),

@@ -5,7 +5,7 @@ use super::theme::{
     BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT,
     TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
 };
-use super::util::open_folder;
+use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_problem};
 use super::widgets::{accent_button, caption, centered_action_row, format_bytes, section_header};
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
@@ -24,6 +24,14 @@ impl App {
     /// per checkbox.
     pub(super) fn recording_track_count(&self) -> usize {
         self.last_recording_audio_labels.len()
+    }
+
+    /// Makes `dir` the output folder: re-checks whether recordings can be
+    /// saved there (`output_dir_problem`) and saves the config.
+    fn set_output_dir(&mut self, dir: PathBuf, s: &'static Strings) {
+        self.output_dir_problem = output_dir_problem(&dir);
+        self.config.output_dir = dir;
+        self.save_config_or_report(s);
     }
 
     pub(super) fn render_center_panel(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
@@ -214,15 +222,15 @@ impl App {
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            let btn_width = 74.0;
-            let tf_width = (ui.available_width() - btn_width - 8.0).max(60.0);
+            // Browse… and Open, plus the spacing before each.
+            let buttons_width = 74.0 + 58.0 + 2.0 * ui.spacing().item_spacing.x;
+            let tf_width = (ui.available_width() - buttons_width).max(60.0);
             let tf = ui.add_sized(
                 [tf_width, 22.0],
                 egui::TextEdit::singleline(&mut self.output_dir_input),
             );
             if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
-                self.config.output_dir = PathBuf::from(&self.output_dir_input);
-                self.save_config_or_report(s);
+                self.set_output_dir(PathBuf::from(&self.output_dir_input), s);
             }
             if ui
                 .add(accent_button(s.browse_button, ACCENT_SECONDARY))
@@ -232,10 +240,29 @@ impl App {
                     .pick_folder()
             {
                 self.output_dir_input = path.to_string_lossy().into_owned();
-                self.config.output_dir = path;
-                self.save_config_or_report(s);
+                self.set_output_dir(path, s);
+            }
+            // Opens the `polyrec` subfolder recordings actually land in once
+            // there is one, otherwise the chosen folder itself.
+            if ui
+                .add_enabled(
+                    self.output_dir_problem.is_none(),
+                    accent_button(s.open_output_dir_button, ACCENT_SECONDARY),
+                )
+                .on_hover_text(s.open_output_dir_tooltip)
+                .clicked()
+            {
+                let recordings = self.config.output_dir.join("polyrec");
+                open_directory(if recordings.is_dir() {
+                    &recordings
+                } else {
+                    &self.config.output_dir
+                });
             }
         });
+        if let Some(problem) = self.output_dir_problem {
+            ui.label(caption(output_dir_problem_text(problem, s), ACCENT_PAUSE));
+        }
 
         ui.add_space(6.0);
         let checkbox_response = ui
@@ -428,14 +455,19 @@ impl App {
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
-                    // Without a source REC used to do nothing at all when
-                    // clicked; now it says what's missing instead.
-                    let has_source = self.selected_source.is_some();
-                    if ui
-                        .add_enabled(has_source, btn)
-                        .on_disabled_hover_text(s.rec_needs_source_tooltip)
-                        .clicked()
-                    {
+                    // REC used to do nothing at all when clicked without a
+                    // source, and only failed on start with an unusable
+                    // output folder; now it says what's missing instead.
+                    let blocked = if self.selected_source.is_none() {
+                        Some(s.rec_needs_source_tooltip)
+                    } else {
+                        self.output_dir_problem
+                            .map(|problem| output_dir_problem_text(problem, s))
+                    };
+                    let rec = ui.add_enabled(blocked.is_none(), btn);
+                    if let Some(reason) = blocked {
+                        rec.on_disabled_hover_text(reason);
+                    } else if rec.clicked() {
                         self.handle_rec_button(is_recording);
                     }
                 });
@@ -612,6 +644,15 @@ impl App {
             section_header(ui, s.export_failed_header);
             ui.label(caption(&msg, ACCENT_REC));
         }
+    }
+}
+
+/// The message for an unusable output folder, shown under the folder and on
+/// a disabled REC.
+fn output_dir_problem_text(problem: OutputDirProblem, s: &Strings) -> &'static str {
+    match problem {
+        OutputDirProblem::Unavailable => s.output_dir_unavailable,
+        OutputDirProblem::NotAFolder => s.output_dir_not_a_folder,
     }
 }
 
