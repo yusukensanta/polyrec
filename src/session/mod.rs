@@ -715,6 +715,62 @@ mod tests {
         }
     }
 
+    /// End-to-end regression for the stall a quiet loopback track caused:
+    /// with nothing playing, desktop loopback delivers no packets. The MP4
+    /// sink then held every other stream's data in memory (the file stayed
+    /// at its 79-byte header), throttled each write to about a second, and
+    /// stopping took minutes. Records a display with every audio device
+    /// (run it with nothing playing to reproduce the original case) and
+    /// checks the file grows while recording and stopping finishes promptly.
+    /// Records real devices but plays nothing; ignored by default.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn quiet_loopback_track_does_not_stall_the_recording() {
+        use crate::capture::audio::enumerate_audio_devices;
+        use crate::sources::enumerate_sources;
+
+        let source = enumerate_sources()
+            .into_iter()
+            .find(|s| s.kind == CaptureKind::Monitor)
+            .expect("no display source");
+        let devices = enumerate_audio_devices().unwrap_or_default();
+        assert!(
+            devices.iter().any(|d| d.is_loopback),
+            "needs a loopback device"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        let temp_path = sm
+            .start_capture(
+                source,
+                inputs(devices, vec![], false),
+                false,
+                Arc::new(AtomicU64::new(0)),
+                dir.path(),
+                RecordingNaming::ProcessName,
+            )
+            .expect("start_capture failed");
+
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let size_while_recording = std::fs::metadata(&temp_path).map_or(0, |m| m.len());
+        let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture");
+        let stop_started = std::time::Instant::now();
+        let finalized = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("finalizing took over 5 s -- the recording stalled")
+            .expect("recorder task panicked")
+            .expect("finalize failed");
+        println!(
+            "while recording: {size_while_recording} bytes; stopped in {:?}; final {} bytes",
+            stop_started.elapsed(),
+            std::fs::metadata(&finalized).unwrap().len()
+        );
+        assert!(
+            size_while_recording > 1024,
+            "nothing reached the file while recording ({size_while_recording} bytes)"
+        );
+    }
+
     /// End-to-end: real window capture + real audio devices, through the same
     /// start_capture/stop_capture path the GUI uses. Needs a display and audio
     /// endpoints, so it's ignored by default — run with `--ignored --nocapture`.
