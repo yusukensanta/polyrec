@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.101] - 2026-10-31
+
 ### Added
 
 - An Open button next to the output folder opens it in Explorer: the `polyrec` folder recordings land in once it exists, otherwise the chosen folder itself.
