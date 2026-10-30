@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Warnings that don't stop anything now appear as a dismissible strip at the top of the Status panel instead of a red "Error" window that had to be clicked away. That covers a recording running below its frame rate (which used to pop up mid-recording), a recording with fewer audio tracks than selected, a disk-full early stop (the file is still saved), Highlight not being on when its hotkey is pressed, and the update notices. Real errors still use the window.
+- The frame-rate warning now says what it measured ("Recording at 10 of 60 fps so far") and that a still screen records fewer frames, instead of only blaming the hardware.
+
 ## [v0.5.101] - 2026-10-31
 
 ### Added

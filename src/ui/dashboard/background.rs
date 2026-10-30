@@ -108,13 +108,13 @@ impl App {
                     self.export.result_rx = None;
                     self.last_output_path = Some(path);
                     if disk_full {
-                        self.error_message = Some(s.disk_full_mid_recording.to_string());
+                        self.notice = Some(s.disk_full_mid_recording.to_string());
                     } else if let Some(msg) = audio_tracks_missing_message(
                         s,
                         self.export.available_tracks,
                         self.last_recording_audio_labels.len(),
                     ) {
-                        self.error_message = Some(msg);
+                        self.notice = Some(msg);
                     }
                 }
                 Ok(Err(e)) => {
@@ -214,10 +214,11 @@ impl App {
         };
         if achieved_fps < target_fps * SHORTFALL_THRESHOLD {
             self.fps_shortfall_warned = true;
-            self.error_message = Some(format!(
-                "{}{achieved_fps:.0}/{target_fps:.0} fps",
-                s.fps_shortfall_prefix
-            ));
+            self.notice = Some(
+                s.fps_shortfall_template
+                    .replace("{achieved}", &format!("{achieved_fps:.0}"))
+                    .replace("{target}", &format!("{target_fps:.0}")),
+            );
         }
     }
 }

@@ -26,6 +26,36 @@ impl App {
         self.last_recording_audio_labels.len()
     }
 
+    /// The dismissible notice strip at the top of the Status panel -- see
+    /// `notice`. The text wraps beside a ✕ that clears it.
+    fn render_notice(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
+        let Some(text) = &self.notice else {
+            return;
+        };
+        let mut dismissed = false;
+        egui::Frame::NONE
+            .fill(BG_FAINT)
+            .stroke(egui::Stroke::new(1.0, ACCENT_PAUSE))
+            .corner_radius(CORNER_CONTROL)
+            .inner_margin(8i8)
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    let dismiss_width = 24.0;
+                    ui.allocate_ui(
+                        egui::vec2(ui.available_width() - dismiss_width, 0.0),
+                        |ui| {
+                            ui.add(egui::Label::new(caption(text.as_str(), ACCENT_PAUSE)).wrap());
+                        },
+                    );
+                    dismissed = ui.small_button("✕").on_hover_text(s.close_button).clicked();
+                });
+            });
+        if dismissed {
+            self.notice = None;
+        }
+        ui.add_space(SPACE_NORMAL);
+    }
+
     /// Makes `dir` the output folder: re-checks whether recordings can be
     /// saved there (`output_dir_problem`) and saves the config.
     fn set_output_dir(&mut self, dir: PathBuf, s: &'static Strings) {
@@ -46,6 +76,7 @@ impl App {
             // window just reopens empty right-side space rather than the
             // window becoming more useful.
             ui.set_max_width(440.0);
+            self.render_notice(ui, s);
             section_header(ui, s.status_header);
 
             self.render_status(ui, s, is_recording, frames);
@@ -221,45 +252,52 @@ impl App {
         ));
         ui.add_space(8.0);
 
-        ui.horizontal(|ui| {
-            // Browse… and Open, plus the spacing before each.
-            let buttons_width = 74.0 + 58.0 + 2.0 * ui.spacing().item_spacing.x;
-            let tf_width = (ui.available_width() - buttons_width).max(60.0);
-            let tf = ui.add_sized(
-                [tf_width, 22.0],
-                egui::TextEdit::singleline(&mut self.output_dir_input),
-            );
-            if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
-                self.set_output_dir(PathBuf::from(&self.output_dir_input), s);
-            }
-            if ui
-                .add(accent_button(s.browse_button, ACCENT_SECONDARY))
-                .clicked()
-                && let Some(path) = FileDialog::new()
-                    .set_directory(&self.config.output_dir)
-                    .pick_folder()
-            {
-                self.output_dir_input = path.to_string_lossy().into_owned();
-                self.set_output_dir(path, s);
-            }
-            // Opens the `polyrec` subfolder recordings actually land in once
-            // there is one, otherwise the chosen folder itself.
-            if ui
-                .add_enabled(
-                    self.output_dir_problem.is_none(),
-                    accent_button(s.open_output_dir_button, ACCENT_SECONDARY),
-                )
-                .on_hover_text(s.open_output_dir_tooltip)
-                .clicked()
-            {
-                let recordings = self.config.output_dir.join("polyrec");
-                open_directory(if recordings.is_dir() {
-                    &recordings
-                } else {
-                    &self.config.output_dir
-                });
-            }
-        });
+        // Laid out right to left: the buttons take whatever width their
+        // labels need (which depends on the font and language), and the
+        // folder field gets the rest. A fixed width guess clipped Open. The
+        // row is one control tall; a bare `with_layout` would claim all the
+        // panel's remaining height.
+        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(
+            row,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                // Opens the `polyrec` subfolder recordings actually land in once
+                // there is one, otherwise the chosen folder itself.
+                if ui
+                    .add_enabled(
+                        self.output_dir_problem.is_none(),
+                        accent_button(s.open_output_dir_button, ACCENT_SECONDARY),
+                    )
+                    .on_hover_text(s.open_output_dir_tooltip)
+                    .clicked()
+                {
+                    let recordings = self.config.output_dir.join("polyrec");
+                    open_directory(if recordings.is_dir() {
+                        &recordings
+                    } else {
+                        &self.config.output_dir
+                    });
+                }
+                if ui
+                    .add(accent_button(s.browse_button, ACCENT_SECONDARY))
+                    .clicked()
+                    && let Some(path) = FileDialog::new()
+                        .set_directory(&self.config.output_dir)
+                        .pick_folder()
+                {
+                    self.output_dir_input = path.to_string_lossy().into_owned();
+                    self.set_output_dir(path, s);
+                }
+                let tf = ui.add_sized(
+                    [ui.available_width().max(60.0), 22.0],
+                    egui::TextEdit::singleline(&mut self.output_dir_input),
+                );
+                if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
+                    self.set_output_dir(PathBuf::from(&self.output_dir_input), s);
+                }
+            },
+        );
         if let Some(problem) = self.output_dir_problem {
             ui.label(caption(output_dir_problem_text(problem, s), ACCENT_PAUSE));
         }
