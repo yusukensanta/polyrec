@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.105] - 2026-10-31
+
 ### Added
 
 - A Recent list under the output folder shows the last three recordings and Highlight saves, with buttons to play one or show it in Explorer.
