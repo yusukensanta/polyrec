@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.99] - 2026-10-31
+
 ### Added
 
 - The hotkeys for what the recording buttons do right now appear under them. While idle, the hint says the start key records the window in front, which is what the global hotkey does.
