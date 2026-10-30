@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.94] - 2026-10-31
+
 ### Added
 
 - FPS presets 120, 144 and 240, alongside 30 and 60. Some presets are greyed out, with the reason on hover:
