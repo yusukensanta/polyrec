@@ -5,12 +5,16 @@ use crate::types::CaptureKind;
 use eframe::egui;
 
 impl App {
+    /// Whether the overlay HUD is up: recording, with Overlay turned on.
+    pub(super) fn overlay_visible(&self) -> bool {
+        self.session.is_recording() && self.overlay_enabled
+    }
+
     /// Second OS window (click-through, always-on-top) showing a compact
     /// timer/track-count HUD while recording -- opt-in via the Overlay toggle
     /// in the menu bar.
     pub(super) fn render_overlay_viewport(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        let is_recording = self.session.is_recording();
-        if !(is_recording && self.overlay_enabled) {
+        if !self.overlay_visible() {
             return;
         }
 

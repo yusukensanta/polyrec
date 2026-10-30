@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- While recording, the dashboard repaints at 1 fps instead of 30 when it's minimized or another window has focus (typically the game being recorded). The timer still updates every second, and the UI no longer competes with the game for the GPU just to animate the pulsing dot. With the overlay HUD on, it keeps the full rate so the HUD stays on top of fullscreen games.
+
 ## [v0.5.96] - 2026-10-31
 
 ### Fixed
