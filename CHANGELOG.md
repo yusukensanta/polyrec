@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The hotkeys for what the recording buttons do right now appear under them. While idle, the hint says the start key records the window in front, which is what the global hotkey does.
+
+### Changed
+
+- REC is disabled with a hint until a source is selected; it used to do nothing when clicked.
+- While paused, Stop sits next to Resume, so stopping no longer needs a Resume first.
+- The overlay HUD stays up while paused, showing ⏸ and the resume key. It used to disappear, which looked the same as the recording having stopped.
+
 ## [v0.5.98] - 2026-10-31
 
 ### Fixed
