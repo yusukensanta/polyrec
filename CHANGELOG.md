@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.93] - 2026-10-31
+
 ### Changed
 
 - The UI typeface is now IBM Plex Sans, with IBM Plex Sans JP for Japanese, replacing egui's Ubuntu Light and the MS Gothic fallback read from `C:\Windows\Fonts` at startup. Both fonts are bundled in the exe, so the UI looks the same on every machine. They ship unmodified under the SIL Open Font License 1.1, whose text is included as `LICENSE-IBM-Plex.txt`.
