@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The audio track count shown while recording (status panel and overlay) is now the recording's own. It used to follow the live audio checkboxes, so it changed if a box was toggled mid-recording, and it counted an app source as one track however many it actually records (one per running process, none while the app is idle).
+
 ## [v0.5.95] - 2026-10-31
 
 ### Fixed

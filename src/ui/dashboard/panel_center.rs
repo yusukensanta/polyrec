@@ -19,6 +19,15 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
 impl App {
+    /// How many audio tracks the running recording has, for the status row
+    /// and the overlay HUD. This is the recording's own count, fixed at
+    /// start. The live checkboxes can change mid-recording, and an app source
+    /// records one track per running process (none while it's idle), not one
+    /// per checkbox.
+    pub(super) fn recording_track_count(&self) -> usize {
+        self.last_recording_audio_labels.len()
+    }
+
     pub(super) fn render_center_panel(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         let is_recording = self.session.is_recording();
         let frames = self.frame_count.load(Ordering::Relaxed);
@@ -105,8 +114,7 @@ impl App {
             ui.add_space(4.0);
 
             // Stats row
-            let track_count = self.selected_audio.iter().filter(|&&b| b).count()
-                + self.selected_app_audio.iter().filter(|&&b| b).count();
+            let track_count = self.recording_track_count();
             ui.horizontal(|ui| {
                 ui.label(caption(
                     format!("{track_count} {}", s.tracks_word),
