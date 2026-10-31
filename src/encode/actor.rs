@@ -1,9 +1,11 @@
+use crate::capture::CaptureControl;
+use crate::capture::audio::TrackCoverage;
 use crate::capture::frame_rate::LiveFps;
 use crate::disk_space::DiskSpaceGuard;
 use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter, VideoSlot};
 use crate::error::{AppError, ResultExt};
 use crate::recording_naming::{RecordingNaming, reserve_finished_recording_path};
-use crate::types::{AudioLevel, AudioSamples, VideoFrame};
+use crate::types::{AudioLevel, AudioSamples, TrackId, VideoFrame};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -126,23 +128,56 @@ pub fn spawn_video_pump(
     })
 }
 
-/// Spawns a pump task forwarding audio samples to the recording actor,
-/// noting each chunk's peak in `level` for the dashboard's meters.
+/// How often a pump whose capture has ended checks for silence to send --
+/// about as often as WASAPI hands out packets.
+const LOST_TRACK_POLL: Duration = Duration::from_millis(10);
+
+/// Spawns a pump task forwarding audio samples for `track` to the recording
+/// actor, noting each chunk's peak in `level` for the dashboard's meters.
+///
+/// If the track's capture ends while the recording goes on -- its device was
+/// unplugged, the app it captured closed, or capturing it failed -- the pump
+/// notes the loss (`CaptureControl::audio_source_lost`) and keeps the track
+/// going as silence, from where its audio stopped, until the recording
+/// stops. A track that stops getting samples stalls the whole file: Stop
+/// could then never finish saving it.
 pub fn spawn_audio_pump(
     mut audio_rx: mpsc::Receiver<AudioSamples>,
     recording_tx: mpsc::Sender<RecordingCommand>,
     level: AudioLevel,
+    track: TrackId,
+    ctrl: CaptureControl,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut coverage = TrackCoverage::new(track, ctrl.clock.elapsed());
         while let Some(samples) = audio_rx.recv().await {
+            coverage.on_samples(&samples);
             level.record(&samples.samples);
             if recording_tx
                 .send(RecordingCommand::WriteAudio(samples))
                 .await
                 .is_err()
             {
-                break;
+                return;
             }
+        }
+        if ctrl.is_stopped() {
+            return;
+        }
+        tracing::warn!("audio track {track:?} lost its source; the rest of it is silence");
+        ctrl.audio_source_lost(track);
+        level.record(&[]);
+        while !ctrl.is_stopped() {
+            if !ctrl.is_paused()
+                && let Some(silence) = coverage.silence_due(ctrl.clock.elapsed())
+                && recording_tx
+                    .send(RecordingCommand::WriteAudio(silence))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(LOST_TRACK_POLL).await;
         }
     })
 }
@@ -183,7 +218,10 @@ mod tests {
         let (cap_tx, cap_rx) = mpsc::channel::<AudioSamples>(4);
         let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(8);
 
-        let pump = spawn_audio_pump(cap_rx, rec_tx, AudioLevel::default());
+        // Stopped: the capture's end is the recording's, not a lost source.
+        let ctrl = CaptureControl::new();
+        ctrl.request_stop();
+        let pump = spawn_audio_pump(cap_rx, rec_tx, AudioLevel::default(), TrackId::new(0), ctrl);
 
         cap_tx
             .send(AudioSamples {
@@ -257,13 +295,95 @@ mod tests {
         assert_eq!(drain_video(&mut rec_rx).len(), 3);
     }
 
+    fn audio_from(rec_rx: &mut mpsc::Receiver<RecordingCommand>) -> Vec<AudioSamples> {
+        let mut audio = Vec::new();
+        while let Ok(cmd) = rec_rx.try_recv() {
+            if let RecordingCommand::WriteAudio(samples) = cmd {
+                audio.push(samples);
+            }
+        }
+        audio
+    }
+
+    /// A track whose capture ends while the recording goes on -- its device
+    /// unplugged, say -- is noted as lost and goes on as silence, from where
+    /// its audio stopped, until the recording stops: a stream that stops
+    /// getting samples stalls the whole file.
+    #[tokio::test]
+    async fn a_track_whose_capture_ends_goes_on_as_silence_until_stopped() {
+        let (cap_tx, cap_rx) = mpsc::channel::<AudioSamples>(4);
+        let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(64);
+        let ctrl = CaptureControl::new();
+        let track = TrackId::new(1);
+        let pump = spawn_audio_pump(cap_rx, rec_tx, AudioLevel::default(), track, ctrl.clone());
+
+        // 10 ms of real audio, then the device is gone.
+        let start = ctrl.clock.elapsed();
+        cap_tx
+            .send(AudioSamples {
+                track_id: track,
+                pts: start,
+                samples: vec![0.5; 480 * 2],
+                sample_rate: 48000,
+                channels: 2,
+            })
+            .await
+            .unwrap();
+        drop(cap_tx);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        ctrl.request_stop();
+        pump.await.unwrap();
+
+        let audio = audio_from(&mut rec_rx);
+        let (real, silence) = audio.split_first().unwrap();
+        assert!(real.samples.iter().all(|&s| s == 0.5));
+        assert!(!silence.is_empty(), "no silence after the capture ended");
+        let mut covered_until = start + Duration::from_millis(10);
+        for chunk in silence {
+            assert_eq!(chunk.track_id, track);
+            assert_eq!(chunk.pts, covered_until, "silence isn't contiguous");
+            assert!(chunk.samples.iter().all(|&s| s == 0.0));
+            covered_until +=
+                Duration::from_nanos((chunk.samples.len() / 2) as u64 * 1_000_000_000 / 48000);
+        }
+        assert!(covered_until >= start + Duration::from_millis(300));
+        assert_eq!(ctrl.lost_sources().audio, vec![track]);
+    }
+
+    /// A capture that ends because the recording stopped isn't a lost
+    /// source, and adds no silence.
+    #[tokio::test]
+    async fn a_capture_ending_with_the_recording_adds_nothing() {
+        let (cap_tx, cap_rx) = mpsc::channel::<AudioSamples>(4);
+        let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(64);
+        let ctrl = CaptureControl::new();
+        let pump = spawn_audio_pump(
+            cap_rx,
+            rec_tx,
+            AudioLevel::default(),
+            TrackId::new(0),
+            ctrl.clone(),
+        );
+        ctrl.request_stop();
+        drop(cap_tx);
+        pump.await.unwrap();
+        assert!(audio_from(&mut rec_rx).is_empty());
+        assert_eq!(ctrl.lost_sources(), crate::capture::LostSources::default());
+    }
+
     #[tokio::test]
     async fn audio_keeps_flowing_while_video_slots_are_exhausted() {
         let (video_tx, video_rx) = mpsc::channel::<VideoFrame>(16);
         let (audio_tx, audio_rx) = mpsc::channel::<AudioSamples>(16);
         let (rec_tx, mut rec_rx) = mpsc::channel::<RecordingCommand>(64);
         let _video = spawn_video_pump(video_rx, rec_tx.clone(), Arc::new(AtomicU64::new(0)), 1);
-        let _audio = spawn_audio_pump(audio_rx, rec_tx, AudioLevel::default());
+        let _audio = spawn_audio_pump(
+            audio_rx,
+            rec_tx,
+            AudioLevel::default(),
+            TrackId::new(0),
+            CaptureControl::new(),
+        );
 
         video_tx.send(tiny_frame()).await.unwrap();
         video_tx.send(tiny_frame()).await.unwrap(); // blocked: no slot

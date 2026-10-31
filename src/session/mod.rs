@@ -98,6 +98,11 @@ impl ActiveCapture {
         self.pipeline.audio_levels()
     }
 
+    /// What the recording has lost so far -- see `capture::LostSources`.
+    pub fn lost_sources(&self) -> crate::capture::LostSources {
+        self.pipeline.ctrl.lost_sources()
+    }
+
     /// True once the recorder actor has exited on its own (e.g. its
     /// disk-full check tripped) rather than via `SessionManager::stop_capture`.
     pub fn recorder_finished(&self) -> bool {
