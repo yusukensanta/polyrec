@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- With the dashboard minimized, a global hotkey did nothing until the dashboard was restored, unless the overlay HUD happened to be up. Start, pause, stop and Highlight save now work right away, with the overlay HUD and the hotkey toast appearing as usual.
+
 ## [v0.5.106] - 2026-10-31
 
 ### Fixed
