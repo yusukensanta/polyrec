@@ -2,13 +2,14 @@ use crate::capture::CaptureControl;
 use crate::capture::device::D3dDevice;
 use crate::capture::frame_pool::{FrameBuf, FramePool};
 use crate::capture::frame_rate::{FrameRateLimiter, LiveFps};
+use crate::encode::gpu::GpuFrames;
 use crate::error::{AppError, ResultExt};
-use crate::types::{CaptureKind, VideoFrame};
+use crate::types::{CaptureKind, FrameData, VideoFrame};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+    Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -224,8 +225,9 @@ unsafe fn copy_rows(
 }
 
 /// Everything one video capture holds open for its whole run: the D3D11
-/// device, the WGC item / frame pool / session, the `Closed` signal, and the
-/// two ping-pong staging textures (see `ping_pong_indices`/`map_staging`).
+/// device, the WGC item / frame pool / session, the `Closed` signal, and --
+/// unless frames stay on the GPU -- the two ping-pong staging textures (see
+/// `ping_pong_indices`/`map_staging`).
 struct CaptureResources {
     device: D3dDevice,
     _item: GraphicsCaptureItem,
@@ -233,7 +235,9 @@ struct CaptureResources {
     session: GraphicsCaptureSession,
     /// Set by WGC's `GraphicsCaptureItem::Closed` -- see `open`.
     item_closed: Arc<std::sync::atomic::AtomicBool>,
-    staging: [ID3D11Resource; 2],
+    /// Empty when frames stay on the GPU (`FrameOutput::Gpu`), which never
+    /// reads them back.
+    staging: Vec<ID3D11Resource>,
     /// The caller-supplied capture size the frame pool and staging
     /// textures were created at.
     width: u32,
@@ -241,15 +245,24 @@ struct CaptureResources {
 }
 
 impl CaptureResources {
-    /// Creates the device, starts the capture session for `target`, and
-    /// creates both staging textures. Caller must have initialized COM.
+    /// Creates the device -- or uses `gpu`'s, which the encoder shares --,
+    /// starts the capture session for `target`, and creates both staging
+    /// textures unless frames stay on the GPU. Caller must have initialized
+    /// COM.
     fn open(
         target: CaptureTarget,
         (capture_width, capture_height): (u32, u32),
         show_border: bool,
         min_update_interval: std::time::Duration,
+        gpu: Option<&GpuFrames>,
     ) -> Result<Self, AppError> {
-        let device = D3dDevice::new()?;
+        let device = match gpu {
+            Some(gpu) => D3dDevice {
+                d3d_device: gpu.device.clone(),
+                d3d_context: gpu.context.clone(),
+            },
+            None => D3dDevice::new()?,
+        };
         let dxgi_device = device.dxgi_device()?;
 
         // CreateDirect3D11DeviceFromDXGIDevice returns IInspectable; cast to IDirect3DDevice.
@@ -370,7 +383,11 @@ impl CaptureResources {
                     .capture_ctx("cast staging to ID3D11Resource")
             }
         };
-        let staging: [ID3D11Resource; 2] = [create_staging(&device)?, create_staging(&device)?];
+        let staging = if gpu.is_some() {
+            Vec::new()
+        } else {
+            vec![create_staging(&device)?, create_staging(&device)?]
+        };
 
         Ok(Self {
             device,
@@ -392,20 +409,9 @@ impl CaptureResources {
     fn copy_into_staging(
         &self,
         slot: usize,
-        frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+        frame: &Direct3D11CaptureFrame,
     ) -> Result<(), AppError> {
-        let surface = frame.Surface().capture_ctx("frame.Surface")?;
-
-        // Obtain underlying D3D11 texture via IDirect3DDxgiInterfaceAccess.
-        let dxgi_access: IDirect3DDxgiInterfaceAccess = surface
-            .cast()
-            .capture_ctx("cast to IDirect3DDxgiInterfaceAccess")?;
-        let texture: ID3D11Texture2D = unsafe {
-            dxgi_access
-                .GetInterface()
-                .capture_ctx("GetInterface ID3D11Texture2D")?
-        };
-
+        let texture = frame_texture(frame)?;
         unsafe {
             let src_res: ID3D11Resource = texture
                 .cast()
@@ -494,6 +500,20 @@ impl CaptureResources {
     }
 }
 
+/// A captured frame's underlying D3D11 texture (WGC's own, recycled once
+/// the frame is dropped).
+fn frame_texture(frame: &Direct3D11CaptureFrame) -> Result<ID3D11Texture2D, AppError> {
+    let surface = frame.Surface().capture_ctx("frame.Surface")?;
+    let dxgi_access: IDirect3DDxgiInterfaceAccess = surface
+        .cast()
+        .capture_ctx("cast to IDirect3DDxgiInterfaceAccess")?;
+    unsafe {
+        dxgi_access
+            .GetInterface()
+            .capture_ctx("GetInterface ID3D11Texture2D")
+    }
+}
+
 /// Scales a read-back frame to the output size and sends it as the frame at
 /// `pts`. `false` once the receiver is gone.
 async fn send_frame(
@@ -510,7 +530,12 @@ async fn send_frame(
         output_width,
         output_height,
     );
-    tx.send(VideoFrame { pts, data }).await.is_ok()
+    tx.send(VideoFrame {
+        pts,
+        data: data.into(),
+    })
+    .await
+    .is_ok()
 }
 
 /// How long the video may go without a new frame before the newest one is
@@ -523,7 +548,10 @@ const STILL_FRAME_REPEAT: std::time::Duration = std::time::Duration::from_millis
 
 /// Captures `target` and sends its frames, at most `fps` per second (see
 /// `FrameRateLimiter`), until `ctrl` is stopped or the target goes away. The
-/// cap follows `fps` if the writer lowers it while running.
+/// cap follows `fps` if the writer lowers it while running. With `gpu`, the
+/// frames stay on the GPU (`FrameData::Gpu`, at `capture_size`) instead of
+/// being read back and scaled to `output_size`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_video_capture(
     target: CaptureTarget,
     capture_size: (u32, u32),
@@ -532,6 +560,7 @@ pub async fn run_video_capture(
     ctrl: CaptureControl,
     tx: mpsc::Sender<VideoFrame>,
     show_border: bool,
+    gpu: Option<GpuFrames>,
 ) -> Result<(), AppError> {
     unsafe {
         windows::Win32::System::Com::CoInitializeEx(
@@ -547,17 +576,28 @@ pub async fn run_video_capture(
     // Half a slot, not a whole one: a minimum interval of exactly 1/fps would
     // make WGC skip a frame whenever one lands a hair early against the
     // display's vsync, halving a 60 Hz source recorded at 60 fps.
-    let res = CaptureResources::open(target, capture_size, show_border, limiter.interval() / 2)?;
-    // Recycles each frame's pixel buffer once the encoder is done with it --
-    // see `FramePool`.
-    let pool = FramePool::new();
-    // pending[slot] is the pts of the frame most recently copied into that slot
-    // and not yet read back -- None means there's nothing unread there.
-    let mut pending: [Option<std::time::Duration>; 2] = [None, None];
-    let mut frame_counter: u64 = 0;
-    // The slot holding the newest frame, if one has come yet, and when a
-    // frame was last captured or sent again -- see `STILL_FRAME_REPEAT`.
-    let mut newest_slot: Option<usize> = None;
+    let res = CaptureResources::open(
+        target,
+        capture_size,
+        show_border,
+        limiter.interval() / 2,
+        gpu.as_ref(),
+    )?;
+    let sizes = (capture_size, output_size);
+    let mut output = match gpu {
+        Some(frames) => FrameOutput::Gpu {
+            frames,
+            newest: None,
+        },
+        None => FrameOutput::Cpu {
+            pool: FramePool::new(),
+            pending: [None, None],
+            frame_counter: 0,
+            newest_slot: None,
+        },
+    };
+    // When a frame was last captured or sent again -- see
+    // `STILL_FRAME_REPEAT`.
     let mut idle_since = std::time::Duration::ZERO;
 
     loop {
@@ -577,30 +617,7 @@ pub async fn run_video_capture(
                 let now = ctrl.clock.elapsed();
                 if !ctrl.is_paused() && now.saturating_sub(idle_since) >= STILL_FRAME_REPEAT {
                     idle_since = now;
-                    // The newest frame as itself if it's still waiting to be
-                    // read back (for a next frame that isn't coming), else
-                    // again as a frame of now.
-                    let pts = newest_slot
-                        .and_then(|slot| pending[slot].take())
-                        .or_else(|| limiter.admit(now).then_some(now));
-                    let Some(pts) = pts else { continue };
-                    let sent = match newest_slot {
-                        Some(slot) => match unsafe { res.read_back(slot, false, &pool)? } {
-                            Some(pixels) => {
-                                send_frame(&tx, pts, pixels, capture_size, output_size).await
-                            }
-                            None => true,
-                        },
-                        // No frame has come at all (a minimized window gives
-                        // none): black.
-                        None => {
-                            let (width, height) = output_size;
-                            let mut black = pool.take(width as usize * height as usize * 4);
-                            black.fill(0);
-                            tx.send(VideoFrame { pts, data: black }).await.is_ok()
-                        }
-                    };
-                    if !sent {
+                    if !output.repeat(&res, now, &mut limiter, &tx, sizes).await? {
                         break;
                     }
                     continue;
@@ -625,50 +642,201 @@ pub async fn run_video_capture(
         if !limiter.admit(pts) {
             continue;
         }
-
-        let (write_idx, read_idx) = ping_pong_indices(frame_counter);
-        frame_counter += 1;
-
-        res.copy_into_staging(write_idx, &frame)?;
-        pending[write_idx] = Some(pts);
-        newest_slot = Some(write_idx);
         idle_since = pts;
-
-        // Read back the slot copied last iteration -- see the ping-pong comment
-        // in `CaptureResources::open`. Non-blocking first (the GPU copy from
-        // last iteration has almost always finished by now), falling back to a
-        // blocking Map when the GPU genuinely hasn't caught up yet -- e.g.
-        // under heavy GPU load from a demanding game, exactly the case this is
-        // meant to help with. This fallback never blocks more than the
-        // original single-buffer implementation did on every frame; it only
-        // avoids the block when the GPU has already caught up.
-        if let Some(pts) = pending[read_idx].take()
-            && let Some(pixel_data) = unsafe { res.read_back(read_idx, true, &pool)? }
-            && !send_frame(&tx, pts, pixel_data, capture_size, output_size).await
-        {
+        if !output.on_frame(&res, &frame, pts, &tx, sizes).await? {
             break;
         }
     }
 
-    // The ping-pong readback above trails one iteration behind by design (see
-    // above), so the last frame copied before stopping was never read back in
-    // the loop -- flush it now. Blocking Map is fine here since we're already
-    // stopping, not racing a game's frame time.
-    let mut leftover: Vec<(std::time::Duration, usize)> = pending
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, pts)| pts.map(|pts| (pts, idx)))
-        .collect();
-    leftover.sort_by_key(|(pts, _)| *pts);
-    for (pts, idx) in leftover {
-        if let Some(pixel_data) = unsafe { res.read_back(idx, false, &pool)? } {
-            let _ = send_frame(&tx, pts, pixel_data, capture_size, output_size).await;
-        }
-    }
-
+    output.flush(&res, &tx, sizes).await?;
     res.close();
 
     Ok(())
+}
+
+/// How `run_video_capture` turns captured frames into `VideoFrame`s.
+enum FrameOutput {
+    /// Read back into system memory and scaled to the output size on the
+    /// CPU.
+    Cpu {
+        /// Recycles each frame's pixel buffer once the encoder is done with
+        /// it -- see `FramePool`.
+        pool: Arc<FramePool>,
+        /// `pending[slot]` is the pts of the frame most recently copied into
+        /// that staging slot and not yet read back -- None means there's
+        /// nothing unread there.
+        pending: [Option<std::time::Duration>; 2],
+        frame_counter: u64,
+        /// The slot holding the newest frame, if one has come yet.
+        newest_slot: Option<usize>,
+    },
+    /// Copied into a texture of its own each and sent as that -- see
+    /// `encode::gpu`.
+    Gpu {
+        frames: GpuFrames,
+        /// The newest frame's texture (or a black one), if one has been sent.
+        newest: Option<ID3D11Texture2D>,
+    },
+}
+
+/// (capture size, output size).
+type FrameSizes = ((u32, u32), (u32, u32));
+
+impl FrameOutput {
+    /// Handles a newly captured frame, admitted as the frame at `pts`.
+    /// `Ok(false)` once the receiver is gone.
+    async fn on_frame(
+        &mut self,
+        res: &CaptureResources,
+        frame: &Direct3D11CaptureFrame,
+        pts: std::time::Duration,
+        tx: &mpsc::Sender<VideoFrame>,
+        (capture_size, output_size): FrameSizes,
+    ) -> Result<bool, AppError> {
+        match self {
+            Self::Cpu {
+                pool,
+                pending,
+                frame_counter,
+                newest_slot,
+            } => {
+                let (write_idx, read_idx) = ping_pong_indices(*frame_counter);
+                *frame_counter += 1;
+
+                res.copy_into_staging(write_idx, frame)?;
+                pending[write_idx] = Some(pts);
+                *newest_slot = Some(write_idx);
+
+                // Read back the slot copied last iteration -- see the
+                // ping-pong comment in `CaptureResources::open`.
+                // Non-blocking first (the GPU copy from last iteration has
+                // almost always finished by now), falling back to a blocking
+                // Map when the GPU genuinely hasn't caught up yet -- e.g.
+                // under heavy GPU load from a demanding game, exactly the
+                // case this is meant to help with. This fallback never
+                // blocks more than the original single-buffer implementation
+                // did on every frame; it only avoids the block when the GPU
+                // has already caught up.
+                if let Some(pts) = pending[read_idx].take()
+                    && let Some(pixel_data) = unsafe { res.read_back(read_idx, true, pool)? }
+                {
+                    return Ok(send_frame(tx, pts, pixel_data, capture_size, output_size).await);
+                }
+                Ok(true)
+            }
+            Self::Gpu { frames, newest } => {
+                // A copy, since WGC reuses its own texture for a later frame
+                // while the encoder may still be reading this one.
+                let texture = frames.copy_of(&frame_texture(frame)?)?;
+                *newest = Some(texture.clone());
+                Ok(send_texture(tx, pts, texture).await)
+            }
+        }
+    }
+
+    /// Nothing new has come for `STILL_FRAME_REPEAT`: keeps the video going
+    /// with the newest frame -- as itself if it's still waiting to be read
+    /// back (for a next frame that isn't coming), else again as a frame of
+    /// `now` -- or, before any frame has come at all (a minimized window
+    /// gives none), a black one. `Ok(false)` once the receiver is gone.
+    async fn repeat(
+        &mut self,
+        res: &CaptureResources,
+        now: std::time::Duration,
+        limiter: &mut FrameRateLimiter,
+        tx: &mpsc::Sender<VideoFrame>,
+        (capture_size, output_size): FrameSizes,
+    ) -> Result<bool, AppError> {
+        match self {
+            Self::Cpu {
+                pool,
+                pending,
+                newest_slot,
+                ..
+            } => {
+                let pts = newest_slot
+                    .and_then(|slot| pending[slot].take())
+                    .or_else(|| limiter.admit(now).then_some(now));
+                let Some(pts) = pts else { return Ok(true) };
+                match *newest_slot {
+                    Some(slot) => match unsafe { res.read_back(slot, false, pool)? } {
+                        Some(pixels) => {
+                            Ok(send_frame(tx, pts, pixels, capture_size, output_size).await)
+                        }
+                        None => Ok(true),
+                    },
+                    None => {
+                        let (width, height) = output_size;
+                        let mut black = pool.take(width as usize * height as usize * 4);
+                        black.fill(0);
+                        Ok(tx
+                            .send(VideoFrame {
+                                pts,
+                                data: black.into(),
+                            })
+                            .await
+                            .is_ok())
+                    }
+                }
+            }
+            Self::Gpu { frames, newest } => {
+                if !limiter.admit(now) {
+                    return Ok(true);
+                }
+                let texture = match newest {
+                    Some(texture) => texture.clone(),
+                    None => newest
+                        .insert(frames.black_texture(capture_size.0, capture_size.1)?)
+                        .clone(),
+                };
+                // Sending the same texture again is fine: nothing writes to
+                // a frame's texture once it's been sent.
+                Ok(send_texture(tx, now, texture).await)
+            }
+        }
+    }
+
+    /// Capture stopped: sends what's still waiting to be read back. The
+    /// ping-pong readback trails one iteration behind by design, so the last
+    /// frame copied before stopping was never read back in the loop.
+    /// Blocking Map is fine here since we're already stopping, not racing a
+    /// game's frame time.
+    async fn flush(
+        &mut self,
+        res: &CaptureResources,
+        tx: &mpsc::Sender<VideoFrame>,
+        (capture_size, output_size): FrameSizes,
+    ) -> Result<(), AppError> {
+        let Self::Cpu { pool, pending, .. } = self else {
+            return Ok(());
+        };
+        let mut leftover: Vec<(std::time::Duration, usize)> = pending
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, pts)| pts.map(|pts| (pts, idx)))
+            .collect();
+        leftover.sort_by_key(|(pts, _)| *pts);
+        for (pts, idx) in leftover {
+            if let Some(pixel_data) = unsafe { res.read_back(idx, false, pool)? } {
+                let _ = send_frame(tx, pts, pixel_data, capture_size, output_size).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Sends a frame that stays on the GPU. `false` once the receiver is gone.
+async fn send_texture(
+    tx: &mpsc::Sender<VideoFrame>,
+    pts: std::time::Duration,
+    texture: ID3D11Texture2D,
+) -> bool {
+    tx.send(VideoFrame {
+        pts,
+        data: FrameData::Gpu(texture),
+    })
+    .await
+    .is_ok()
 }
 
 #[cfg(test)]
@@ -892,6 +1060,7 @@ mod tests {
         (kind, handle): (CaptureKind, usize),
         fps: u32,
         secs: u64,
+        gpu: Option<GpuFrames>,
     ) -> (u64, std::time::Duration) {
         let target = CaptureTarget::from_raw(kind, handle);
         let (w, h) = query_capture_size(target).expect("query_capture_size");
@@ -899,6 +1068,7 @@ mod tests {
         let ctrl = CaptureControl::new();
         let (tx, mut rx) = mpsc::channel(256);
         let capture_ctrl = ctrl.clone();
+        let expect_gpu = gpu.is_some();
         let cpu_before = process_cpu_time();
         let capture = std::thread::spawn(move || {
             let target = CaptureTarget::from_raw(kind, handle);
@@ -914,12 +1084,17 @@ mod tests {
                     capture_ctrl,
                     tx,
                     false,
+                    gpu,
                 ))
         });
+        // Only frames in the expected form count: textures with `gpu`,
+        // memory buffers without.
         let counter = std::thread::spawn(move || {
             let mut frames = 0u64;
-            while rx.blocking_recv().is_some() {
-                frames += 1;
+            while let Some(frame) = rx.blocking_recv() {
+                if matches!(frame.data, FrameData::Gpu(_)) == expect_gpu {
+                    frames += 1;
+                }
             }
             frames
         });
@@ -943,7 +1118,7 @@ mod tests {
         const SECS: u64 = 3;
         let window = SlidingBarWindow::spawn_still();
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let (frames, _) = capture_for((CaptureKind::Window, window.hwnd), 30, SECS);
+        let (frames, _) = capture_for((CaptureKind::Window, window.hwnd), 30, SECS, None);
         let expected = (std::time::Duration::from_secs(SECS).as_millis()
             / STILL_FRAME_REPEAT.as_millis()) as u64;
         println!("still window: {frames} frames in {SECS} s (repeats due: {expected})");
@@ -965,7 +1140,7 @@ mod tests {
         let hwnd = HWND(window.hwnd as *mut core::ffi::c_void);
         let _ = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let (frames, _) = capture_for((CaptureKind::Window, window.hwnd), 30, SECS);
+        let (frames, _) = capture_for((CaptureKind::Window, window.hwnd), 30, SECS, None);
         let expected = (std::time::Duration::from_secs(SECS).as_millis()
             / STILL_FRAME_REPEAT.as_millis()) as u64;
         println!("minimized window: {frames} frames in {SECS} s (due: {expected})");
@@ -998,7 +1173,7 @@ mod tests {
         let cpu_ms_per_sec = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / SECS as f64;
         let mut runs = Vec::new();
         for fps in [1000, 60, FPS] {
-            let (frames, cpu) = capture_for(target, fps, SECS);
+            let (frames, cpu) = capture_for(target, fps, SECS, None);
             println!(
                 "cap {fps:>4}: {:>5.1} fps delivered, {:>4.0} ms CPU/s",
                 per_sec(frames),
@@ -1020,6 +1195,122 @@ mod tests {
         assert!(
             capped >= budget * 8 / 10,
             "{capped} frames in {SECS} s at {FPS} fps"
+        );
+    }
+
+    /// Frames that stay on the GPU come through as textures (`capture_for`
+    /// only counts those): at the capped rate from a window that changes
+    /// every millisecond, and as repeats from a still one. Shows small
+    /// windows in the top-left corner for ~6 s, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn gpu_frames_arrive_as_textures() {
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+        const SECS: u64 = 3;
+        const FPS: u32 = 30;
+        let gpu = GpuFrames::new().expect("GpuFrames");
+
+        let sliding = SlidingBarWindow::spawn();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let hwnd = HWND(sliding.hwnd as *mut core::ffi::c_void);
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        let (frames, cpu) = capture_for(
+            (CaptureKind::Monitor, monitor.0 as usize),
+            FPS,
+            SECS,
+            Some(gpu.clone()),
+        );
+        println!("gpu, changing display: {frames} frames in {SECS} s, {cpu:?} CPU");
+        let budget = u64::from(FPS) * SECS;
+        assert!(
+            (budget * 8 / 10..=budget + 2).contains(&frames),
+            "{frames} frames in {SECS} s at {FPS} fps"
+        );
+        drop(sliding);
+
+        let still = SlidingBarWindow::spawn_still();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (frames, _) = capture_for((CaptureKind::Window, still.hwnd), FPS, SECS, Some(gpu));
+        let expected = (std::time::Duration::from_secs(SECS).as_millis()
+            / STILL_FRAME_REPEAT.as_millis()) as u64;
+        println!("gpu, still window: {frames} frames in {SECS} s (repeats due: {expected})");
+        assert!(
+            frames >= expected - 2,
+            "{frames} frames from a still window"
+        );
+    }
+
+    /// What keeping frames on the GPU saves: records the display the
+    /// top-left corner is on (where a window changing every millisecond
+    /// keeps frames coming at the full rate) through the real session, at
+    /// the display's own resolution and 60 fps, once each way, and compares
+    /// the process's CPU time. Both recordings must finish and hold video.
+    /// Takes ~15 s and shows a small window, so it's ignored by default.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn gpu_frames_record_with_less_cpu() {
+        use crate::session::{CaptureInputs, EncodeSettings, SessionManager};
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+        const SECS: u64 = 5;
+
+        let sliding = SlidingBarWindow::spawn();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let hwnd = HWND(sliding.hwnd as *mut core::ffi::c_void);
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) }.0 as usize;
+        let source = crate::sources::enumerate_sources()
+            .into_iter()
+            .find(|s| s.kind == CaptureKind::Monitor && s.hwnd == monitor)
+            .expect("the display source");
+        let dir = tempfile::tempdir().unwrap();
+        let mut cpu_ms_per_sec = Vec::new();
+        for gpu_frames in [false, true] {
+            let frame_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut sm = SessionManager::new();
+            let inputs = CaptureInputs {
+                encode: EncodeSettings {
+                    fps: 60,
+                    gpu_frames,
+                    ..EncodeSettings::default()
+                },
+                ..CaptureInputs::default()
+            };
+            sm.start_capture(
+                source.clone(),
+                inputs,
+                false,
+                Arc::clone(&frame_count),
+                dir.path(),
+                crate::recording_naming::RecordingNaming::CustomPrefix(format!("gpu_{gpu_frames}")),
+            )
+            .expect("start_capture");
+            // Settle past the writer's start-up before measuring.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let (frames_before, cpu_before) = (
+                frame_count.load(std::sync::atomic::Ordering::Relaxed),
+                process_cpu_time(),
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(SECS)).await;
+            let cpu = process_cpu_time() - cpu_before;
+            let frames = frame_count.load(std::sync::atomic::Ordering::Relaxed) - frames_before;
+            let handle = tokio::task::block_in_place(|| sm.stop_capture()).expect("stop_capture");
+            let path = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+                .await
+                .expect("finalizing took over 10 s")
+                .expect("recorder task panicked")
+                .expect("finalize failed");
+            let size = std::fs::metadata(&path).unwrap().len();
+            let per_sec = cpu.as_secs_f64() * 1000.0 / SECS as f64;
+            println!(
+                "gpu_frames={gpu_frames}: {} fps recorded, {per_sec:.0} ms CPU/s, {size} bytes",
+                frames / SECS
+            );
+            assert!(frames / SECS >= 40, "only {frames} frames in {SECS} s");
+            assert!(size > 100_000, "{size}-byte recording");
+            cpu_ms_per_sec.push(per_sec);
+        }
+        assert!(
+            cpu_ms_per_sec[1] < cpu_ms_per_sec[0],
+            "GPU frames took more CPU: {cpu_ms_per_sec:?} ms/s"
         );
     }
 }

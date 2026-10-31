@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Keep frames on the GPU (experimental)**, a new checkbox in **⚙ Quality**, off by default. With the hardware encoder, each captured frame goes to the encoder as a GPU texture instead of being copied through system memory, and the encoder does any scaling. Recording a 60 fps display took about 73% less CPU in testing (231 → 62 ms of CPU per second). If the encoder doesn't take textures, the recording falls back to the usual way.
+
 ## [v0.5.110] - 2026-10-31
 
 ### Fixed

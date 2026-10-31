@@ -34,6 +34,8 @@ pub struct EncodeSettings {
     pub resolution_mode: ResolutionMode,
     pub bitrate_mode: BitrateMode,
     pub encoder_mode: EncoderMode,
+    /// See `EncodeConfig::gpu_frames`.
+    pub gpu_frames: bool,
 }
 
 impl Default for EncodeSettings {
@@ -45,6 +47,7 @@ impl Default for EncodeSettings {
             resolution_mode: d.resolution_mode(),
             bitrate_mode: d.bitrate_mode(),
             encoder_mode: d.encoder_mode,
+            gpu_frames: d.gpu_frames,
         }
     }
 }
@@ -1419,6 +1422,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn highlight_buffering_saves_a_playable_file() {
+        highlight_saves_a_playable_file(false).await;
+    }
+
+    /// `highlight_buffering_saves_a_playable_file` with the frames kept on
+    /// the GPU (`EncodeConfig::gpu_frames`): every rotated segment's writer
+    /// takes them as textures. Ignored by default for the same reasons.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn highlight_buffering_with_gpu_frames_saves_a_playable_file() {
+        highlight_saves_a_playable_file(true).await;
+    }
+
+    async fn highlight_saves_a_playable_file(gpu_frames: bool) {
         use crate::capture::audio::enumerate_audio_devices;
         use crate::sources::enumerate_sources;
 
@@ -1429,13 +1445,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut sm = SessionManager::new();
-        sm.start_highlight_buffering(
-            &source,
-            inputs(audio_devices, vec![], false),
-            dir.path(),
-            30,
-        )
-        .expect("start_highlight_buffering failed");
+        let mut inputs = inputs(audio_devices, vec![], false);
+        inputs.encode.gpu_frames = gpu_frames;
+        sm.start_highlight_buffering(&source, inputs, dir.path(), 30)
+            .expect("start_highlight_buffering failed");
         assert!(sm.is_highlighting());
         assert_eq!(sm.highlight_hwnd(), Some(source.hwnd));
 

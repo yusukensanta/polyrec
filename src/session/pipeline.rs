@@ -19,6 +19,7 @@ use crate::capture::video::{
 };
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_video_pump};
+use crate::encode::gpu::{GpuFrames, GpuInput};
 use crate::encode::writer::{video_bitrate_bps, video_encoder_accepts};
 use crate::encode::{EncoderParams, RecordingCommand};
 use crate::error::AppError;
@@ -83,6 +84,9 @@ pub(super) struct CaptureDimensions {
     /// requested rate clamped to the display (`effective_fps`), lowered by
     /// the writer actor if the encoder turns it down (`LiveFps`).
     pub fps: LiveFps,
+    /// The device frames stay on, when they do -- see
+    /// `EncodeConfig::gpu_frames` and `gpu_frames_for`.
+    pub gpu: Option<GpuFrames>,
 }
 
 impl CaptureDimensions {
@@ -117,11 +121,17 @@ impl CaptureDimensions {
                 encode.fps
             );
         }
+        let bitrate_bps = bitrate_bps(encode, output, fps);
+        let gpu = encode
+            .gpu_frames
+            .then(|| gpu_frames_for(encode, capture, output, fps, bitrate_bps))
+            .flatten();
         Self {
             capture,
             output,
-            bitrate_bps: bitrate_bps(encode, output, fps),
+            bitrate_bps,
             fps: LiveFps::new(fps),
+            gpu,
         }
     }
 
@@ -130,6 +140,10 @@ impl CaptureDimensions {
     pub(super) fn encoder_params(&self, inputs: &CaptureInputs) -> EncoderParams {
         EncoderParams {
             audio_tracks: inputs.audio_track_specs(),
+            gpu: self.gpu.clone().map(|frames| GpuInput {
+                frames,
+                size: self.capture,
+            }),
             ..video_params(
                 &inputs.encode,
                 self.output,
@@ -211,7 +225,44 @@ fn video_params(
         bitrate_bps,
         audio_tracks: Vec::new(),
         allow_hardware_encode: matches!(encode.encoder_mode, EncoderMode::Hardware),
+        gpu: None,
     }
+}
+
+/// The device for keeping a recording's frames on the GPU (see
+/// `EncodeConfig::gpu_frames`), if that works here: only a hardware encoder
+/// takes textures, and the encoder has to accept them at these settings
+/// (probed once, then cached -- see `video_encoder_accepts`). `None` falls
+/// back to the usual path. Creating the device and, the first time, an
+/// encoder takes a moment on the calling thread; the setting is
+/// experimental and off by default.
+fn gpu_frames_for(
+    encode: &EncodeSettings,
+    capture: (u32, u32),
+    output: (u32, u32),
+    fps: u32,
+    bitrate_bps: u32,
+) -> Option<GpuFrames> {
+    if !matches!(encode.encoder_mode, EncoderMode::Hardware) {
+        tracing::info!("frames stay in system memory: GPU frames need the hardware encoder");
+        return None;
+    }
+    let frames = GpuFrames::new()
+        .inspect_err(|e| tracing::warn!("frames stay in system memory: {e}"))
+        .ok()?;
+    let params = EncoderParams {
+        gpu: Some(GpuInput {
+            frames: frames.clone(),
+            size: capture,
+        }),
+        ..video_params(encode, output, fps, bitrate_bps)
+    };
+    if !video_encoder_accepts(&params) {
+        tracing::warn!("frames stay in system memory: the encoder doesn't take them as textures");
+        return None;
+    }
+    tracing::info!("frames stay on the GPU ({capture:?} scaled to {output:?} by the encoder)");
+    Some(frames)
 }
 
 /// Whether the encoder `encode` selects takes video at `output` and `fps`.
@@ -359,6 +410,7 @@ impl CapturePipeline {
                 ctrl,
                 video_tx,
                 show_border,
+                dims.gpu,
             )
         });
         let pump = spawn_video_pump(
@@ -645,6 +697,7 @@ mod tests {
             output: (1280, 720),
             bitrate_bps: 5_000_000,
             fps: LiveFps::new(144),
+            gpu: None,
         };
         let params = dims.encoder_params(&inputs);
         assert_eq!((params.width, params.height), (1280, 720));
