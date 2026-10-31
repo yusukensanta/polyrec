@@ -220,6 +220,16 @@ pub struct Strings {
     pub toast_resumed: &'static str,
     pub toast_highlight_off: &'static str,
 
+    // Notification-area icon (see `ui::dashboard::tray`)
+    pub tray_show: &'static str,
+    pub tray_hide: &'static str,
+    /// Start item while nothing can be recorded yet (disabled).
+    pub tray_start: &'static str,
+    /// Start item with a source selected; "{source}" is its title.
+    pub tray_start_source_template: &'static str,
+    pub tray_stop: &'static str,
+    pub tray_quit: &'static str,
+
     // Audio popup
     pub audio_title: &'static str,
 
@@ -422,6 +432,13 @@ pub static EN: Strings = Strings {
     toast_resumed: "▶ Resumed",
     toast_highlight_off: "Highlight isn't on",
 
+    tray_show: "Show PolyRec",
+    tray_hide: "Hide PolyRec",
+    tray_start: "Start recording",
+    tray_start_source_template: "Start recording: {source}",
+    tray_stop: "Stop recording",
+    tray_quit: "Quit PolyRec",
+
     audio_title: "Audio Sources",
 
     quality_title: "Quality Settings",
@@ -587,6 +604,13 @@ pub static JA: Strings = Strings {
     toast_paused: "⏸ 一時停止",
     toast_resumed: "▶ 再開",
     toast_highlight_off: "ハイライトは無効です",
+
+    tray_show: "PolyRec を表示",
+    tray_hide: "PolyRec を隠す",
+    tray_start: "録画開始",
+    tray_start_source_template: "録画開始: {source}",
+    tray_stop: "録画停止",
+    tray_quit: "PolyRec を終了",
 
     audio_title: "オーディオソース",
 

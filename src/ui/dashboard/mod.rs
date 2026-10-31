@@ -13,6 +13,7 @@ mod recent;
 mod state;
 mod theme;
 mod toast;
+mod tray;
 mod util;
 mod widgets;
 
@@ -141,6 +142,12 @@ pub struct App {
     /// The acknowledgement for the last global hotkey, shown briefly while
     /// the dashboard isn't focused -- see `toast`.
     toast: Option<toast::Toast>,
+    /// The notification-area icon; `None` if Windows wouldn't take one
+    /// (logged), which leaves everything else working as before.
+    tray: Option<tray::Tray>,
+    /// Whether the dashboard was hidden through the tray -- see
+    /// `App::dashboard_shown`.
+    dashboard_hidden: bool,
     /// Set while the Hotkeys popup is waiting for the user to press a key to
     /// bind, after clicking "Change" for that row.
     recording_hotkey: Option<HotkeySlot>,
@@ -201,6 +208,10 @@ impl App {
             &config.hotkeys.save_highlight,
             move || wake_ctx.request_repaint(),
         );
+        let wake_ctx = cc.egui_ctx.clone();
+        let tray = tray::Tray::new(move || wake_ctx.request_repaint())
+            .inspect_err(|e| tracing::warn!("no tray icon: {e}"))
+            .ok();
 
         // Fire-and-forget: checked once at startup, polled in `update()`. Any failure
         // (offline, GitHub unreachable, no releases yet) just means no banner shows —
@@ -249,6 +260,8 @@ impl App {
             error_message: None,
             notice: None,
             toast: None,
+            tray,
+            dashboard_hidden: false,
             recording_hotkey: None,
             hotkey_capture_warning: None,
             last_window_pos: None,
@@ -272,6 +285,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let s: &'static Strings = self.config.lang().strings();
         self.poll_background_work(ctx, s);
+        self.poll_tray(ctx, s);
         self.request_repaints(ctx);
         self.request_ui_for_new_windows_while_minimized(ctx);
     }

@@ -26,6 +26,19 @@ impl App {
         self.last_recording_audio_labels.len()
     }
 
+    /// Why REC (and the tray's Start item) can't start a recording right
+    /// now, if it can't. REC used to do nothing at all when clicked without
+    /// a source, and only failed on start with an unusable output folder;
+    /// now it says what's missing instead.
+    pub(super) fn rec_blocked_reason(&self, s: &'static Strings) -> Option<&'static str> {
+        if self.selected_source.is_none() {
+            Some(s.rec_needs_source_tooltip)
+        } else {
+            self.output_dir_problem
+                .map(|problem| output_dir_problem_text(problem, s))
+        }
+    }
+
     /// The dismissible notice strip at the top of the Status panel -- see
     /// `notice`. The text wraps beside a ✕ that clears it.
     fn render_notice(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
@@ -553,15 +566,7 @@ impl App {
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
-                    // REC used to do nothing at all when clicked without a
-                    // source, and only failed on start with an unusable
-                    // output folder; now it says what's missing instead.
-                    let blocked = if self.selected_source.is_none() {
-                        Some(s.rec_needs_source_tooltip)
-                    } else {
-                        self.output_dir_problem
-                            .map(|problem| output_dir_problem_text(problem, s))
-                    };
+                    let blocked = self.rec_blocked_reason(s);
                     let rec = ui.add_enabled(blocked.is_none(), btn);
                     if let Some(reason) = blocked {
                         rec.on_disabled_hover_text(reason);
