@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopping a recording, or Highlight buffering, no longer waits on the dashboard's own thread for the recorder to finish. If the recorder ever stalls again, as it did on a still window before v0.5.108, PolyRec stays responsive and the save finishes once the recorder does, instead of the whole app freezing on Stop.
+
 ## [v0.5.109] - 2026-10-31
 
 ### Added

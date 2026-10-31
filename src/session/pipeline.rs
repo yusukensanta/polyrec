@@ -481,22 +481,34 @@ impl CapturePipeline {
         level
     }
 
+    /// A pipeline whose one capture loop never ends, as if stuck sending
+    /// to an actor that has stopped taking frames.
+    #[cfg(test)]
+    pub(super) fn stuck() -> Self {
+        Self {
+            ctrl: CaptureControl::new(),
+            capture_handles: vec![tokio::spawn(std::future::pending())],
+            pump_handles: Vec::new(),
+            audio_levels: Vec::new(),
+        }
+    }
+
     /// Signals every capture loop to exit, then waits for each loop to
     /// actually return and for the pump tasks forwarding their output to
     /// drain and exit in turn (a pump exits once its capture loop's sender is
-    /// dropped, which happens when the loop returns). Bounded by the capture
-    /// loops' own shutdown time -- at most on the order of one frame, not the
-    /// recording's length -- not blocking indefinitely.
-    pub(super) fn shutdown(self) {
+    /// dropped, which happens when the loop returns). Normally on the order
+    /// of one frame -- but a loop blocked sending to an actor that has
+    /// stopped taking frames only returns once that actor does, so this is
+    /// never waited on from the dashboard's thread (see
+    /// `SessionManager::stop_capture`).
+    pub(super) async fn shutdown(self) {
         self.ctrl.request_stop();
-        tokio::runtime::Handle::current().block_on(async {
-            for h in self.capture_handles {
-                let _ = h.await;
-            }
-            for h in self.pump_handles {
-                let _ = h.await;
-            }
-        });
+        for h in self.capture_handles {
+            let _ = h.await;
+        }
+        for h in self.pump_handles {
+            let _ = h.await;
+        }
     }
 }
 
