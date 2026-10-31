@@ -230,25 +230,38 @@ impl SessionManager {
     }
 
     /// Stops all capture and recording actors and moves back to `Idle`. Sends Stop to the
-    /// recorder so it finalizes. Returns the recorder's `JoinHandle` so the caller can wait
-    /// for finalization to complete before treating the output file as ready (see
-    /// recorder-finalize-race design spec).
+    /// recorder so it finalizes. Returns a `JoinHandle` that finishes with the recorder, so
+    /// the caller can wait for finalization to complete before treating the output file as
+    /// ready (see recorder-finalize-race design spec).
+    ///
+    /// Returns at once: the stopping itself runs in the background. It used to run right
+    /// here, on the dashboard's thread -- so when the recorder stalled (as it did on a
+    /// still window, #204), waiting for it froze the whole app on Stop, and the save with
+    /// it.
     pub fn stop_capture(&mut self) -> Option<JoinHandle<Result<PathBuf, AppError>>> {
         self.apply(SessionAction::Stop);
         let active = self.active.take()?;
-        // The capture loops must have fully drained into the recorder
-        // *before* `Stop` is sent below: `Stop` used to be sent immediately,
-        // which could reach the recorder and trigger `finalize()` before a
-        // still-in-flight frame had been forwarded by its pump, silently
-        // dropping it from the output. Video capture trails its
-        // last-captured frame by up to one iteration by design (see the
-        // ping-pong buffering in `capture::video`), so without this wait that
-        // final frame was frequently lost -- reproduced by a real short
-        // recording ending up with zero video frames.
-        active.pipeline.shutdown();
-        // Deliver Stop to recorder; blocking_send is safe from non-async context
-        let _ = active.recording_tx.blocking_send(RecordingCommand::Stop);
-        Some(active.recorder_handle)
+        Some(tokio::spawn(async move {
+            // The capture loops must have fully drained into the recorder
+            // *before* `Stop` is sent below: `Stop` used to be sent
+            // immediately, which could reach the recorder and trigger
+            // `finalize()` before a still-in-flight frame had been forwarded
+            // by its pump, silently dropping it from the output. Video
+            // capture trails its last-captured frame by up to one iteration
+            // by design (see the ping-pong buffering in `capture::video`), so
+            // without this wait that final frame was frequently lost --
+            // reproduced by a real short recording ending up with zero video
+            // frames.
+            active.pipeline.shutdown().await;
+            let _ = active.recording_tx.send(RecordingCommand::Stop).await;
+            match active.recorder_handle.await {
+                Ok(result) => result,
+                // Re-raised, so the caller sees a panicked recorder as one,
+                // the same as before this ran in a task of its own.
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => Err(AppError::Encode(format!("recorder task: {e}"))),
+            }
+        }))
     }
 
     pub fn is_recording(&self) -> bool {
@@ -379,19 +392,24 @@ impl SessionManager {
     /// snapshot while the actor goes on to write one more file to a
     /// directory the caller believes is now empty (caught via a real
     /// end-to-end run, not just the isolated unit tests).
-    pub fn stop_highlight_buffering(&mut self, discard: bool) {
-        if let Some(active) = self.highlight.take() {
+    ///
+    /// Like `stop_capture`, returns at once and stops in the background; the
+    /// returned handle finishes once that's done (segments discarded too,
+    /// with `discard`).
+    pub fn stop_highlight_buffering(&mut self, discard: bool) -> Option<JoinHandle<()>> {
+        let active = self.highlight.take()?;
+        Some(tokio::spawn(async move {
             // See the matching comment in `stop_capture` -- waited on (not
             // aborted) so the capture loops' final in-flight frames reach the
             // highlight actor before `Stop` does, instead of being silently
             // dropped by a `Stop` that got there first.
-            active.pipeline.shutdown();
-            let _ = active.highlight_tx.blocking_send(RecordingCommand::Stop);
+            active.pipeline.shutdown().await;
+            let _ = active.highlight_tx.send(RecordingCommand::Stop).await;
             if discard {
-                let _ = tokio::runtime::Handle::current().block_on(active.highlight_handle);
+                let _ = active.highlight_handle.await;
                 crate::highlight::discard_segments(&active.segments);
             }
-        }
+        }))
     }
 
     /// Forces the currently-open segment to finalize immediately (so the
@@ -527,6 +545,49 @@ mod tests {
 
     /// Every device/app at unity gain with the default encode settings --
     /// what the e2e tests below record with.
+    /// A manual recording whose capture loop and recorder never finish --
+    /// the shape of every recorder stall so far, like the still-window one
+    /// fixed in #204.
+    fn stuck_recording() -> ActiveCapture {
+        let (recording_tx, _recording_rx) = mpsc::channel(1);
+        ActiveCapture {
+            pipeline: CapturePipeline::stuck(),
+            recorder_handle: tokio::spawn(std::future::pending()),
+            recording_tx,
+            output_path: PathBuf::from("stuck.tmp.mp4"),
+            output_dir: PathBuf::new(),
+            app_name: String::new(),
+            naming: RecordingNaming::ProcessName,
+            disk_full_flag: Arc::new(AtomicBool::new(false)),
+            hwnd: 0,
+            kind: CaptureKind::Window,
+            fps: LiveFps::new(60),
+        }
+    }
+
+    /// Stop must hand back at once even when the recorder is stuck: it runs
+    /// on the dashboard's thread, which used to wait for the capture loops
+    /// and the recorder there -- so a stalled recorder froze the whole app
+    /// on Stop, and the save with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_returns_at_once_even_with_a_stuck_recorder() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        tokio::task::spawn_blocking(move || {
+            let mut sm = SessionManager::new();
+            sm.active = Some(stuck_recording());
+            sm.state = SessionState::Recording;
+            let handle = sm.stop_capture();
+            let _ = done_tx.send((handle.is_some(), sm.state().clone()));
+            // Kept alive so the test checks the stop itself, not cleanup.
+            std::mem::forget(handle);
+        });
+        let (got_handle, state) = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stop_capture blocked on the stuck recorder");
+        assert!(got_handle);
+        assert_eq!(state, SessionState::Idle);
+    }
+
     fn inputs(
         devices: Vec<AudioDevice>,
         app_sources: Vec<AppAudioSource>,
@@ -1420,7 +1481,10 @@ mod tests {
             .expect("saved highlight file isn't a readable MP4");
         println!("highlight audio tracks: {audio_tracks}");
 
-        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true));
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true))
+            .expect("was buffering")
+            .await
+            .expect("stopping panicked");
         assert!(!sm.is_highlighting());
         assert!(
             !segment_dir.exists() || std::fs::read_dir(&segment_dir).unwrap().count() == 0,
@@ -1467,7 +1531,10 @@ mod tests {
 
         // Pause (discard: false) -- as `refresh_highlight_buffering` does
         // right before a manual recording starts.
-        tokio::task::block_in_place(|| sm.stop_highlight_buffering(false));
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(false))
+            .expect("was buffering")
+            .await
+            .expect("stopping panicked");
         assert!(!sm.is_highlighting());
         let files_immediately_after_pause = std::fs::read_dir(&segment_dir).unwrap().count();
         assert_eq!(
@@ -1495,6 +1562,9 @@ mod tests {
             files_right_after_resume.len()
         );
 
-        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true));
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true))
+            .expect("was buffering")
+            .await
+            .expect("stopping panicked");
     }
 }
