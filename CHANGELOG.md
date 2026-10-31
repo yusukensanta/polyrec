@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recordings of a mostly still screen now have a keyframe at least every two seconds, where the encoder alone placed one every ten seconds or more. Seeking in a player is quicker, and a Highlight save's start lands closer to the requested length. At the full frame rate nothing changes (one keyframe a second, none added).
+
 ## [v0.5.105] - 2026-10-31
 
 ### Added
