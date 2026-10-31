@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.117] - 2026-10-31
+
 ### Fixed
 
 - A video encoder that won't take PolyRec's keyframe spacing now gets a keyframe forced every 2 seconds. Before, PolyRec assumed it had taken the spacing, so at the full frame rate keyframes could end up far apart, which makes seeking and Highlight cuts coarse.
