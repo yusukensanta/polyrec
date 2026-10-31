@@ -10,20 +10,80 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER};
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaBuffer, IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter,
-    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
-    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
-    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio,
-    MFMediaType_Video, MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoInterlace_Progressive,
+    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFMediaBuffer,
+    IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFAudioFormat_AAC,
+    MFAudioFormat_PCM, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_ARGB32,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
 };
-use windows::core::GUID;
+use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 use windows::core::HSTRING;
 use windows::core::implement;
+use windows::core::{GUID, Interface};
 
 const AUDIO_BITRATE_BPS: u32 = 192_000;
+
+/// The longest stretch of recording time between keyframes -- see
+/// `KeyframeSchedule`.
+const KEYFRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Keeps a keyframe at least every `KEYFRAME_INTERVAL` of recording time.
+/// GPU encoders place keyframes every N *frames* (the GOP, set to the fps so
+/// it's one second at the full rate), which on a still screen -- where Windows
+/// only delivers a frame when the picture changes -- stretches to ten seconds
+/// or more (measured: 3 frames a second at 30 fps nominal gave one keyframe in
+/// ten). A player can only start decoding at a keyframe, so seeking got slow
+/// and a Highlight save could only cut that coarsely. (Microsoft's software
+/// encoders go by time, about one a second, so this rarely fires for them.)
+///
+/// It tracks where the encoder's own keyframes fall (every `gop` frames,
+/// counted from the last keyframe -- a forced one restarts the count) and
+/// forces one only when the interval has run out and the encoder isn't about
+/// to place one on that frame anyway. At the full frame rate it never forces,
+/// so it adds no keyframes there; forcing blindly by time used to add one
+/// right after many of the encoder's own.
+#[derive(Debug)]
+struct KeyframeSchedule {
+    gop: u32,
+    /// Frames since the last keyframe (0 = the last frame was one).
+    frames_since: u32,
+    last_keyframe_pts: Option<std::time::Duration>,
+}
+
+impl KeyframeSchedule {
+    fn new(gop: u32) -> Self {
+        Self {
+            gop: gop.max(1),
+            frames_since: 0,
+            last_keyframe_pts: None,
+        }
+    }
+
+    /// The frame at `pts` is about to be encoded: whether to force it to be a
+    /// keyframe.
+    fn force_for(&mut self, pts: std::time::Duration) -> bool {
+        let Some(last) = self.last_keyframe_pts else {
+            // The first frame is always a keyframe.
+            self.mark_keyframe(pts);
+            return false;
+        };
+        self.frames_since += 1;
+        let encoder_places_one = self.frames_since >= self.gop;
+        let overdue = pts.saturating_sub(last) >= KEYFRAME_INTERVAL;
+        if encoder_places_one || overdue {
+            self.mark_keyframe(pts);
+        }
+        overdue && !encoder_places_one
+    }
+
+    fn mark_keyframe(&mut self, pts: std::time::Duration) {
+        self.frames_since = 0;
+        self.last_keyframe_pts = Some(pts);
+    }
+}
 
 /// Bits per pixel per frame at the target quality — mid-range for H264 screen/gaming
 /// content with real motion. A flat bitrate regardless of resolution/fps previously
@@ -141,6 +201,10 @@ pub struct RecordingWriter {
     audio_streams: Vec<u32>,
     output_path: PathBuf,
     fps: u32,
+    /// The video encoder's `ICodecAPI`, if it exposes one (hardware and
+    /// Microsoft's own encoders do) -- see `video_codec_api`.
+    codec_api: Option<ICodecAPI>,
+    keyframes: std::cell::RefCell<KeyframeSchedule>,
     /// Declared last so it drops last -- `writer` must be released before
     /// Media Foundation shuts down (see `MfSession`).
     _mf: MfSession,
@@ -247,6 +311,10 @@ impl RecordingWriter {
             writer
                 .SetInputMediaType(video_stream, &video_in, None)
                 .encode_ctx("SetInputMediaType video")?;
+            let codec_api = video_codec_api(&writer, video_stream);
+            if let Some(api) = &codec_api {
+                set_gop_size(api, fps);
+            }
 
             let mut audio_streams = Vec::new();
             for (sample_rate, channels) in audio_tracks {
@@ -265,8 +333,24 @@ impl RecordingWriter {
                 audio_streams,
                 output_path: output_path.to_path_buf(),
                 fps,
+                codec_api,
+                keyframes: std::cell::RefCell::new(KeyframeSchedule::new(fps)),
                 _mf: mf,
             })
+        }
+    }
+
+    /// Asks the encoder to make the frame at `pts` a keyframe, when
+    /// `KeyframeSchedule` says one is owed. Best-effort: an encoder that can't
+    /// be asked keeps its own keyframe schedule, and a hardware encoder that
+    /// has fallen behind applies the request to the next frame it takes,
+    /// a little earlier than this one.
+    fn force_keyframe_if_due(&self, pts: std::time::Duration) {
+        if !self.keyframes.borrow_mut().force_for(pts) {
+            return;
+        }
+        if let Some(api) = &self.codec_api {
+            let _ = unsafe { api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1)) };
         }
     }
 
@@ -275,6 +359,7 @@ impl RecordingWriter {
     }
 
     pub fn write_video(&self, frame: VideoFrame) -> Result<(), AppError> {
+        self.force_keyframe_if_due(frame.pts);
         let pts_hns = frame.pts.as_nanos() as i64 / 100;
         let duration_hns = 10_000_000i64 / self.fps as i64;
         unsafe {
@@ -325,6 +410,44 @@ impl RecordingWriter {
         }
         Ok(self.output_path)
     }
+}
+
+/// The `ICodecAPI` of the encoder behind `stream`, if it exposes one (hardware
+/// and Microsoft's own encoders do). The encoder exists once the stream's
+/// input type is set.
+fn video_codec_api(writer: &IMFSinkWriter, stream: u32) -> Option<ICodecAPI> {
+    let mut raw = std::ptr::null_mut();
+    let result =
+        unsafe { writer.GetServiceForStream(stream, &GUID::zeroed(), &ICodecAPI::IID, &mut raw) };
+    match result {
+        Ok(()) if !raw.is_null() => Some(unsafe { ICodecAPI::from_raw(raw) }),
+        result => {
+            tracing::info!(
+                "video encoder exposes no ICodecAPI ({result:?}); keyframes stay on its own schedule"
+            );
+            None
+        }
+    }
+}
+
+/// Pins the encoder's GOP to `frames`, so its own keyframes fall where
+/// `KeyframeSchedule` expects them. Best-effort: the encoders measured default
+/// to one second's worth of frames anyway.
+fn set_gop_size(api: &ICodecAPI, frames: u32) {
+    if let Err(e) = unsafe { api.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(frames)) } {
+        tracing::info!("video encoder kept its own GOP size ({e})");
+    }
+}
+
+fn variant_u32(value: u32) -> VARIANT {
+    let mut variant = VARIANT::default();
+    // SAFETY: writing the tag and the matching union member of a fresh VARIANT.
+    unsafe {
+        let inner = &mut variant.Anonymous.Anonymous;
+        inner.vt = VT_UI4;
+        inner.Anonymous.ulVal = value;
+    }
+    variant
 }
 
 unsafe fn make_video_output_type(
@@ -754,6 +877,174 @@ mod tests {
             }
             (fps, samples)
         }
+    }
+
+    /// The timestamps of the video stream's keyframes (samples flagged
+    /// `MFSampleExtension_CleanPoint`), read back through a source reader.
+    fn read_keyframe_times(path: &std::path::Path) -> Vec<std::time::Duration> {
+        use windows::Win32::Media::MediaFoundation::{
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
+            MFCreateSourceReaderFromURL, MFSampleExtension_CleanPoint,
+        };
+        unsafe {
+            let url = windows::core::HSTRING::from(path.to_str().unwrap());
+            let reader = MFCreateSourceReaderFromURL(&url, None).expect("source reader");
+            let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+            let mut keyframes = Vec::new();
+            loop {
+                let mut flags = 0u32;
+                let mut timestamp = 0i64;
+                let mut sample = None;
+                reader
+                    .ReadSample(
+                        stream,
+                        0,
+                        None,
+                        Some(&mut flags),
+                        Some(&mut timestamp),
+                        Some(&mut sample),
+                    )
+                    .expect("ReadSample");
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    break;
+                }
+                if let Some(sample) = sample
+                    && sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1
+                {
+                    keyframes.push(std::time::Duration::from_nanos(timestamp as u64 * 100));
+                }
+            }
+            keyframes
+        }
+    }
+
+    /// A keyframe at least every `KEYFRAME_INTERVAL` of recording time,
+    /// through the real encoders (hardware and software, both codecs), with
+    /// a still screen's sparse frames (every 10th frame of 30 fps, where the
+    /// encoders on their own gave one keyframe in ten seconds) -- and no
+    /// extra keyframes at the full frame rate. Needs a GPU encoder, so it's
+    /// ignored by default.
+    ///
+    /// The sparse frames are written at their real pace (10 s per case): a
+    /// hardware encoder works asynchronously, so a force request applies to
+    /// whichever frame it takes next, and with frames written as fast as
+    /// possible that's one queued well before the frame asked for.
+    #[tokio::test]
+    #[ignore]
+    async fn writer_puts_a_keyframe_at_least_every_two_seconds() {
+        use crate::types::VideoFrame;
+        use std::time::Duration;
+
+        const W: u32 = 1280;
+        const H: u32 = 720;
+        const FPS: u32 = 30;
+        const SECS: u32 = 10;
+        let _mf = crate::encode::mf::MfSession::start_mta().expect("MFStartup");
+        let dir = tempfile::tempdir().unwrap();
+        for (codec, hardware, step) in [Codec::H264, Codec::H265]
+            .into_iter()
+            .flat_map(|c| [true, false].map(|hw| (c, hw)))
+            .flat_map(|(c, hw)| [1u32, 10].map(|step| (c, hw, step)))
+        {
+            let label = format!("{codec:?} hw={hardware} every {step} frame(s)");
+            let output = dir.path().join(format!("{codec:?}_{hardware}_{step}.mp4"));
+            let params = EncoderParams {
+                width: W,
+                height: H,
+                fps: FPS,
+                codec,
+                bitrate_bps: video_bitrate_bps(W, H, FPS),
+                audio_tracks: vec![],
+                allow_hardware_encode: hardware,
+            };
+            let writer = RecordingWriter::new(&output, &params).expect("writer");
+            writer.begin_writing().expect("begin_writing");
+            let spacing = Duration::from_secs(1) * step / FPS;
+            for i in (0..FPS * SECS).step_by(step as usize) {
+                if step > 1 && i > 0 {
+                    std::thread::sleep(spacing);
+                }
+                let mut data = vec![0u8; (W * H * 4) as usize];
+                let x = (i % (W - 16)) as usize * 4;
+                for row in data.as_chunks_mut::<{ (W * 4) as usize }>().0 {
+                    row[x..x + 64].fill(0xFF);
+                }
+                writer
+                    .write_video(VideoFrame {
+                        pts: Duration::from_secs(1) * i / FPS,
+                        data: data.into(),
+                    })
+                    .expect("write_video");
+            }
+            let keyframes = read_keyframe_times(&writer.finalize().expect("finalize"));
+            let longest_gap = keyframes
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .chain(
+                    keyframes
+                        .last()
+                        .map(|&last| Duration::from_secs(SECS.into()) - last),
+                )
+                .max()
+                .unwrap_or(Duration::from_secs(SECS.into()));
+            println!("{label}: keyframes at {keyframes:?}, longest gap {longest_gap:?}");
+            assert!(
+                longest_gap <= KEYFRAME_INTERVAL,
+                "{label}: {longest_gap:?} between keyframes"
+            );
+            if step == 1 {
+                // The encoder's own one a second, none forced on top.
+                assert!(keyframes.len() <= SECS as usize, "{label}: {keyframes:?}");
+            }
+        }
+    }
+
+    /// The frames (by pts, in seconds) a `KeyframeSchedule` of `gop` forces
+    /// to be keyframes, given frames at `pts_secs`.
+    fn forced_keyframes(gop: u32, pts_secs: impl IntoIterator<Item = f64>) -> Vec<f64> {
+        let mut schedule = KeyframeSchedule::new(gop);
+        pts_secs
+            .into_iter()
+            .filter(|&s| schedule.force_for(std::time::Duration::from_secs_f64(s)))
+            .collect()
+    }
+
+    #[test]
+    fn keyframe_schedule_never_forces_at_the_full_frame_rate() {
+        let every_frame = (0..30 * 10).map(|i| f64::from(i) / 30.0);
+        assert_eq!(forced_keyframes(30, every_frame), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn keyframe_schedule_forces_one_every_interval_on_sparse_frames() {
+        // A still screen: every 10th frame of 30 fps -- the encoder alone
+        // would place one keyframe in ten seconds.
+        let every_tenth = (0..30 * 10).step_by(10).map(|i| f64::from(i) / 30.0);
+        assert_eq!(forced_keyframes(30, every_tenth), [2.0, 4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn keyframe_schedule_forces_the_first_frame_after_a_long_gap() {
+        assert_eq!(forced_keyframes(30, [0.0, 0.5, 9.0, 9.5]), [9.0]);
+    }
+
+    #[test]
+    fn keyframe_schedule_leaves_a_due_keyframe_to_the_encoder() {
+        // One frame a second with a GOP of 2: the encoder's own keyframe
+        // lands on the 2 s frame, exactly when the interval runs out.
+        assert_eq!(
+            forced_keyframes(2, (0..10).map(f64::from)),
+            Vec::<f64>::new()
+        );
+    }
+
+    #[test]
+    fn keyframe_schedule_counts_the_gop_from_a_forced_keyframe() {
+        // Forced at 2.0; the encoder restarts its count there, so its own
+        // next keyframe is 5 frames later (3.5, not 2.9), which leaves 4.95
+        // within the interval; 5.6 is owed by time.
+        let frames = [0.0, 0.1, 2.0, 2.3, 2.6, 2.9, 3.2, 3.5, 4.95, 5.6];
+        assert_eq!(forced_keyframes(5, frames), [2.0, 5.6]);
     }
 
     #[test]
