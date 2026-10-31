@@ -213,6 +213,8 @@ pub struct Strings {
     pub hotkey_hint_resume: &'static str,
     /// Hover text on REC while no source is selected.
     pub rec_needs_source_tooltip: &'static str,
+    /// Hover text on REC while the last recording is still being saved.
+    pub rec_wait_for_save_tooltip: &'static str,
     // Hotkey toasts (see `ui::dashboard::toast`)
     pub toast_recording: &'static str,
     pub toast_stopped: &'static str,
@@ -431,6 +433,7 @@ pub static EN: Strings = Strings {
     hotkey_hint_pause: "{key} pause",
     hotkey_hint_resume: "{key} resume",
     rec_needs_source_tooltip: "Select a window or display on the left first.",
+    rec_wait_for_save_tooltip: "Wait until the last recording has been saved.",
     toast_recording: "● Recording",
     toast_stopped: "⏹ Stopped, saving",
     toast_paused: "⏸ Paused",
@@ -607,6 +610,7 @@ pub static JA: Strings = Strings {
     hotkey_hint_pause: "{key} 一時停止",
     hotkey_hint_resume: "{key} 再開",
     rec_needs_source_tooltip: "まず左のリストからウィンドウかディスプレイを選んでください。",
+    rec_wait_for_save_tooltip: "前の録画の保存が終わるまでお待ちください。",
     toast_recording: "● 録画中",
     toast_stopped: "⏹ 停止、保存中",
     toast_paused: "⏸ 一時停止",

@@ -13,7 +13,7 @@ use crate::error::{AppError, ResultExt};
 use crate::highlight::{
     HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
-use crate::recording_naming::{RecordingNaming, resolve_finished_recording_stem};
+use crate::recording_naming::{RecordingNaming, reserve_finished_recording_path};
 use crate::types::{CaptureKind, CaptureSource, SessionState};
 use pipeline::{CaptureDimensions, CapturePipeline};
 use state::{SessionAction, transition};
@@ -460,9 +460,12 @@ impl SessionManager {
             tokio::task::spawn_blocking(move || {
                 let saved_dir = highlight_saved_dir(&output_dir);
                 std::fs::create_dir_all(&saved_dir)?;
-                let stem = resolve_finished_recording_stem(&naming, &app_name, &saved_dir);
-                let output_path = saved_dir.join(format!("{stem}.mp4"));
+                let output_path = reserve_finished_recording_path(&naming, &app_name, &saved_dir)?;
+                // Writes over the empty file that reserved the name.
                 highlight_export::concat_and_trim(&snapshot, buffer_seconds, &output_path)
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_file(&output_path);
+                    })
             })
             .await
             .encode_ctx("save_highlight join error")?

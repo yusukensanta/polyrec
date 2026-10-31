@@ -27,16 +27,14 @@ impl App {
     }
 
     /// Why REC (and the tray's Start item) can't start a recording right
-    /// now, if it can't. REC used to do nothing at all when clicked without
-    /// a source, and only failed on start with an unusable output folder;
-    /// now it says what's missing instead.
+    /// now, if it can't -- see `why_rec_is_blocked`.
     pub(super) fn rec_blocked_reason(&self, s: &'static Strings) -> Option<&'static str> {
-        if self.selected_source.is_none() {
-            Some(s.rec_needs_source_tooltip)
-        } else {
-            self.output_dir_problem
-                .map(|problem| output_dir_problem_text(problem, s))
-        }
+        why_rec_is_blocked(
+            self.finalizing.handle.is_some(),
+            self.selected_source.is_some(),
+            self.output_dir_problem,
+            s,
+        )
     }
 
     /// The dismissible notice strip at the top of the Status panel -- see
@@ -752,6 +750,27 @@ impl App {
 
 /// The message for an unusable output folder, shown under the folder and on
 /// a disabled REC.
+/// Why REC can't start a recording, if it can't: the last recording is
+/// still being saved, no source is selected, or the output folder can't be
+/// used. REC used to do nothing at all when clicked without a source, and
+/// only failed on start with an unusable output folder; now it says what's
+/// missing instead. Starting while a save is running used to drop that
+/// save's result, and with it any notice about it (see `Finalizing`).
+fn why_rec_is_blocked(
+    saving: bool,
+    has_source: bool,
+    output_dir_problem: Option<OutputDirProblem>,
+    s: &'static Strings,
+) -> Option<&'static str> {
+    if saving {
+        Some(s.rec_wait_for_save_tooltip)
+    } else if !has_source {
+        Some(s.rec_needs_source_tooltip)
+    } else {
+        output_dir_problem.map(|problem| output_dir_problem_text(problem, s))
+    }
+}
+
 fn output_dir_problem_text(problem: OutputDirProblem, s: &Strings) -> &'static str {
     match problem {
         OutputDirProblem::Unavailable => s.output_dir_unavailable,
@@ -861,6 +880,39 @@ fn default_export_file_name(app_name: &str, now: chrono::DateTime<chrono::Local>
         app_name
     };
     format!("{name}_{}.mp4", now.format("%Y-%m-%d-%H-%M-%S"))
+}
+
+#[cfg(test)]
+mod rec_blocked_tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    #[test]
+    fn rec_waits_for_the_last_save_before_anything_else() {
+        let s = Lang::En.strings();
+        assert_eq!(
+            why_rec_is_blocked(true, false, Some(OutputDirProblem::Unavailable), s),
+            Some(s.rec_wait_for_save_tooltip)
+        );
+        assert_eq!(
+            why_rec_is_blocked(true, true, None, s),
+            Some(s.rec_wait_for_save_tooltip)
+        );
+    }
+
+    #[test]
+    fn rec_needs_a_source_then_a_usable_folder() {
+        let s = Lang::En.strings();
+        assert_eq!(
+            why_rec_is_blocked(false, false, None, s),
+            Some(s.rec_needs_source_tooltip)
+        );
+        assert_eq!(
+            why_rec_is_blocked(false, true, Some(OutputDirProblem::NotAFolder), s),
+            Some(s.output_dir_not_a_folder)
+        );
+        assert_eq!(why_rec_is_blocked(false, true, None, s), None);
+    }
 }
 
 #[cfg(test)]
