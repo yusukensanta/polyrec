@@ -49,18 +49,21 @@ const KEYFRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 /// to place one on that frame anyway. At the full frame rate it never forces,
 /// so it adds no keyframes there; forcing blindly by time used to add one
 /// right after many of the encoder's own.
+///
+/// An encoder that wouldn't take the GOP size (`gop` of `None`) keeps its own,
+/// which may be far longer, so then every keyframe is forced by time.
 #[derive(Debug)]
 struct KeyframeSchedule {
-    gop: u32,
+    gop: Option<u32>,
     /// Frames since the last keyframe (0 = the last frame was one).
     frames_since: u32,
     last_keyframe_pts: Option<std::time::Duration>,
 }
 
 impl KeyframeSchedule {
-    fn new(gop: u32) -> Self {
+    fn new(gop: Option<u32>) -> Self {
         Self {
-            gop: gop.max(1),
+            gop: gop.map(|gop| gop.max(1)),
             frames_since: 0,
             last_keyframe_pts: None,
         }
@@ -75,7 +78,7 @@ impl KeyframeSchedule {
             return false;
         };
         self.frames_since += 1;
-        let encoder_places_one = self.frames_since >= self.gop;
+        let encoder_places_one = self.gop.is_some_and(|gop| self.frames_since >= gop);
         let overdue = pts.saturating_sub(last) >= KEYFRAME_INTERVAL;
         if encoder_places_one || overdue {
             self.mark_keyframe(pts);
@@ -380,9 +383,7 @@ impl RecordingWriter {
                 .SetInputMediaType(video_stream, &video_in, None)
                 .encode_ctx("SetInputMediaType video")?;
             let codec_api = video_codec_api(&writer, video_stream);
-            if let Some(api) = &codec_api {
-                set_gop_size(api, fps);
-            }
+            let gop_set = codec_api.as_ref().is_some_and(|api| set_gop_size(api, fps));
 
             let mut audio_streams = Vec::new();
             for (sample_rate, channels) in audio_tracks {
@@ -412,7 +413,7 @@ impl RecordingWriter {
                 output_path: output_path.to_path_buf(),
                 fps,
                 codec_api,
-                keyframes: std::cell::RefCell::new(KeyframeSchedule::new(fps)),
+                keyframes: std::cell::RefCell::new(KeyframeSchedule::new(gop_set.then_some(fps))),
                 input_size: (in_width, in_height),
                 takes_textures: std::cell::Cell::new(direct.is_some()),
                 readback,
@@ -568,9 +569,14 @@ fn video_codec_api(writer: &IMFSinkWriter, stream: u32) -> Option<ICodecAPI> {
 /// Pins the encoder's GOP to `frames`, so its own keyframes fall where
 /// `KeyframeSchedule` expects them. Best-effort: the encoders measured default
 /// to one second's worth of frames anyway.
-fn set_gop_size(api: &ICodecAPI, frames: u32) {
-    if let Err(e) = unsafe { api.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(frames)) } {
-        tracing::info!("video encoder kept its own GOP size ({e})");
+/// Whether the encoder took `frames` as its GOP size.
+fn set_gop_size(api: &ICodecAPI, frames: u32) -> bool {
+    match unsafe { api.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(frames)) } {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::info!("video encoder kept its own GOP size ({e}); keyframes go by time");
+            false
+        }
     }
 }
 
@@ -1338,6 +1344,13 @@ mod tests {
     /// The frames (by pts, in seconds) a `KeyframeSchedule` of `gop` forces
     /// to be keyframes, given frames at `pts_secs`.
     fn forced_keyframes(gop: u32, pts_secs: impl IntoIterator<Item = f64>) -> Vec<f64> {
+        forced_keyframes_with(Some(gop), pts_secs)
+    }
+
+    fn forced_keyframes_with(
+        gop: Option<u32>,
+        pts_secs: impl IntoIterator<Item = f64>,
+    ) -> Vec<f64> {
         let mut schedule = KeyframeSchedule::new(gop);
         pts_secs
             .into_iter()
@@ -1357,6 +1370,18 @@ mod tests {
         // would place one keyframe in ten seconds.
         let every_tenth = (0..30 * 10).step_by(10).map(|i| f64::from(i) / 30.0);
         assert_eq!(forced_keyframes(30, every_tenth), [2.0, 4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn keyframe_schedule_forces_one_every_interval_when_the_gop_is_unknown() {
+        // The encoder turned the GOP size down, so its own keyframes could be
+        // any distance apart: even at the full frame rate, one is forced
+        // every interval.
+        let every_frame = (0..30 * 10).map(|i| f64::from(i) / 30.0);
+        assert_eq!(
+            forced_keyframes_with(None, every_frame),
+            [2.0, 4.0, 6.0, 8.0]
+        );
     }
 
     #[test]

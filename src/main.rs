@@ -20,6 +20,10 @@ mod update_check;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// How long PolyRec waits at exit for recordings still being saved -- see the
+/// end of `main`.
+const SAVE_ON_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -37,7 +41,7 @@ fn main() -> eframe::Result<()> {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let _rt_guard = rt.enter();
+    let rt_guard = rt.enter();
 
     // Held for the whole run so Media Foundation stays started between the
     // per-recording/per-export sessions the rest of the app opens and closes.
@@ -84,7 +88,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "PolyRec",
         native_options,
         Box::new(|cc| {
@@ -97,5 +101,19 @@ fn main() -> eframe::Result<()> {
             });
             Ok(Box::new(ui::App::new(cc, config, show_requested)))
         }),
-    )
+    );
+
+    // The window is gone: a launch from here on runs as the copy that's up,
+    // instead of asking this one -- which may still be finishing a save
+    // below -- to show a window it no longer has.
+    instance.release();
+
+    // A recording still being saved -- closing mid-recording, or right after
+    // Stop -- finishes here, on the runtime's blocking threads. Dropping the
+    // runtime would wait for that however long it took, so a save that hung
+    // left PolyRec running invisibly for good. A real save takes well under
+    // a second.
+    drop(rt_guard);
+    rt.shutdown_timeout(SAVE_ON_EXIT_TIMEOUT);
+    result
 }
