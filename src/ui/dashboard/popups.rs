@@ -357,7 +357,7 @@ impl App {
             return;
         };
         match tokio::runtime::Handle::current().block_on(handle) {
-            Ok(Ok(())) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Ok(Ok(())) => self.quit(ctx),
             Ok(Err(e)) => self.self_update.state = SelfUpdateState::Failed(e.to_string()),
             Err(e) => self.self_update.state = SelfUpdateState::Failed(e.to_string()),
         }

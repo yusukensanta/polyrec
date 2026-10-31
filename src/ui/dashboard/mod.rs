@@ -159,6 +159,10 @@ pub struct App {
     /// Set (for `main`, which then starts a new copy) when the dashboard
     /// closes because `graphics` was lost.
     closed_for_lost_graphics: Arc<AtomicBool>,
+    /// Set when PolyRec closes its own window to quit (`App::quit`), as
+    /// opposed to the user's close button -- which `Config::close_to_tray`
+    /// may turn into hiding instead.
+    quitting: bool,
     /// Set while the Hotkeys popup is waiting for the user to press a key to
     /// bind, after clicking "Change" for that row.
     recording_hotkey: Option<HotkeySlot>,
@@ -303,6 +307,7 @@ impl App {
             show_requested,
             graphics,
             closed_for_lost_graphics,
+            quitting: false,
             recording_hotkey: None,
             hotkey_capture_warning: None,
             last_window_pos: None,
@@ -316,6 +321,24 @@ impl App {
     }
 }
 
+impl App {
+    /// Closes the window to quit PolyRec -- the tray's "Quit PolyRec", a
+    /// finished self-update, a lost graphics device -- which
+    /// `Config::close_to_tray` must not turn into hiding.
+    pub(super) fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
+/// Whether a request to close the window hides PolyRec in the tray instead
+/// of quitting: the user asked for that (`close_to_tray`), there's a tray
+/// icon to bring it back from, and PolyRec isn't closing its own window to
+/// quit (`App::quit`) -- egui reports that as a close request too.
+fn close_button_hides(close_to_tray: bool, has_tray: bool, quitting: bool) -> bool {
+    close_to_tray && has_tray && !quitting
+}
+
 impl eframe::App for App {
     // eframe runs `ui` only while the dashboard is on screen -- not while
     // it's minimized -- but calls `logic` either way: before every `ui`, and
@@ -326,9 +349,20 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.graphics.check() && !self.closed_for_lost_graphics.swap(true, Ordering::Relaxed) {
             tracing::error!("closing so that a new PolyRec can start on a new graphics device");
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.quit(ctx);
         }
         let s: &'static Strings = self.config.lang().strings();
+        if ctx.input(|i| i.viewport().close_requested())
+            && close_button_hides(
+                self.config.close_to_tray,
+                self.tray.is_some(),
+                self.quitting,
+            )
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.set_dashboard_shown(ctx, false);
+            self.toast = Some(toast::Toast::new(s.toast_still_in_tray.to_owned()));
+        }
         self.poll_background_work(ctx, s);
         if self.show_requested.swap(false, Ordering::Relaxed) {
             self.set_dashboard_shown(ctx, true);
@@ -398,5 +432,21 @@ impl eframe::App for App {
                 tracing::error!("failed to save window position: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::close_button_hides;
+
+    #[test]
+    fn the_close_button_hides_only_when_asked_to_and_theres_a_tray_to_come_back_from() {
+        assert!(close_button_hides(true, true, false));
+        // The default: closing quits.
+        assert!(!close_button_hides(false, true, false));
+        // With no tray icon, hiding would leave no way back but a relaunch.
+        assert!(!close_button_hides(true, false, false));
+        // PolyRec quitting (the tray's Quit, a self-update) isn't stopped.
+        assert!(!close_button_hides(true, true, true));
     }
 }

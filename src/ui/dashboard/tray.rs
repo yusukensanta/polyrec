@@ -223,7 +223,7 @@ impl App {
                         self.set_dashboard_shown(ctx, true);
                     }
                 }
-                TrayAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                TrayAction::Quit => self.quit(ctx),
             }
         }
 

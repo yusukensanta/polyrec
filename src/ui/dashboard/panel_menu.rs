@@ -47,6 +47,21 @@ impl App {
                         self.show_recording_border = !self.show_recording_border;
                         self.config.show_recording_border = self.show_recording_border;
                     }
+                    // Saved at once, like the language: it decides what the
+                    // next close does, and a close that hides doesn't save.
+                    let close_label = if self.config.close_to_tray {
+                        s.close_hides
+                    } else {
+                        s.close_quits
+                    };
+                    if ui
+                        .add(accent_button(close_label, ACCENT_SECONDARY))
+                        .on_hover_text(s.close_toggle_tooltip)
+                        .clicked()
+                    {
+                        self.config.close_to_tray = !self.config.close_to_tray;
+                        self.save_config_or_report(s);
+                    }
                     let lang = self.config.lang();
                     if ui
                         .add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY))
