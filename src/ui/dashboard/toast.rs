@@ -3,7 +3,7 @@
 //! typically a fullscreen game, where nothing else confirms the press landed.
 
 use super::App;
-use super::overlay::keep_on_top_and_out_of_captures;
+use super::overlay::{keep_on_top_and_out_of_captures, show_viewport_immediate};
 use super::theme::{BG_OVERLAY, TEXT_BODY};
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
@@ -109,7 +109,8 @@ impl App {
         let size = text_size + egui::vec2(24.0, 14.0);
         let (center_x, top) = toast.anchor;
         let text = toast.text.clone();
-        ctx.show_viewport_immediate(
+        show_viewport_immediate(
+            ctx,
             toast_viewport_id(),
             egui::ViewportBuilder::default()
                 .with_title("PolyRec Toast")

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- PolyRec no longer crashes when the overlay or a hotkey's toast has to come up while the window is hidden in the tray, for example when starting a recording from the tray with the overlay on, or pressing any hotkey. This affected v0.5.109 to v0.5.114. The cause is a gap in eframe, the UI framework PolyRec uses: it can't open a new window while the app's own window is hidden. Now the overlay or toast comes up a moment later instead.
+
 ## [v0.5.114] - 2026-10-31
 
 ### Fixed

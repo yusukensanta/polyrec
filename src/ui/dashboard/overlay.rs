@@ -74,7 +74,8 @@ impl App {
             format!("  |  {}", hint_template.replace("{key}", key))
         };
 
-        ctx.show_viewport_immediate(
+        show_viewport_immediate(
+            ctx,
             overlay_viewport_id(),
             egui::ViewportBuilder::default()
                 .with_title("PolyRec Overlay")
@@ -122,6 +123,48 @@ impl App {
         // Re-asserting HWND_TOPMOST every frame the overlay is visible fights
         // that back instead of relying on a one-time flag.
         keep_on_top_and_out_of_captures(windows::core::w!("PolyRec Overlay"));
+    }
+}
+
+/// The panic message egui gives when eframe returns from showing an
+/// immediate viewport without running its UI -- see `show_viewport_immediate`.
+const NO_WINDOW_YET_PANIC: &str = "the user callback was never called";
+
+/// `ctx.show_viewport_immediate` for one of PolyRec's own on-screen windows
+/// (the overlay HUD, the hotkey toast), except that a pass that can't create
+/// the window yet skips it instead of taking PolyRec down.
+///
+/// eframe 0.37 runs the passes of a hidden dashboard (hidden in the tray)
+/// from `check_redraw_requests` in `new_events`, outside its event-loop
+/// context, where an immediate viewport that has no window yet can't get
+/// one: eframe returns without running the viewport's UI, and egui panics
+/// with "egui backend is implemented incorrectly - the user callback was
+/// never called". That crashed PolyRec when a recording started with the
+/// overlay on, or a hotkey's toast came up, while it was hidden in the tray.
+///
+/// Nothing is left half-done when that panic is raised: eframe has already
+/// registered the viewport, and creates its window at the start of its next
+/// pass, through a path that does have the event loop. So the panic is
+/// caught, that one pass goes without the window, and it comes up a pass
+/// later. Any other panic is passed on.
+pub(super) fn show_viewport_immediate(
+    ctx: &egui::Context,
+    id: egui::ViewportId,
+    builder: egui::ViewportBuilder,
+    ui: impl FnMut(&mut egui::Ui, egui::ViewportClass),
+) {
+    let shown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.show_viewport_immediate(id, builder, ui);
+    }));
+    if let Err(panic) = shown {
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied());
+        if !message.is_some_and(|message| message.contains(NO_WINDOW_YET_PANIC)) {
+            std::panic::resume_unwind(panic);
+        }
+        tracing::debug!("{id:?} has no window yet; it comes up on the next pass");
     }
 }
 
