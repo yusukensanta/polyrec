@@ -241,23 +241,32 @@ impl RecordingWriter {
     /// encoder takes textures used to be asked on the dashboard's thread
     /// before every recording, without starting one for real.
     pub fn start(output_path: &Path, params: &EncoderParams) -> Result<(Self, u32), AppError> {
-        let started = Self::new_at_highest_fps(output_path, params).and_then(|(writer, fps)| {
+        Self::start_with(params, |params| {
+            let (writer, fps) = Self::new_at_highest_fps(output_path, params)?;
             writer.begin_writing()?;
             Ok((writer, fps))
-        });
-        match (&params.gpu, started) {
+        })
+    }
+
+    /// `start`, with `open` creating the writer as `params` say and starting
+    /// it -- separate so a test can stand in an encoder that turns textures
+    /// down, which no encoder tried so far has done.
+    fn start_with(
+        params: &EncoderParams,
+        open: impl Fn(&EncoderParams) -> Result<(Self, u32), AppError>,
+    ) -> Result<(Self, u32), AppError> {
+        match (&params.gpu, open(params)) {
             (Some(gpu), Err(e)) if gpu.direct => {
                 tracing::warn!(
                     "the encoder doesn't take frames as textures ({e}); reading them back instead"
                 );
-                let read_back = EncoderParams {
+                open(&EncoderParams {
                     gpu: Some(GpuInput {
                         direct: false,
                         ..gpu.clone()
                     }),
                     ..params.clone()
-                };
-                Self::start(output_path, &read_back)
+                })
             }
             (_, started) => started,
         }
@@ -1153,9 +1162,10 @@ mod tests {
     /// right way up -- as frames handed over in memory do (checked side by
     /// side, so a swapped red/blue or a flip in either shows). So do
     /// textures the writer reads back into memory: for an encoder set up
-    /// without them (`GpuInput::direct` false), and for one that turned
-    /// them down partway (see `RecordingWriter::write_video`). Top half
-    /// red, bottom half blue. Needs a GPU encoder, so it's ignored by
+    /// without them (`GpuInput::direct` false), for one that turned them
+    /// down partway (see `RecordingWriter::write_video`), and for one that
+    /// turned them down from the start (see `RecordingWriter::start`). Top
+    /// half red, bottom half blue. Needs a GPU encoder, so it's ignored by
     /// default.
     #[test]
     #[ignore]
@@ -1196,6 +1206,7 @@ mod tests {
             Texture,
             ReadBack,
             ReadBackAfterRefusal,
+            ReadBackAfterRefusalAtStart,
         }
         let mut outputs = Vec::new();
         for input in [
@@ -1203,6 +1214,7 @@ mod tests {
             Input::Texture,
             Input::ReadBack,
             Input::ReadBackAfterRefusal,
+            Input::ReadBackAfterRefusalAtStart,
         ] {
             let output = dir.path().join(format!("{input:?}.mp4"));
             let params = EncoderParams {
@@ -1219,8 +1231,22 @@ mod tests {
                     direct: input != Input::ReadBack,
                 }),
             };
-            let writer = RecordingWriter::new(&output, &params).expect("writer");
-            writer.begin_writing().expect("begin_writing");
+            let writer = if input == Input::ReadBackAfterRefusalAtStart {
+                // An encoder that won't be set up for textures at all.
+                let (writer, fps) = RecordingWriter::start_with(&params, |params| {
+                    if params.gpu.as_ref().is_some_and(|gpu| gpu.direct) {
+                        return Err(AppError::Encode("no textures here".into()));
+                    }
+                    RecordingWriter::start(&output, params)
+                })
+                .expect("start");
+                assert_eq!(fps, FPS);
+                writer
+            } else {
+                let writer = RecordingWriter::new(&output, &params).expect("writer");
+                writer.begin_writing().expect("begin_writing");
+                writer
+            };
             if input == Input::ReadBackAfterRefusal {
                 // What `write_video` does once the encoder turns a texture
                 // down.
