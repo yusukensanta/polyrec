@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.123] - 2026-11-01
+
 ### Fixed
 
 - Exporting with tracks mixed together no longer runs out of memory on long recordings, which crashed PolyRec. It used to hold every mixed track whole in memory (about 2.7 GB for a 30-minute, three-track mix) and the whole video on top of that. Now it uses about 100 MB whatever the length, and it is faster too: a 30-minute three-track mix took 12 s instead of 37 s. The mixed audio comes out the same as before.
