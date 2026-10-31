@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- PolyRec no longer disappears when the graphics driver is updated or reset, for example by Windows Update or by a game that crashes the GPU. It now closes the normal way, saving a recording that was running, and starts again by itself, minimized so it doesn't pull you out of a game. Before, it just vanished, and if the reset came while it was drawing it crashed outright, without saving the recording.
+
+### Added
+
+- PolyRec restarts itself after an unexpected error too, and says so when it comes back. If it fails again within a minute of restarting, it stays closed.
+- `crash.log` in `%APPDATA%\PolyRec` records what went wrong whenever PolyRec fails. Before, a failure left nothing behind to say why.
+
 ## [v0.5.118] - 2026-11-01
 
 ### Fixed

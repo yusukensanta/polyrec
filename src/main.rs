@@ -2,6 +2,7 @@
 
 mod capture;
 mod config;
+mod crash_log;
 mod disk_space;
 mod encode;
 mod error;
@@ -9,6 +10,7 @@ mod highlight;
 mod hotkeys;
 mod i18n;
 mod recording_naming;
+mod restart;
 mod self_update;
 mod session;
 mod single_instance;
@@ -26,6 +28,9 @@ const SAVE_ON_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
+    crash_log::install(ui::is_caught_on_purpose);
+    let started = std::time::Instant::now();
+    let restarted = restart::Reason::of_this_start(std::env::args());
 
     // Before anything registers a hotkey or a tray icon.
     let after_update = std::env::args().any(|arg| arg == single_instance::AFTER_UPDATE_ARG);
@@ -88,20 +93,35 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    let result = eframe::run_native(
-        "PolyRec",
-        native_options,
-        Box::new(|cc| {
-            let show_requested = Arc::new(AtomicBool::new(false));
-            let ctx = cc.egui_ctx.clone();
-            let flag = Arc::clone(&show_requested);
-            instance.listen(move || {
-                flag.store(true, Ordering::Relaxed);
-                ctx.request_repaint();
-            });
-            Ok(Box::new(ui::App::new(cc, config, show_requested)))
-        }),
-    );
+    // Set by the dashboard when it closes because its graphics device was
+    // lost -- see `ui::dashboard::graphics_device`.
+    let closed_for_lost_graphics = Arc::new(AtomicBool::new(false));
+    // A panic on this thread ends up here (winit catches it in its event
+    // handler and raises it again once the event loop has stopped), with the
+    // dashboard dropped on the way: a recording that was running is saved
+    // below, as on any exit.
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        eframe::run_native(
+            "PolyRec",
+            native_options,
+            Box::new(|cc| {
+                let show_requested = Arc::new(AtomicBool::new(false));
+                let ctx = cc.egui_ctx.clone();
+                let flag = Arc::clone(&show_requested);
+                instance.listen(move || {
+                    flag.store(true, Ordering::Relaxed);
+                    ctx.request_repaint();
+                });
+                Ok(Box::new(ui::App::new(
+                    cc,
+                    config,
+                    show_requested,
+                    Arc::clone(&closed_for_lost_graphics),
+                    restarted,
+                )))
+            }),
+        )
+    }));
 
     // The window is gone: a launch from here on runs as the copy that's up,
     // instead of asking this one -- which may still be finishing a save
@@ -115,5 +135,37 @@ fn main() -> eframe::Result<()> {
     // a second.
     drop(rt_guard);
     rt.shutdown_timeout(SAVE_ON_EXIT_TIMEOUT);
+
+    let (result, closed_on_its_own) = match run {
+        Ok(result) => (
+            result,
+            closed_for_lost_graphics
+                .load(Ordering::Relaxed)
+                .then_some(restart::Reason::Graphics),
+        ),
+        // A panic raised in the graphics code (egui's renderer or wgpu) is
+        // almost certainly the device having gone: on a lost device, egui's
+        // renderer panics uploading the next frame, often before wgpu has
+        // said the device was lost.
+        Err(_) => {
+            let in_graphics =
+                crash_log::last_main_thread_panic_location().is_some_and(|at| at.contains("wgpu"));
+            let reason = if in_graphics {
+                restart::Reason::Graphics
+            } else {
+                restart::Reason::Error
+            };
+            (Ok(()), Some(reason))
+        }
+    };
+    if let Some(reason) = closed_on_its_own {
+        if restart::should_restart(restarted.is_some(), started.elapsed()) {
+            restart::start_new_copy(reason);
+        } else {
+            tracing::error!(
+                "closed on its own ({reason:?}) again right after a restart; not restarting"
+            );
+        }
+    }
     result
 }

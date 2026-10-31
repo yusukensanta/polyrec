@@ -4,6 +4,7 @@ mod actions;
 mod audio_popup;
 mod background;
 mod fps_support;
+mod graphics_device;
 mod overlay;
 mod panel_center;
 mod panel_menu;
@@ -37,6 +38,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 use theme::{setup_fonts, setup_theme};
+
+pub use overlay::is_caught_on_purpose;
 
 pub struct App {
     config: Config,
@@ -151,6 +154,11 @@ pub struct App {
     /// Set when PolyRec was launched again while running -- see
     /// `single_instance`.
     show_requested: Arc<AtomicBool>,
+    /// Watched for being lost -- see `graphics_device`.
+    graphics: graphics_device::GraphicsDevice,
+    /// Set (for `main`, which then starts a new copy) when the dashboard
+    /// closes because `graphics` was lost.
+    closed_for_lost_graphics: Arc<AtomicBool>,
     /// Set while the Hotkeys popup is waiting for the user to press a key to
     /// bind, after clicking "Change" for that row.
     recording_hotkey: Option<HotkeySlot>,
@@ -179,9 +187,27 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         mut config: Config,
         show_requested: Arc<AtomicBool>,
+        closed_for_lost_graphics: Arc<AtomicBool>,
+        restarted: Option<crate::restart::Reason>,
     ) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
+        let graphics = graphics_device::GraphicsDevice::watch(cc);
+        // In place of a copy that closed on its own -- quite possibly while
+        // a game had focus, which a window coming up in front would take.
+        let notice = restarted.map(|reason| {
+            let s = config.lang().strings();
+            match reason {
+                crate::restart::Reason::Graphics => s.notice_restarted_graphics.to_owned(),
+                crate::restart::Reason::Error => s
+                    .notice_restarted_error
+                    .replace("{path}", &crate::crash_log::path().to_string_lossy()),
+            }
+        });
+        if restarted.is_some() {
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         if config.encode.gpu_frames
             && config.encode.encoder_mode == crate::config::EncoderMode::Hardware
         {
@@ -270,11 +296,13 @@ impl App {
             update_available: None,
             update_check_rx: Some(update_check_rx),
             error_message: None,
-            notice: None,
+            notice,
             toast: None,
             tray,
             dashboard_hidden: false,
             show_requested,
+            graphics,
+            closed_for_lost_graphics,
             recording_hotkey: None,
             hotkey_capture_warning: None,
             last_window_pos: None,
@@ -296,6 +324,10 @@ impl eframe::App for App {
     // recording, Highlight saves) is polled here; in `ui` it all waited for
     // the window to be restored.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.graphics.check() && !self.closed_for_lost_graphics.swap(true, Ordering::Relaxed) {
+            tracing::error!("closing so that a new PolyRec can start on a new graphics device");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let s: &'static Strings = self.config.lang().strings();
         self.poll_background_work(ctx, s);
         if self.show_requested.swap(false, Ordering::Relaxed) {
@@ -316,6 +348,12 @@ impl eframe::App for App {
     // viewport, background polling) is unaffected and still operates on
     // `&egui::Context` (Ui::ctx() hands one back, cheaply cloneable).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Nothing is drawn on a lost device, overlay and toast included,
+        // until the close `logic` asked for: egui's renderer panics uploading
+        // a frame's shapes to one, and an empty frame uploads nothing.
+        if self.graphics.was_lost() {
+            return;
+        }
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         let s: &'static Strings = self.config.lang().strings();

@@ -141,6 +141,12 @@ pub(super) fn hud_window(title: &str) -> egui::ViewportBuilder {
 /// immediate viewport without running its UI -- see `show_viewport_immediate`.
 const NO_WINDOW_YET_PANIC: &str = "the user callback was never called";
 
+/// Whether a panic with `message` is the one `show_viewport_immediate`
+/// catches and recovers from, which isn't worth a `crash_log` entry.
+pub fn is_caught_on_purpose(message: &str) -> bool {
+    message.contains(NO_WINDOW_YET_PANIC)
+}
+
 /// `ctx.show_viewport_immediate` for one of PolyRec's own on-screen windows
 /// (the overlay HUD, the hotkey toast), except that a pass that can't create
 /// the window yet skips it instead of taking PolyRec down.
