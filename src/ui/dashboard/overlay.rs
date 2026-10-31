@@ -4,6 +4,10 @@ use crate::i18n::Strings;
 use crate::types::CaptureKind;
 use eframe::egui;
 
+pub(super) fn overlay_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("polyrec_overlay")
+}
+
 impl App {
     /// Whether the overlay HUD is up: recording or paused, with Overlay
     /// turned on. It used to vanish while paused, which looked the same as
@@ -71,7 +75,7 @@ impl App {
         };
 
         ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("polyrec_overlay"),
+            overlay_viewport_id(),
             egui::ViewportBuilder::default()
                 .with_title("PolyRec Overlay")
                 .with_always_on_top()

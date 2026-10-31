@@ -263,6 +263,19 @@ impl App {
 }
 
 impl eframe::App for App {
+    // eframe runs `ui` only while the dashboard is on screen -- not while
+    // it's minimized -- but calls `logic` either way: before every `ui`, and
+    // on each requested repaint while minimized. So the work that has to go
+    // on with the dashboard minimized (global hotkeys, finishing a
+    // recording, Highlight saves) is polled here; in `ui` it all waited for
+    // the window to be restored.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let s: &'static Strings = self.config.lang().strings();
+        self.poll_background_work(ctx, s);
+        self.request_repaints(ctx);
+        self.request_ui_for_new_windows_while_minimized(ctx);
+    }
+
     // eframe 0.34 deprecated `update(&Context, &mut Frame)` in favor of this
     // `ui(&mut egui::Ui, &mut Frame)` entry point. The three docked panels
     // (menu bar, source list, center) now nest inside this root Ui via
@@ -283,8 +296,6 @@ impl eframe::App for App {
             self.last_window_pos = Some(outer_rect.min);
         }
 
-        self.poll_background_work(ctx, s);
-
         self.render_menu_bar(ui, s);
         self.render_source_panel(ui, s);
         self.render_center_panel(ui, s);
@@ -295,8 +306,6 @@ impl eframe::App for App {
         self.render_hotkeys_popup(ctx, s);
         self.render_error_banner(ctx, s);
         self.render_self_update_popup(ctx, s);
-
-        self.request_repaints(ctx);
     }
 
     fn on_exit(&mut self) {

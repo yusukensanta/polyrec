@@ -1,6 +1,7 @@
 use super::App;
+use super::overlay::overlay_viewport_id;
 use super::state::{ExportState, HighlightSaveState};
-use super::toast::{Toast, hotkey_toast};
+use super::toast::{Toast, hotkey_toast, toast_viewport_id};
 use super::util::take_if_finished;
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
@@ -184,6 +185,24 @@ impl App {
         }
     }
 
+    /// The overlay HUD and the hotkey toast are drawn from `ui`, which eframe
+    /// skips while the dashboard is minimized -- unless one of them is up
+    /// already. So when one is wanted but not up yet (a hotkey pressed with
+    /// the dashboard minimized), ask for a `ui` pass anyway, which puts it up.
+    pub(super) fn request_ui_for_new_windows_while_minimized(&self, ctx: &egui::Context) {
+        let (minimized, up) = ctx.input(|i| {
+            let up = |id| i.raw.viewports.contains_key(&id);
+            (
+                i.viewport().minimized == Some(true),
+                [up(overlay_viewport_id()), up(toast_viewport_id())],
+            )
+        });
+        let wanted = [self.overlay_visible(), self.toast.is_some()];
+        if needs_ui_while_minimized(minimized, wanted, up) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+        }
+    }
+
     pub(super) fn poll_highlight_save_result(&mut self) {
         let Some(handle) = take_if_finished(&mut self.highlight_save.handle) else {
             return;
@@ -256,6 +275,12 @@ fn recording_needs_fast_repaint(
     overlay_visible || (focused != Some(false) && minimized != Some(true))
 }
 
+/// Whether a minimized dashboard needs a `ui` pass to put up a window of its
+/// own: one that's `wanted` but not `up` yet (by position: overlay, toast).
+fn needs_ui_while_minimized(minimized: bool, wanted: [bool; 2], up: [bool; 2]) -> bool {
+    minimized && wanted.into_iter().zip(up).any(|(wanted, up)| wanted && !up)
+}
+
 /// `None` when `actual >= expected` (nothing missing, or the recording
 /// legitimately ended up with more tracks than expected -- see
 /// `track_label_fallback`'s doc comment for that case, which this doesn't
@@ -292,6 +317,36 @@ mod tests {
         // ...unless the overlay HUD is up.
         assert!(recording_needs_fast_repaint(Some(false), Some(false), true));
         assert!(recording_needs_fast_repaint(Some(false), Some(true), true));
+    }
+
+    #[test]
+    fn minimized_dashboard_gets_a_ui_pass_only_to_put_up_a_missing_window() {
+        // Overlay wanted but not up yet (a hotkey started a recording).
+        assert!(needs_ui_while_minimized(
+            true,
+            [true, false],
+            [false, false]
+        ));
+        // Toast wanted but not up yet.
+        assert!(needs_ui_while_minimized(
+            true,
+            [false, true],
+            [false, false]
+        ));
+        // Already up: eframe keeps running `ui` for it on its own.
+        assert!(!needs_ui_while_minimized(true, [true, true], [true, true]));
+        // Nothing wanted.
+        assert!(!needs_ui_while_minimized(
+            true,
+            [false, false],
+            [false, false]
+        ));
+        // Not minimized: `ui` runs anyway.
+        assert!(!needs_ui_while_minimized(
+            false,
+            [true, true],
+            [false, false]
+        ));
     }
 
     #[test]

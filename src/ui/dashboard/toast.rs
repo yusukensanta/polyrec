@@ -14,6 +14,10 @@ use std::time::{Duration, Instant};
 /// How long a toast stays up.
 const TOAST_DURATION: Duration = Duration::from_millis(1500);
 
+pub(super) fn toast_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("polyrec_toast")
+}
+
 pub(super) struct Toast {
     text: String,
     until: Instant,
@@ -106,7 +110,7 @@ impl App {
         let (center_x, top) = toast.anchor;
         let text = toast.text.clone();
         ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("polyrec_toast"),
+            toast_viewport_id(),
             egui::ViewportBuilder::default()
                 .with_title("PolyRec Toast")
                 .with_always_on_top()
