@@ -2,16 +2,16 @@ use crate::capture::audio::{TARGET_CHANNELS, TARGET_SAMPLE_RATE};
 use crate::encode::mf::MfSession;
 use crate::encode::writer::{make_audio_input_type, make_audio_output_type, make_sample};
 use crate::error::{AppError, ResultExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader,
     MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ANY_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MFAudioFormat_PCM, MFCreateAttributes,
-    MFCreateMediaType, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFMediaType_Audio,
-    MFMediaType_Video,
+    MF_SINK_WRITER_DISABLE_THROTTLING, MF_SINK_WRITER_STATISTICS, MF_SOURCE_READER_ALL_STREAMS,
+    MF_SOURCE_READER_ANY_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+    MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType, MFCreateSinkWriterFromURL,
+    MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video,
 };
 use windows::core::HSTRING;
 
@@ -259,135 +259,296 @@ pub fn export_grouped(
     unsafe { do_export_grouped(input, output, groups) }
 }
 
-/// Sums `tracks` (each `(frame_offset, interleaved_samples)`, aligned by
-/// each track's own start time so tracks that began capturing at different
-/// moments -- e.g. process-loopback's async activation delay -- still line
-/// up correctly) into one interleaved buffer sized to whichever track
-/// reaches furthest, then peak-normalizes only if the sum would clip.
-/// Unity gain otherwise, so two tracks that never overlap loudly (the
-/// common case) don't lose volume for no reason.
-fn sum_and_normalize(tracks: &[(usize, Vec<i16>)], channels: usize) -> Vec<i16> {
-    let mut acc: Vec<i32> = Vec::new();
-    for (frame_offset, samples) in tracks {
-        let start = frame_offset * channels;
-        let needed = start + samples.len();
-        if acc.len() < needed {
-            acc.resize(needed, 0);
-        }
-        for (i, &s) in samples.iter().enumerate() {
-            acc[start + i] += s as i32;
+/// Frames mixed (and written) at a time: 100 ms at `TARGET_SAMPLE_RATE`.
+const MIX_CHUNK_FRAMES: usize = 4800;
+
+/// A piece of a track's PCM: the frame it starts at, and its interleaved
+/// samples -- see `PcmPieces`.
+type PcmPiece = (usize, Vec<i16>);
+
+/// One audio track of a merge group as 16-bit interleaved PCM, a piece at a
+/// time and in order -- see `TrackDecoder`.
+trait PcmPieces {
+    /// The next piece: the frame its first sample belongs at, and its
+    /// samples. Only the first piece's frame counts; the rest follow on from
+    /// it. `None` at the end of the track.
+    fn next_piece(&mut self) -> Result<Option<PcmPiece>, AppError>;
+}
+
+/// A track being mixed: what it has decoded and not mixed yet, and the frame
+/// that starts at -- so a track is held a piece at a time, not whole.
+struct MixInput<P> {
+    pieces: P,
+    pending: VecDeque<i16>,
+    pending_from: usize,
+    started: bool,
+    ended: bool,
+}
+
+impl<P: PcmPieces> MixInput<P> {
+    fn new(pieces: P) -> Self {
+        Self {
+            pieces,
+            pending: VecDeque::new(),
+            pending_from: 0,
+            started: false,
+            ended: false,
         }
     }
-    let peak = acc.iter().map(|&v| v.unsigned_abs()).max().unwrap_or(0);
-    let scale = if peak > i16::MAX as u32 {
+
+    /// Reads until the track has a frame of its own, or has ended without
+    /// one -- so a group of tracks with nothing in them is known before
+    /// anything is written (see `open_merge_groups`).
+    fn prime(&mut self, channels: usize) -> Result<(), AppError> {
+        self.fill_to(1, channels)
+    }
+
+    /// The frame just past what the track has decoded so far.
+    fn end_frame(&self, channels: usize) -> usize {
+        self.pending_from + self.pending.len() / channels
+    }
+
+    /// Reads until what it has decoded reaches `frame_end`, or it ends.
+    fn fill_to(&mut self, frame_end: usize, channels: usize) -> Result<(), AppError> {
+        while !self.ended && self.end_frame(channels) < frame_end {
+            match self.pieces.next_piece()? {
+                Some((at, samples)) => {
+                    if !self.started {
+                        self.started = true;
+                        self.pending_from = at;
+                    }
+                    self.pending.extend(samples);
+                }
+                None => self.ended = true,
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds its samples for the frames `acc` covers, from `from` on, into
+    /// `acc`, and lets go of everything before the end of those.
+    fn mix_into(&mut self, acc: &mut [i32], from: usize, channels: usize) {
+        let to = from + acc.len() / channels;
+        let begin = self.pending_from.max(from);
+        let end = self.end_frame(channels).min(to);
+        if begin < end {
+            let src = self.pending.range(
+                (begin - self.pending_from) * channels..(end - self.pending_from) * channels,
+            );
+            for (sum, &sample) in acc[(begin - from) * channels..(end - from) * channels]
+                .iter_mut()
+                .zip(src)
+            {
+                *sum += i32::from(sample);
+            }
+        }
+        let done = to
+            .saturating_sub(self.pending_from)
+            .min(self.pending.len() / channels);
+        self.pending.drain(..done * channels);
+        self.pending_from += done;
+    }
+}
+
+/// A merge group's tracks (primed), mixed chunk by chunk from frame 0: the
+/// same sum as adding up the whole decoded tracks, each aligned by where it
+/// starts -- so tracks that began capturing at different moments (e.g.
+/// process-loopback's async activation delay) still line up -- running as
+/// far as whichever track reaches furthest, while holding only a chunk or so
+/// of each.
+struct Mix<P> {
+    inputs: Vec<MixInput<P>>,
+    channels: usize,
+    /// See `scale_for`.
+    scale: f64,
+    /// The frame the next chunk starts at.
+    pos: usize,
+    /// The unscaled sum's peak so far.
+    peak: u32,
+}
+
+impl<P: PcmPieces> Mix<P> {
+    fn new(inputs: Vec<MixInput<P>>, channels: usize, scale: f64) -> Self {
+        Self {
+            inputs,
+            channels,
+            scale,
+            pos: 0,
+            peak: 0,
+        }
+    }
+
+    /// The next chunk, scaled, and the frame it starts at; `None` once
+    /// every track has run out.
+    fn next_chunk(&mut self) -> Result<Option<(usize, Vec<i16>)>, AppError> {
+        let channels = self.channels;
+        let chunk_end = self.pos + MIX_CHUNK_FRAMES;
+        for input in &mut self.inputs {
+            input.fill_to(chunk_end, channels)?;
+        }
+        // A track that hasn't ended reaches `chunk_end` now; once they all
+        // have, the mix ends with the one that reaches furthest.
+        let reach = self
+            .inputs
+            .iter()
+            .map(|input| input.end_frame(channels))
+            .max()
+            .unwrap_or(0);
+        let end = reach.min(chunk_end);
+        if end <= self.pos {
+            return Ok(None);
+        }
+        let mut acc = vec![0i32; (end - self.pos) * channels];
+        for input in &mut self.inputs {
+            input.mix_into(&mut acc, self.pos, channels);
+        }
+        self.peak = self
+            .peak
+            .max(acc.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0));
+        let chunk = acc.iter().map(|&v| scaled(v, self.scale)).collect();
+        let at = self.pos;
+        self.pos = end;
+        Ok(Some((at, chunk)))
+    }
+
+    /// Whether the sum has gone past full scale so far, so the mix has to be
+    /// made again scaled down (see `scale_for`).
+    fn clipped(&self) -> bool {
+        self.peak > i16::MAX as u32
+    }
+}
+
+/// The gain a merged track is written at, given its sum's `peak`: unity
+/// unless the sum would clip, then just enough to bring the peak to full
+/// scale -- so tracks that never overlap loudly (the common case) don't lose
+/// volume for no reason.
+fn scale_for(peak: u32) -> f64 {
+    if peak > i16::MAX as u32 {
         i16::MAX as f64 / peak as f64
     } else {
         1.0
-    };
-    acc.iter()
-        .map(|&v| {
-            ((v as f64) * scale)
-                .round()
-                .clamp(i16::MIN as f64, i16::MAX as f64) as i16
-        })
-        .collect()
+    }
+}
+
+fn scaled(sample: i32, scale: f64) -> i16 {
+    ((sample as f64) * scale)
+        .round()
+        .clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
 /// Decodes one audio track (by its logical index into `layout.audio`) to
 /// PCM, forcing the same target rate/channels this app always encodes at
-/// so multiple tracks line up frame-for-frame without a separate resample
-/// step. Returns `(first_frame_offset, interleaved_samples)` -- the offset
-/// lets `sum_and_normalize` align tracks that started capturing at
-/// different moments (e.g. process-loopback's async activation delay).
-unsafe fn decode_track_to_pcm(
-    input_url: &HSTRING,
-    layout: &StreamLayout,
+/// so a group's tracks line up frame for frame without a separate resample
+/// step. Hands it out a source-reader sample at a time (`PcmPieces`), with
+/// the frame each starts at -- the first one's lets `Mix` align
+/// tracks that started capturing at different moments. Used on the thread
+/// it was opened on (see `DecodingThread`).
+struct TrackDecoder {
+    reader: IMFSourceReader,
+    src_idx: u32,
     idx: usize,
-    mix_rate: u32,
-    mix_channels: usize,
-) -> Result<(usize, Vec<i16>), AppError> {
-    unsafe {
-        let src_idx = *layout
-            .audio
-            .get(idx)
-            .ok_or_else(|| AppError::Encode(format!("no audio track at logical index {idx}")))?;
+    rate: u32,
+}
 
-        let reader: IMFSourceReader = MFCreateSourceReaderFromURL(input_url, None)
-            .encode_ctx(format_args!("MFCreateSourceReaderFromURL audio[{idx}]"))?;
-        reader
-            .SetStreamSelection(ALL_STREAMS, false)
-            .encode_ctx("SetStreamSelection(all,false)")?;
-        reader
-            .SetStreamSelection(src_idx, true)
-            .encode_ctx(format_args!("SetStreamSelection(audio {idx})"))?;
+impl TrackDecoder {
+    unsafe fn open(
+        input_url: &HSTRING,
+        layout: &StreamLayout,
+        idx: usize,
+        mix_rate: u32,
+        mix_channels: usize,
+    ) -> Result<Self, AppError> {
+        unsafe {
+            let src_idx = *layout.audio.get(idx).ok_or_else(|| {
+                AppError::Encode(format!("no audio track at logical index {idx}"))
+            })?;
 
-        let pcm_type = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
-        pcm_type
-            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-            .encode_ctx("SetGUID major_type")?;
-        pcm_type
-            .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
-            .encode_ctx("SetGUID PCM")?;
-        pcm_type
-            .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, mix_rate)
-            .encode_ctx("SetUINT32 rate")?;
-        pcm_type
-            .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, mix_channels as u32)
-            .encode_ctx("SetUINT32 channels")?;
-        pcm_type
-            .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
-            .encode_ctx("SetUINT32 bits")?;
-        reader
-            .SetCurrentMediaType(src_idx, None, &pcm_type)
-            .encode_ctx(format_args!("SetCurrentMediaType(audio {idx})"))?;
-
-        let mut samples: Vec<i16> = Vec::new();
-        let mut first_frame_offset: Option<usize> = None;
-
-        loop {
-            let mut actual_idx: u32 = 0;
-            let mut stream_flags: u32 = 0;
-            let mut timestamp: i64 = 0;
-            let mut sample: Option<IMFSample> = None;
+            let reader: IMFSourceReader = MFCreateSourceReaderFromURL(input_url, None)
+                .encode_ctx(format_args!("MFCreateSourceReaderFromURL audio[{idx}]"))?;
             reader
-                .ReadSample(
-                    src_idx,
-                    0,
-                    Some(&mut actual_idx),
-                    Some(&mut stream_flags),
-                    Some(&mut timestamp),
-                    Some(&mut sample),
-                )
-                .encode_ctx(format_args!("ReadSample(audio {idx})"))?;
+                .SetStreamSelection(ALL_STREAMS, false)
+                .encode_ctx("SetStreamSelection(all,false)")?;
+            reader
+                .SetStreamSelection(src_idx, true)
+                .encode_ctx(format_args!("SetStreamSelection(audio {idx})"))?;
 
-            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                break;
-            }
-            let Some(sample) = sample else { continue };
-            let buffer = sample
-                .ConvertToContiguousBuffer()
-                .encode_ctx(format_args!("ConvertToContiguousBuffer(audio {idx})"))?;
-            let mut data: *mut u8 = std::ptr::null_mut();
-            let mut cur_len = 0u32;
-            buffer
-                .Lock(&mut data, None, Some(&mut cur_len))
-                .encode_ctx(format_args!("Lock(audio {idx})"))?;
-            let bytes = std::slice::from_raw_parts(data, cur_len as usize);
+            let pcm_type = MFCreateMediaType().encode_ctx("MFCreateMediaType")?;
+            pcm_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                .encode_ctx("SetGUID major_type")?;
+            pcm_type
+                .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+                .encode_ctx("SetGUID PCM")?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, mix_rate)
+                .encode_ctx("SetUINT32 rate")?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, mix_channels as u32)
+                .encode_ctx("SetUINT32 channels")?;
+            pcm_type
+                .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+                .encode_ctx("SetUINT32 bits")?;
+            reader
+                .SetCurrentMediaType(src_idx, None, &pcm_type)
+                .encode_ctx(format_args!("SetCurrentMediaType(audio {idx})"))?;
 
-            if first_frame_offset.is_none() {
-                let frame_offset = (timestamp * mix_rate as i64 / 10_000_000).max(0) as usize;
-                first_frame_offset = Some(frame_offset);
-            }
-            for chunk in bytes.as_chunks::<2>().0 {
-                samples.push(i16::from_le_bytes(*chunk));
-            }
-
-            buffer
-                .Unlock()
-                .encode_ctx(format_args!("Unlock(audio {idx})"))?;
+            Ok(Self {
+                reader,
+                src_idx,
+                idx,
+                rate: mix_rate,
+            })
         }
+    }
+}
 
-        Ok((first_frame_offset.unwrap_or(0), samples))
+impl PcmPieces for TrackDecoder {
+    fn next_piece(&mut self) -> Result<Option<PcmPiece>, AppError> {
+        let idx = self.idx;
+        unsafe {
+            loop {
+                let mut actual_idx: u32 = 0;
+                let mut stream_flags: u32 = 0;
+                let mut timestamp: i64 = 0;
+                let mut sample: Option<IMFSample> = None;
+                self.reader
+                    .ReadSample(
+                        self.src_idx,
+                        0,
+                        Some(&mut actual_idx),
+                        Some(&mut stream_flags),
+                        Some(&mut timestamp),
+                        Some(&mut sample),
+                    )
+                    .encode_ctx(format_args!("ReadSample(audio {idx})"))?;
+
+                if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                    return Ok(None);
+                }
+                let Some(sample) = sample else { continue };
+                let buffer = sample
+                    .ConvertToContiguousBuffer()
+                    .encode_ctx(format_args!("ConvertToContiguousBuffer(audio {idx})"))?;
+                let mut data: *mut u8 = std::ptr::null_mut();
+                let mut cur_len = 0u32;
+                buffer
+                    .Lock(&mut data, None, Some(&mut cur_len))
+                    .encode_ctx(format_args!("Lock(audio {idx})"))?;
+                let bytes = std::slice::from_raw_parts(data, cur_len as usize);
+                let samples: Vec<i16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&chunk| i16::from_le_bytes(chunk))
+                    .collect();
+                buffer
+                    .Unlock()
+                    .encode_ctx(format_args!("Unlock(audio {idx})"))?;
+
+                let at = (timestamp * self.rate as i64 / 10_000_000).max(0) as usize;
+                return Ok(Some((at, samples)));
+            }
+        }
     }
 }
 
@@ -408,30 +569,131 @@ fn split_export_groups(groups: &[Vec<usize>]) -> (Vec<usize>, Vec<&Vec<usize>>) 
     (passthrough_indices, merge_groups)
 }
 
-/// Decode + sum each merge group independently -- a group that turns out
-/// entirely empty (e.g. every process in it was silent the whole recording)
-/// is dropped rather than becoming a zero-length audio stream.
-unsafe fn decode_and_merge_groups(
+/// How many decoded pieces a `DecodingThread` may get ahead of the mix by
+/// -- a few thousand frames each, so a fraction of a second of audio.
+const DECODE_AHEAD: usize = 8;
+
+/// A track decoded on a thread of its own (`TrackDecoder`) and handed over a
+/// piece at a time through a short queue: a merge group's tracks decode side
+/// by side, and alongside the mixing and encoding, rather than one after
+/// another. Decoding is most of an export's work, so this roughly halves a
+/// three-track mix's time. The thread stops at the end of the track, or as
+/// soon as this is dropped.
+struct DecodingThread {
+    pieces: std::sync::mpsc::Receiver<Result<Option<PcmPiece>, AppError>>,
+}
+
+impl DecodingThread {
+    fn spawn(
+        input_url: &HSTRING,
+        layout: &StreamLayout,
+        idx: usize,
+        mix_rate: u32,
+        mix_channels: usize,
+    ) -> Result<Self, AppError> {
+        let (tx, pieces) = std::sync::mpsc::sync_channel(DECODE_AHEAD);
+        let (input_url, layout) = (input_url.clone(), layout.clone());
+        std::thread::Builder::new()
+            .name(format!("ExportDecode[{idx}]"))
+            .spawn(move || {
+                let decoder = MfSession::start_mta().and_then(|mf| {
+                    let decoder = unsafe {
+                        TrackDecoder::open(&input_url, &layout, idx, mix_rate, mix_channels)?
+                    };
+                    Ok((mf, decoder))
+                });
+                let (_mf, mut decoder) = match decoder {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                };
+                loop {
+                    let piece = decoder.next_piece();
+                    let last = !matches!(piece, Ok(Some(_)));
+                    if tx.send(piece).is_err() || last {
+                        return;
+                    }
+                }
+            })
+            .map_err(|e| AppError::Encode(format!("starting a decode thread: {e}")))?;
+        Ok(Self { pieces })
+    }
+}
+
+impl PcmPieces for DecodingThread {
+    fn next_piece(&mut self) -> Result<Option<PcmPiece>, AppError> {
+        self.pieces
+            .recv()
+            .unwrap_or_else(|_| Err(AppError::Encode("a decode thread stopped early".into())))
+    }
+}
+
+/// Opens each merge group's tracks for mixing (`Mix`), each
+/// decoding on a thread of its own. A group
+/// that turns out entirely empty (e.g. every process in it was silent the
+/// whole recording) is dropped rather than becoming a zero-length audio
+/// stream.
+fn open_merge_groups(
     input_url: &HSTRING,
     layout: &StreamLayout,
     merge_groups: &[&Vec<usize>],
     mix_rate: u32,
     mix_channels: usize,
-) -> Result<Vec<Vec<i16>>, AppError> {
-    let mut merged_pcms: Vec<Vec<i16>> = Vec::new();
+) -> Result<Vec<Vec<MixInput<DecodingThread>>>, AppError> {
+    let mut opened = Vec::new();
     for group in merge_groups {
-        let mut decoded: Vec<(usize, Vec<i16>)> = Vec::new();
-        for &idx in group.iter() {
-            decoded.push(unsafe {
-                decode_track_to_pcm(input_url, layout, idx, mix_rate, mix_channels)?
-            });
+        let mut inputs: Vec<MixInput<DecodingThread>> = group
+            .iter()
+            .map(|&idx| {
+                DecodingThread::spawn(input_url, layout, idx, mix_rate, mix_channels)
+                    .map(MixInput::new)
+            })
+            .collect::<Result<_, _>>()?;
+        for input in &mut inputs {
+            input.prime(mix_channels)?;
         }
-        let mixed = sum_and_normalize(&decoded, mix_channels);
-        if !mixed.is_empty() {
-            merged_pcms.push(mixed);
+        if inputs.iter().any(|input| input.end_frame(mix_channels) > 0) {
+            opened.push(inputs);
         }
     }
-    Ok(merged_pcms)
+    Ok(opened)
+}
+
+/// How much of a merged track may wait in the sink writer for its encoder.
+/// The writer here is unthrottled (see `create_unthrottled_sink_writer`), so
+/// it takes samples as fast as they come -- faster than the AAC encoder turns
+/// them over, with decoding on threads of its own -- and held the rest of the
+/// track's PCM meanwhile: about 190 KB a second of it, 2 GB for a 3-hour mix.
+const MAX_QUEUED_BYTES: u32 = 4 * 1024 * 1024;
+
+/// How long `wait_for_encoder` waits for a queue that isn't going down
+/// before going on anyway: it's only there to bound memory.
+const ENCODER_STALL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits while more than `MAX_QUEUED_BYTES` of `stream`'s samples are queued
+/// in `writer`. Best-effort: without the writer's statistics, or with a queue
+/// that stops going down, it goes on.
+unsafe fn wait_for_encoder(writer: &IMFSinkWriter, stream: u32) {
+    let mut last = (u32::MAX, std::time::Instant::now());
+    loop {
+        let mut stats = MF_SINK_WRITER_STATISTICS {
+            cb: std::mem::size_of::<MF_SINK_WRITER_STATISTICS>() as u32,
+            ..Default::default()
+        };
+        if unsafe { writer.GetStatistics(stream, &mut stats) }.is_err()
+            || stats.dwByteCountQueued <= MAX_QUEUED_BYTES
+        {
+            return;
+        }
+        if stats.dwByteCountQueued < last.0 {
+            last = (stats.dwByteCountQueued, std::time::Instant::now());
+        } else if last.1.elapsed() >= ENCODER_STALL {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 /// A sink writer with `MF_SINK_WRITER_DISABLE_THROTTLING` (see the comment
@@ -453,11 +715,37 @@ unsafe fn create_unthrottled_sink_writer(output_url: &HSTRING) -> Result<IMFSink
     }
 }
 
+/// Mixes each merge group at unity gain, tracking its peak; if a mix would
+/// clip, the export is made again with that mix scaled to fit
+/// (`scale_for`) -- the same output as summing the whole decoded tracks in
+/// memory first, which is what this used to do, at the cost of decoding
+/// twice, but only for a mix that clips. Holding whole tracks took about
+/// 1 GB per quarter hour of a three-track mix, and running out of memory
+/// on a long recording aborted PolyRec.
 unsafe fn do_export_grouped(
     input: &Path,
     output: &Path,
     groups: &[Vec<usize>],
 ) -> Result<PathBuf, AppError> {
+    unsafe {
+        let peaks = export_pass(input, output, groups, None)?;
+        if peaks.iter().any(|&peak| peak > i16::MAX as u32) {
+            let scales: Vec<f64> = peaks.iter().map(|&peak| scale_for(peak)).collect();
+            export_pass(input, output, groups, Some(&scales))?;
+        }
+        Ok(output.to_path_buf())
+    }
+}
+
+/// One go at `do_export_grouped`'s output, each merged track scaled by its
+/// entry in `scales` (unity for `None`). Returns each merged track's peak,
+/// unscaled, in order.
+unsafe fn export_pass(
+    input: &Path,
+    output: &Path,
+    groups: &[Vec<usize>],
+    scales: Option<&[f64]>,
+) -> Result<Vec<u32>, AppError> {
     unsafe {
         let input_url = HSTRING::from(input);
         let output_url = HSTRING::from(output);
@@ -473,11 +761,11 @@ unsafe fn do_export_grouped(
         let mix_channels = TARGET_CHANNELS as usize;
 
         let (passthrough_indices, merge_groups) = split_export_groups(groups);
-        let merged_pcms =
-            decode_and_merge_groups(&input_url, &layout, &merge_groups, mix_rate, mix_channels)?;
+        let merged = open_merge_groups(&input_url, &layout, &merge_groups, mix_rate, mix_channels)?;
 
-        if passthrough_indices.is_empty() && merged_pcms.is_empty() {
-            return do_remux(input, output, &[]);
+        if passthrough_indices.is_empty() && merged.is_empty() {
+            do_remux(input, output, &[])?;
+            return Ok(Vec::new());
         }
 
         // ── Sink writer: video passthrough + one stream per passthrough
@@ -523,7 +811,7 @@ unsafe fn do_export_grouped(
         }
 
         let mut merge_sinks: Vec<u32> = Vec::new();
-        for _ in &merged_pcms {
+        for _ in &merged {
             let audio_out = make_audio_output_type(mix_rate, mix_channels as u16)?;
             let audio_in = make_audio_input_type(mix_rate, mix_channels as u16)?;
             let sink_idx = writer
@@ -556,33 +844,100 @@ unsafe fn do_export_grouped(
             source_to_sink.insert(src_idx, sink_idx);
         }
         let total_enabled = 1 + passthrough_sinks.len();
-        copy_passthrough_samples(&probe_reader, &writer, &source_to_sink, total_enabled)?;
 
-        // Merged audio, one group at a time, each written in ~100ms chunks.
-        const CHUNK_FRAMES: usize = 4800;
-        for (pcm, &sink_idx) in merged_pcms.iter().zip(merge_sinks.iter()) {
-            let total_frames = pcm.len() / mix_channels;
-            let mut frame = 0usize;
-            while frame < total_frames {
-                let end = (frame + CHUNK_FRAMES).min(total_frames);
-                let chunk_bytes: Vec<u8> = pcm[frame * mix_channels..end * mix_channels]
-                    .iter()
-                    .flat_map(|s| s.to_le_bytes())
-                    .collect();
-                let pts_hns = (frame as i64 * 10_000_000) / mix_rate as i64;
-                let duration_hns = ((end - frame) as i64 * 10_000_000) / mix_rate as i64;
-                let sample = make_sample(&chunk_bytes, pts_hns, duration_hns)?;
-                writer
-                    .WriteSample(sink_idx, &sample)
-                    .encode_ctx("WriteSample(merged audio)")?;
-                frame = end;
-            }
+        // The merged tracks are written as the passthrough copy goes, each up
+        // to the time of the sample about to be copied: written after the
+        // whole copy instead, the MP4 sink held all of the video in memory
+        // to interleave it with audio that hadn't come yet -- the size of
+        // the recording.
+        let mut mixes: Vec<MergedTrack> = merged
+            .into_iter()
+            .zip(merge_sinks)
+            .enumerate()
+            .map(|(i, (inputs, sink))| MergedTrack {
+                mix: Mix::new(inputs, mix_channels, scales.map_or(1.0, |scales| scales[i])),
+                sink,
+                next: None,
+            })
+            .collect();
+        // Once a mix has clipped on the unity-gain pass, this pass's file
+        // won't be kept (see `do_export_grouped`): writing stops, and it
+        // only goes on to find every mix's peak.
+        let writing =
+            |mixes: &[MergedTrack]| scales.is_some() || !mixes.iter().any(|m| m.mix.clipped());
+        for_each_sample(
+            &probe_reader,
+            total_enabled,
+            None,
+            |stream, sample, timestamp| {
+                let write = writing(&mixes);
+                write_merged_until(&writer, &mut mixes, Some(timestamp), write, mix_rate)?;
+                if writing(&mixes)
+                    && let Some(&sink_idx) = source_to_sink.get(&stream)
+                {
+                    writer
+                        .WriteSample(sink_idx, &sample)
+                        .encode_ctx(format_args!("WriteSample(stream {stream})"))?;
+                }
+                Ok(())
+            },
+        )?;
+        let write = writing(&mixes);
+        write_merged_until(&writer, &mut mixes, None, write, mix_rate)?;
+
+        if writing(&mixes) {
+            writer.Finalize().encode_ctx("Finalize")?;
         }
-
-        writer.Finalize().encode_ctx("Finalize")?;
-
-        Ok(output.to_path_buf())
+        Ok(mixes.iter().map(|m| m.mix.peak).collect())
     }
+}
+
+/// A merged track being written: its mix, its stream in the sink writer, and
+/// the chunk mixed but not written yet.
+struct MergedTrack {
+    mix: Mix<DecodingThread>,
+    sink: u32,
+    next: Option<(usize, Vec<i16>)>,
+}
+
+/// Writes each merged track's chunks that start before `until` (in 100 ns
+/// units; `None`: to the end), mixing them as it goes -- or, unless
+/// `writing`, just mixes them, for their peaks.
+unsafe fn write_merged_until(
+    writer: &IMFSinkWriter,
+    mixes: &mut [MergedTrack],
+    until: Option<i64>,
+    writing: bool,
+    mix_rate: u32,
+) -> Result<(), AppError> {
+    let to_hns = |frames: usize| frames as i64 * 10_000_000 / i64::from(mix_rate);
+    for merged in mixes {
+        loop {
+            if merged.next.is_none() {
+                merged.next = merged.mix.next_chunk()?;
+            }
+            let Some((frame, chunk)) = &merged.next else {
+                break;
+            };
+            let pts_hns = to_hns(*frame);
+            if until.is_some_and(|until| pts_hns >= until) {
+                break;
+            }
+            if writing {
+                let chunk_bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+                let duration_hns = to_hns(chunk.len() / merged.mix.channels);
+                unsafe {
+                    let sample = make_sample(&chunk_bytes, pts_hns, duration_hns)?;
+                    writer
+                        .WriteSample(merged.sink, &sample)
+                        .encode_ctx("WriteSample(merged audio)")?;
+                    wait_for_encoder(writer, merged.sink);
+                }
+            }
+            merged.next = None;
+        }
+    }
+    Ok(())
 }
 
 unsafe fn do_remux(
@@ -899,42 +1254,222 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sum_and_normalize_sums_overlapping_tracks_at_unity_gain_when_no_clipping() {
-        let tracks = vec![
-            (0usize, vec![1000i16, -1000, 500, -500]),
-            (0usize, vec![2000i16, -2000, 300, -300]),
-        ];
-        let result = sum_and_normalize(&tracks, 2);
-        assert_eq!(result, vec![3000, -3000, 800, -800]);
+    /// A track's pieces, from memory.
+    struct FakePieces(VecDeque<(usize, Vec<i16>)>);
+
+    impl PcmPieces for FakePieces {
+        fn next_piece(&mut self) -> Result<Option<PcmPiece>, AppError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    /// Mixes `tracks` (each a list of pieces) the way an export does: at
+    /// unity gain, and again scaled if that clipped.
+    fn mix_whole(tracks: &[Vec<(usize, Vec<i16>)>], channels: usize) -> Vec<i16> {
+        let run = |scale: f64| {
+            let inputs: Vec<MixInput<FakePieces>> = tracks
+                .iter()
+                .map(|pieces| {
+                    let mut input = MixInput::new(FakePieces(pieces.clone().into()));
+                    input.prime(channels).unwrap();
+                    input
+                })
+                .collect();
+            let mut mix = Mix::new(inputs, channels, scale);
+            let mut out = Vec::new();
+            while let Some((frame, chunk)) = mix.next_chunk().unwrap() {
+                assert_eq!(frame * channels, out.len(), "chunks aren't contiguous");
+                out.extend_from_slice(&chunk);
+            }
+            (mix.peak, out)
+        };
+        let (peak, out) = run(1.0);
+        if peak > i16::MAX as u32 {
+            run(scale_for(peak)).1
+        } else {
+            out
+        }
+    }
+
+    /// How a merged track was made before `Mix`: every track
+    /// decoded whole, summed (each aligned by its start), then scaled down
+    /// to full scale only if the sum would clip. The streaming mix has to
+    /// come out the same, sample for sample.
+    fn reference_mix(tracks: &[(usize, Vec<i16>)], channels: usize) -> Vec<i16> {
+        let mut acc: Vec<i32> = Vec::new();
+        for (frame_offset, samples) in tracks {
+            let start = frame_offset * channels;
+            let needed = start + samples.len();
+            if acc.len() < needed {
+                acc.resize(needed, 0);
+            }
+            for (i, &s) in samples.iter().enumerate() {
+                acc[start + i] += s as i32;
+            }
+        }
+        let peak = acc.iter().map(|&v| v.unsigned_abs()).max().unwrap_or(0);
+        acc.iter().map(|&v| scaled(v, scale_for(peak))).collect()
+    }
+
+    fn whole(offset: usize, samples: Vec<i16>) -> Vec<(usize, Vec<i16>)> {
+        vec![(offset, samples)]
     }
 
     #[test]
-    fn sum_and_normalize_aligns_tracks_by_frame_offset() {
+    fn mix_sums_overlapping_tracks_at_unity_gain_when_no_clipping() {
+        let tracks = vec![
+            whole(0, vec![1000i16, -1000, 500, -500]),
+            whole(0, vec![2000i16, -2000, 300, -300]),
+        ];
+        assert_eq!(mix_whole(&tracks, 2), vec![3000, -3000, 800, -800]);
+    }
+
+    #[test]
+    fn mix_aligns_tracks_by_frame_offset() {
         // Track 1 starts at frame 0 (2 stereo frames = 4 samples), track 2
         // starts 1 frame later (offset 1 -> sample index 2) -- they should
         // only overlap on the second frame of track 1 / first frame of track 2.
         let tracks = vec![
-            (0usize, vec![100i16, 100, 200, 200]),
-            (1usize, vec![50i16, 50]),
+            whole(0, vec![100i16, 100, 200, 200]),
+            whole(1, vec![50i16, 50]),
         ];
-        let result = sum_and_normalize(&tracks, 2);
-        assert_eq!(result, vec![100, 100, 250, 250]);
+        assert_eq!(mix_whole(&tracks, 2), vec![100, 100, 250, 250]);
     }
 
     #[test]
-    fn sum_and_normalize_scales_down_only_when_sum_would_clip() {
-        let tracks = vec![(0usize, vec![30000i16]), (0usize, vec![30000i16])];
-        let result = sum_and_normalize(&tracks, 1);
+    fn mix_scales_down_only_when_sum_would_clip() {
+        let tracks = vec![whole(0, vec![30000i16]), whole(0, vec![30000i16])];
         // 30000 + 30000 = 60000, clips i16 (max 32767) -- must be scaled
         // down to exactly the max, not left clipped/wrapped.
-        assert_eq!(result, vec![i16::MAX]);
+        assert_eq!(mix_whole(&tracks, 1), vec![i16::MAX]);
     }
 
     #[test]
-    fn sum_and_normalize_empty_input_produces_empty_output() {
-        let result = sum_and_normalize(&[], 2);
-        assert!(result.is_empty());
+    fn mix_of_nothing_is_nothing() {
+        assert!(mix_whole(&[], 2).is_empty());
+        assert!(mix_whole(&[vec![], whole(0, vec![])], 2).is_empty());
+    }
+
+    /// The streaming mix against the whole-track one it replaced, over
+    /// tracks of every shape: several, starting late, ending early, longer
+    /// than many chunks, split into pieces of every size (including empty
+    /// ones), loud enough to clip or not.
+    #[test]
+    fn mix_matches_summing_whole_tracks_sample_for_sample() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below.max(1)
+        };
+        let channels = 2;
+        for case in 0..200 {
+            let track_count = next(4) as usize + 1;
+            let loud = case % 3 == 0;
+            let mut whole_tracks = Vec::new();
+            let mut piece_tracks = Vec::new();
+            for _ in 0..track_count {
+                let offset = if next(3) == 0 {
+                    0
+                } else {
+                    next(3 * MIX_CHUNK_FRAMES as u64) as usize
+                };
+                let frames = next(4 * MIX_CHUNK_FRAMES as u64) as usize;
+                let amplitude = if loud { 30000 } else { 9000 };
+                let samples: Vec<i16> = (0..frames * channels)
+                    .map(|_| (next(2 * amplitude) as i64 - amplitude as i64) as i16)
+                    .collect();
+                let mut pieces = Vec::new();
+                let mut at = 0;
+                while at < samples.len() || pieces.is_empty() {
+                    let len = (next(3000) as usize * channels).min(samples.len() - at);
+                    // Only the first piece's frame counts.
+                    let frame = if pieces.is_empty() {
+                        offset
+                    } else {
+                        next(1_000_000) as usize
+                    };
+                    pieces.push((frame, samples[at..at + len].to_vec()));
+                    at += len;
+                }
+                whole_tracks.push((offset, samples));
+                piece_tracks.push(pieces);
+            }
+            assert_eq!(
+                mix_whole(&piece_tracks, channels),
+                reference_mix(&whole_tracks, channels),
+                "case {case}"
+            );
+        }
+    }
+
+    /// A mix that would clip is made again scaled to fit (see
+    /// `do_export_grouped`), not written hard-clipped: two copies of a loud
+    /// tone sum to nearly twice full scale. Clipped, most of each cycle
+    /// would sit at full scale; scaled, only its crests come near it.
+    #[test]
+    fn mixing_tracks_that_would_clip_scales_them_to_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loud.mp4");
+        let writer = RecordingWriter::new(
+            &path,
+            &EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16), (48000u32, 2u16)]),
+        )
+        .expect("RecordingWriter::new");
+        writer.begin_writing().expect("begin_writing");
+        writer
+            .write_video(VideoFrame {
+                pts: Duration::ZERO,
+                data: vec![0u8; 64 * 64 * 4].into(),
+            })
+            .expect("write_video");
+        for chunk in 0..10u32 {
+            for track in 0..2 {
+                let samples = (0..4800 * 2)
+                    .map(|i| ((chunk * 4800 + i / 2) as f32 * 0.05).sin() * 0.9)
+                    .collect();
+                writer
+                    .write_audio(
+                        track,
+                        AudioSamples {
+                            track_id: TrackId::new(track as u32),
+                            pts: Duration::from_millis(u64::from(chunk) * 100),
+                            samples,
+                            sample_rate: 48000,
+                            channels: 2,
+                        },
+                    )
+                    .expect("write_audio");
+            }
+        }
+        let source = writer.finalize().expect("finalize");
+        let dest = dir.path().join("mixed.mp4");
+        mix_tracks(&source, &dest, &[0, 1]).expect("mix_tracks");
+
+        let _mf = MfSession::start_mta().unwrap();
+        let url = HSTRING::from(dest.as_path());
+        let reader: IMFSourceReader = unsafe { MFCreateSourceReaderFromURL(&url, None).unwrap() };
+        let layout = unsafe { discover_stream_layout(&reader).unwrap() };
+        let mut decoder = unsafe { TrackDecoder::open(&url, &layout, 0, 48000, 2).unwrap() };
+        let mut samples = Vec::new();
+        while let Some((_, piece)) = decoder.next_piece().unwrap() {
+            samples.extend(piece);
+        }
+        let near_full_scale = samples.iter().filter(|s| s.unsigned_abs() > 31000).count();
+        let share = near_full_scale as f64 / samples.len() as f64;
+        assert!(
+            samples.len() > 40_000,
+            "too little audio: {}",
+            samples.len()
+        );
+        assert!(
+            share < 0.25,
+            "{:.0}% of samples near full scale: clipped",
+            share * 100.0
+        );
+        let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(peak > 26_000, "scaled down too far: peak {peak}");
     }
 
     #[test]
