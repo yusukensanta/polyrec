@@ -164,7 +164,7 @@ impl GpuFrames {
     }
 
     /// A black texture of `width`x`height` -- what a minimized window
-    /// records as (see `capture::video::STILL_FRAME_REPEAT`).
+    /// records as (see `capture::pacer::STILL_FRAME_REPEAT`).
     pub(crate) fn black_texture(
         &self,
         width: u32,
