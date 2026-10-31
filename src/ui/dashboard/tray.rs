@@ -217,6 +217,11 @@ impl App {
                     if can_stop || self.rec_blocked_reason(s).is_none() {
                         self.handle_rec_button(is_recording);
                     }
+                    // A start that didn't happen says why on the dashboard
+                    // (an error, or REC's tooltip), which may be hidden.
+                    if !can_stop && !self.session.is_recording() {
+                        self.set_dashboard_shown(ctx, true);
+                    }
                 }
                 TrayAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
@@ -245,7 +250,7 @@ impl App {
         !self.dashboard_hidden && ctx.input(|i| i.viewport().minimized) != Some(true)
     }
 
-    fn set_dashboard_shown(&mut self, ctx: &egui::Context, shown: bool) {
+    pub(super) fn set_dashboard_shown(&mut self, ctx: &egui::Context, shown: bool) {
         self.dashboard_hidden = !shown;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(shown));
         if shown {
