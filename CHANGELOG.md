@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.122] - 2026-11-01
+
 ### Added
 
 - **Close: Quit / Close: To tray** in the menu bar chooses what the window's close button does. With **To tray**, closing hides PolyRec in the notification area so the hotkeys keep working, and a short message says it's still running; **Quit PolyRec** in the tray menu quits. The default is unchanged: closing quits.

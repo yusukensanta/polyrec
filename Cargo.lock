@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "polyrec"
-version = "0.5.121"
+version = "0.5.122"
 dependencies = [
  "chrono",
  "dirs",
