@@ -1,7 +1,8 @@
 use crate::capture::frame_pool::FrameBuf;
 use crate::capture::frame_rate::highest_encodable_fps;
+use crate::capture::video::scale_bgra;
 use crate::config::Codec;
-use crate::encode::gpu::GpuInput;
+use crate::encode::gpu::{GpuInput, TextureReadback};
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
 use crate::types::{AudioSamples, FrameData, VideoFrame};
@@ -115,7 +116,7 @@ fn encoder_answer_key(params: &EncoderParams) -> EncoderAnswerKey {
         params.height,
         params.fps,
         params.allow_hardware_encode,
-        params.gpu.is_some(),
+        params.gpu.as_ref().is_some_and(|gpu| gpu.direct),
     )
 }
 
@@ -213,12 +214,60 @@ pub struct RecordingWriter {
     /// Microsoft's own encoders do) -- see `video_codec_api`.
     codec_api: Option<ICodecAPI>,
     keyframes: std::cell::RefCell<KeyframeSchedule>,
+    /// The size the video stream takes frames at: the capture size for an
+    /// encoder that takes textures (it scales them itself), the output size
+    /// otherwise.
+    input_size: (u32, u32),
+    /// Whether frames that come as textures go to the encoder as such --
+    /// see `takes_textures`.
+    takes_textures: std::cell::Cell<bool>,
+    /// For frames that come as textures but go to the encoder through
+    /// memory (see `write_read_back`).
+    readback: Option<TextureReadback>,
     /// Declared last so it drops last -- `writer` must be released before
     /// Media Foundation shuts down (see `MfSession`).
     _mf: MfSession,
 }
 
 impl RecordingWriter {
+    /// Creates the writer (at the highest frame rate the encoder takes --
+    /// see `new_at_highest_fps`) and starts writing. If that fails with
+    /// frames handed over as textures (`GpuInput::direct`), it tries again
+    /// with the writer reading them back into memory itself, so the
+    /// recording goes on the usual way instead of failing. Whether the
+    /// encoder takes textures used to be asked on the dashboard's thread
+    /// before every recording, without starting one for real.
+    pub fn start(output_path: &Path, params: &EncoderParams) -> Result<(Self, u32), AppError> {
+        let started = Self::new_at_highest_fps(output_path, params).and_then(|(writer, fps)| {
+            writer.begin_writing()?;
+            Ok((writer, fps))
+        });
+        match (&params.gpu, started) {
+            (Some(gpu), Err(e)) if gpu.direct => {
+                tracing::warn!(
+                    "the encoder doesn't take frames as textures ({e}); reading them back instead"
+                );
+                let read_back = EncoderParams {
+                    gpu: Some(GpuInput {
+                        direct: false,
+                        ..gpu.clone()
+                    }),
+                    ..params.clone()
+                };
+                Self::start(output_path, &read_back)
+            }
+            (_, started) => started,
+        }
+    }
+
+    /// Whether frames that come as textures go to the encoder as such (see
+    /// `GpuInput::direct`), rather than being read back into memory first.
+    /// Starts out as the writer was set up, and turns false for good if the
+    /// encoder ever turns a texture down (see `write_video`).
+    pub fn takes_textures(&self) -> bool {
+        self.takes_textures.get()
+    }
+
     /// `new`, but if the encoder turns `params.fps` down, steps down through
     /// the fps presets (`highest_encodable_fps`) to the highest rate it takes,
     /// and returns that rate with the writer. Rates already known to be
@@ -290,7 +339,8 @@ impl RecordingWriter {
                     allow_hardware_encode as u32,
                 )
                 .encode_ctx("SetUINT32 hw_transforms")?;
-            if let Some(gpu) = gpu {
+            let direct = gpu.as_ref().filter(|gpu| gpu.direct);
+            if let Some(gpu) = direct {
                 // The encoder (and the video processor the sink writer puts
                 // in front of it to convert and scale) runs on the device the
                 // frames' textures are on.
@@ -324,7 +374,7 @@ impl RecordingWriter {
                 }
                 Err(e) => return Err(AppError::Encode(format!("AddStream video: {e}"))),
             };
-            let (in_width, in_height) = gpu.as_ref().map_or((width, height), |gpu| gpu.size);
+            let (in_width, in_height) = direct.map_or((width, height), |gpu| gpu.size);
             let video_in = make_video_input_type(in_width, in_height, fps)?;
             writer
                 .SetInputMediaType(video_stream, &video_in, None)
@@ -345,6 +395,16 @@ impl RecordingWriter {
                 audio_streams.push(idx);
             }
 
+            // Needed for every frame when the encoder doesn't take textures,
+            // and kept ready in case one that does turns them down later.
+            let readback = match gpu {
+                Some(gpu) if gpu.direct => TextureReadback::new(&gpu.frames, gpu.size)
+                    .inspect_err(|e| tracing::warn!("no fallback for texture frames: {e}"))
+                    .ok(),
+                Some(gpu) => Some(TextureReadback::new(&gpu.frames, gpu.size)?),
+                None => None,
+            };
+
             Ok(Self {
                 writer,
                 video_stream,
@@ -353,6 +413,9 @@ impl RecordingWriter {
                 fps,
                 codec_api,
                 keyframes: std::cell::RefCell::new(KeyframeSchedule::new(fps)),
+                input_size: (in_width, in_height),
+                takes_textures: std::cell::Cell::new(direct.is_some()),
+                readback,
                 _mf: mf,
             })
         }
@@ -376,17 +439,68 @@ impl RecordingWriter {
         unsafe { self.writer.BeginWriting().encode_ctx("BeginWriting") }
     }
 
+    /// Writes a frame. One that comes as a texture goes to the encoder as
+    /// such while it takes them (`takes_textures`); if it turns one down,
+    /// that frame and every later one are read back into memory instead
+    /// (see `write_read_back`), rather than the video stopping there.
     pub fn write_video(&self, frame: VideoFrame) -> Result<(), AppError> {
         self.force_keyframe_if_due(frame.pts);
         let pts_hns = frame.pts.as_nanos() as i64 / 100;
         let duration_hns = 10_000_000i64 / self.fps as i64;
+        let timing = (pts_hns, duration_hns);
+        match frame.data {
+            FrameData::Cpu(pixels) => self.write_memory_frame(pixels, timing),
+            FrameData::Gpu(texture) if self.takes_textures() => {
+                let written = unsafe { make_texture_sample(&texture, pts_hns, duration_hns) }
+                    .and_then(|sample| self.write_video_sample(&sample));
+                match written {
+                    Err(e) if self.readback.is_some() => {
+                        tracing::warn!(
+                            "the encoder turned a texture frame down ({e}); reading frames back from now on"
+                        );
+                        self.takes_textures.set(false);
+                        self.write_read_back(&texture, timing)
+                    }
+                    written => written,
+                }
+            }
+            FrameData::Gpu(texture) => self.write_read_back(&texture, timing),
+        }
+    }
+
+    /// Writes a frame that came as a texture through memory. A stream set
+    /// up for textures takes memory frames at their size just the same, and
+    /// scales them itself; otherwise it's scaled to the output size here, as
+    /// the capture loop would.
+    fn write_read_back(
+        &self,
+        texture: &ID3D11Texture2D,
+        timing: (i64, i64),
+    ) -> Result<(), AppError> {
+        let readback = self.readback.as_ref().ok_or_else(|| {
+            AppError::Encode("a frame came as a texture, with no way to read it back".into())
+        })?;
+        let pixels = readback.read(texture)?;
+        let ((src_w, src_h), (dst_w, dst_h)) = (readback.size, self.input_size);
+        self.write_memory_frame(scale_bgra(pixels, src_w, src_h, dst_w, dst_h), timing)
+    }
+
+    fn write_memory_frame(
+        &self,
+        pixels: FrameBuf,
+        (pts_hns, duration_hns): (i64, i64),
+    ) -> Result<(), AppError> {
+        let sample = unsafe { make_frame_sample(pixels, pts_hns, duration_hns)? };
+        self.write_video_sample(&sample)
+    }
+
+    fn write_video_sample(
+        &self,
+        sample: &windows::Win32::Media::MediaFoundation::IMFSample,
+    ) -> Result<(), AppError> {
         unsafe {
-            let sample = match frame.data {
-                FrameData::Cpu(bytes) => make_frame_sample(bytes, pts_hns, duration_hns)?,
-                FrameData::Gpu(texture) => make_texture_sample(&texture, pts_hns, duration_hns)?,
-            };
             self.writer
-                .WriteSample(self.video_stream, &sample)
+                .WriteSample(self.video_stream, sample)
                 .encode_ctx("WriteSample video")
         }
     }
@@ -1031,8 +1145,12 @@ mod tests {
     /// Frames handed over as textures (`EncodeConfig::gpu_frames`) come out
     /// of the encoder at the output size and in their own colours, the
     /// right way up -- as frames handed over in memory do (checked side by
-    /// side, so a swapped red/blue or a flip in either shows). Top half red,
-    /// bottom half blue. Needs a GPU encoder, so it's ignored by default.
+    /// side, so a swapped red/blue or a flip in either shows). So do
+    /// textures the writer reads back into memory: for an encoder set up
+    /// without them (`GpuInput::direct` false), and for one that turned
+    /// them down partway (see `RecordingWriter::write_video`). Top half
+    /// red, bottom half blue. Needs a GPU encoder, so it's ignored by
+    /// default.
     #[test]
     #[ignore]
     fn texture_frames_encode_scaled_in_their_own_colours() {
@@ -1066,9 +1184,21 @@ mod tests {
             .texture_from_bgra(CAPTURE.0, CAPTURE.1, &red_over_blue(CAPTURE))
             .expect("texture");
 
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum Input {
+            Memory,
+            Texture,
+            ReadBack,
+            ReadBackAfterRefusal,
+        }
         let mut outputs = Vec::new();
-        for on_gpu in [false, true] {
-            let output = dir.path().join(format!("gpu_{on_gpu}.mp4"));
+        for input in [
+            Input::Memory,
+            Input::Texture,
+            Input::ReadBack,
+            Input::ReadBackAfterRefusal,
+        ] {
+            let output = dir.path().join(format!("{input:?}.mp4"));
             let params = EncoderParams {
                 width: OUTPUT.0,
                 height: OUTPUT.1,
@@ -1077,18 +1207,25 @@ mod tests {
                 bitrate_bps: video_bitrate_bps(OUTPUT.0, OUTPUT.1, FPS),
                 audio_tracks: vec![],
                 allow_hardware_encode: true,
-                gpu: on_gpu.then(|| GpuInput {
+                gpu: (input != Input::Memory).then(|| GpuInput {
                     frames: gpu.clone(),
                     size: CAPTURE,
+                    direct: input != Input::ReadBack,
                 }),
             };
             let writer = RecordingWriter::new(&output, &params).expect("writer");
             writer.begin_writing().expect("begin_writing");
+            if input == Input::ReadBackAfterRefusal {
+                // What `write_video` does once the encoder turns a texture
+                // down.
+                writer.takes_textures.set(false);
+            }
+            assert_eq!(writer.takes_textures(), input == Input::Texture);
             for i in 0..FPS {
-                let data = if on_gpu {
-                    FrameData::Gpu(texture.clone())
-                } else {
+                let data = if input == Input::Memory {
                     red_over_blue(OUTPUT).into()
+                } else {
+                    FrameData::Gpu(texture.clone())
                 };
                 writer
                     .write_video(VideoFrame {
@@ -1100,7 +1237,7 @@ mod tests {
             let path = writer.finalize().expect("finalize");
             let frames = read_keyframe_times(&path);
             let (size, colours) = first_frame_colours(&path);
-            println!("on_gpu={on_gpu}: {size:?}, top/bottom {colours:?}, keyframes {frames:?}");
+            println!("{input:?}: {size:?}, top/bottom {colours:?}, keyframes {frames:?}");
             outputs.push((size, colours));
         }
         for (size, [top, bottom]) in outputs {

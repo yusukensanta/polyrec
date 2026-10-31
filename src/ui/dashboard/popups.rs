@@ -37,12 +37,16 @@ impl App {
         });
         // Experimental, and only with the hardware encoder -- see
         // `EncodeConfig::gpu_frames`.
-        ui.add_enabled(
-            self.config.encode.encoder_mode == EncoderMode::Hardware,
-            egui::Checkbox::new(&mut self.config.encode.gpu_frames, s.gpu_frames_label),
-        )
-        .on_hover_text(s.gpu_frames_tooltip)
-        .on_disabled_hover_text(s.gpu_frames_needs_hardware);
+        let gpu_frames = ui
+            .add_enabled(
+                self.config.encode.encoder_mode == EncoderMode::Hardware,
+                egui::Checkbox::new(&mut self.config.encode.gpu_frames, s.gpu_frames_label),
+            )
+            .on_hover_text(s.gpu_frames_tooltip)
+            .on_disabled_hover_text(s.gpu_frames_needs_hardware);
+        if gpu_frames.changed() && self.config.encode.gpu_frames {
+            crate::encode::gpu::GpuFrames::warm_up();
+        }
 
         section_header(ui, s.resolution_header);
         ui.horizontal(|ui| {

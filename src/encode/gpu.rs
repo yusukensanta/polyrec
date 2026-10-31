@@ -10,13 +10,17 @@
 //! gets that texture (`MFCreateDXGISurfaceBuffer`), with Media Foundation's
 //! GPU video processor doing the colour conversion and any scaling.
 
+use crate::capture::frame_pool::FrameBuf;
+use crate::capture::video::copy_rows;
 use crate::error::{AppError, ResultExt};
+use std::sync::{Mutex, PoisonError};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+    ID3D11Multithread, ID3D11Resource, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Media::MediaFoundation::{IMFDXGIDeviceManager, MFCreateDXGIDeviceManager};
@@ -40,6 +44,9 @@ pub struct GpuFrames {
 unsafe impl Send for GpuFrames {}
 unsafe impl Sync for GpuFrames {}
 
+/// The device recordings keep their frames on -- see `GpuFrames::shared`.
+static SHARED: Mutex<Option<GpuFrames>> = Mutex::new(None);
+
 impl std::fmt::Debug for GpuFrames {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("GpuFrames")
@@ -47,6 +54,42 @@ impl std::fmt::Debug for GpuFrames {
 }
 
 impl GpuFrames {
+    /// The device recordings keep their frames on: created the first time
+    /// it's asked for, then shared by every recording and Highlight session
+    /// for the rest of the run -- and created again if the GPU was reset or
+    /// removed since (a driver update, say). Each recording used to create
+    /// one of its own, on the dashboard's thread. Creating it takes a
+    /// moment, so `warm_up` does that ahead of the first recording.
+    pub fn shared() -> Result<Self, AppError> {
+        let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(frames) = shared.as_ref().filter(|frames| frames.usable()) {
+            return Ok(frames.clone());
+        }
+        let frames = Self::new()?;
+        *shared = Some(frames.clone());
+        Ok(frames)
+    }
+
+    /// Creates the shared device (see `shared`) on a thread of its own.
+    pub fn warm_up() {
+        let spawned = std::thread::Builder::new()
+            .name("GpuFramesWarmUp".into())
+            .spawn(|| {
+                if let Err(e) = Self::shared() {
+                    tracing::warn!("frames will stay in system memory: {e}");
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("couldn't start creating the GPU frames device: {e}");
+        }
+    }
+
+    /// Whether the device still works: it isn't lost to a GPU reset or
+    /// removal.
+    fn usable(&self) -> bool {
+        unsafe { self.device.GetDeviceRemovedReason() }.is_ok()
+    }
+
     pub fn new() -> Result<Self, AppError> {
         let (mut device, mut context) = (None, None);
         unsafe {
@@ -192,4 +235,114 @@ impl GpuFrames {
 pub struct GpuInput {
     pub frames: GpuFrames,
     pub size: (u32, u32),
+    /// Whether the encoder gets the textures as they are. If not, the writer
+    /// reads each back into memory first (`TextureReadback`): slower, but
+    /// the recording goes on -- see `RecordingWriter::start`.
+    pub direct: bool,
+}
+
+/// Reads frames that came as textures back into memory, for an encoder that
+/// doesn't take them as textures after all (see `GpuInput::direct`) -- the
+/// same copy the capture loop makes itself when frames don't stay on the
+/// GPU.
+pub(crate) struct TextureReadback {
+    frames: GpuFrames,
+    staging: ID3D11Resource,
+    /// The frames' size.
+    pub(crate) size: (u32, u32),
+}
+
+impl TextureReadback {
+    pub(crate) fn new(frames: &GpuFrames, (width, height): (u32, u32)) -> Result<Self, AppError> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging = None;
+        unsafe {
+            frames
+                .device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .encode_ctx("CreateTexture2D (readback)")?;
+        }
+        let staging = staging
+            .ok_or_else(|| AppError::Encode("CreateTexture2D returned None".into()))?
+            .cast()
+            .encode_ctx("staging texture as resource")?;
+        Ok(Self {
+            frames: frames.clone(),
+            staging,
+            size: (width, height),
+        })
+    }
+
+    /// The pixels of `texture`, which must be of `size`, with its rows
+    /// packed. Waits for the GPU to finish the copy.
+    pub(crate) fn read(&self, texture: &ID3D11Texture2D) -> Result<FrameBuf, AppError> {
+        let (width, height) = (self.size.0 as usize, self.size.1 as usize);
+        let mut pixels = vec![0u8; width * 4 * height];
+        unsafe {
+            let source: ID3D11Resource = texture.cast().encode_ctx("texture as resource")?;
+            let context = &self.frames.context;
+            context.CopyResource(&self.staging, &source);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .encode_ctx("Map (readback)")?;
+            // SAFETY: a successful Map of a `height`-row texture makes
+            // `height` rows of `RowPitch` bytes readable at `pData`.
+            copy_rows(
+                mapped.pData as *const u8,
+                mapped.RowPitch as usize,
+                width * 4,
+                height,
+                &mut pixels,
+            );
+            context.Unmap(&self.staging, 0);
+        }
+        Ok(pixels.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every recording gets the same device, made once. Needs a GPU, so
+    /// it's ignored by default.
+    #[test]
+    #[ignore]
+    fn the_shared_device_is_made_once() {
+        let first = GpuFrames::shared().expect("shared");
+        let second = GpuFrames::shared().expect("shared");
+        assert_eq!(first.device.as_raw(), second.device.as_raw());
+        assert!(first.usable());
+    }
+
+    /// A texture read back comes out as the pixels it holds, rows packed.
+    /// Needs a GPU, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn a_texture_reads_back_as_its_pixels() {
+        // An odd width, so the GPU pads the rows it maps.
+        let (width, height) = (37, 5);
+        let pixels: Vec<u8> = (0..width * height * 4).map(|i| (i % 251) as u8).collect();
+        let gpu = GpuFrames::new().expect("GpuFrames");
+        let texture = gpu
+            .texture_from_bgra(width, height, &pixels)
+            .expect("texture");
+        let readback = TextureReadback::new(&gpu, (width, height)).expect("readback");
+        assert_eq!(&*readback.read(&texture).expect("read"), pixels.as_slice());
+    }
 }
