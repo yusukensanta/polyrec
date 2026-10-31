@@ -34,6 +34,11 @@ const VIDEO_CHANNEL_CAPACITY: usize = 4;
 /// Frames one video track may have queued for its actor at once -- about a
 /// second at 60 fps. See `spawn_video_pump`.
 const MAX_VIDEO_FRAMES_IN_FLIGHT: usize = 64;
+/// `MAX_VIDEO_FRAMES_IN_FLIGHT` for frames that stay on the GPU, where each
+/// is a texture of its own in video memory (15 MB at 1440p): about 130 ms at
+/// 60 fps. 64 of them let an encoder that fell behind tie up 1 GB of video
+/// memory, which a game being recorded may need.
+const MAX_GPU_FRAMES_IN_FLIGHT: usize = 8;
 const AUDIO_CHANNEL_CAPACITY: usize = 64;
 
 /// What to record, resolved by the dashboard from its checkboxes and
@@ -122,10 +127,12 @@ impl CaptureDimensions {
             );
         }
         let bitrate_bps = bitrate_bps(encode, output, fps);
-        let gpu = encode
-            .gpu_frames
-            .then(|| gpu_frames_for(encode, capture, output, fps, bitrate_bps))
-            .flatten();
+        let gpu = encode.gpu_frames.then(|| gpu_frames_for(encode)).flatten();
+        if gpu.is_some() {
+            tracing::info!(
+                "frames stay on the GPU ({capture:?} scaled to {output:?} by the encoder)"
+            );
+        }
         Self {
             capture,
             output,
@@ -143,6 +150,7 @@ impl CaptureDimensions {
             gpu: self.gpu.clone().map(|frames| GpuInput {
                 frames,
                 size: self.capture,
+                direct: true,
             }),
             ..video_params(
                 &inputs.encode,
@@ -230,39 +238,20 @@ fn video_params(
 }
 
 /// The device for keeping a recording's frames on the GPU (see
-/// `EncodeConfig::gpu_frames`), if that works here: only a hardware encoder
-/// takes textures, and the encoder has to accept them at these settings
-/// (probed once, then cached -- see `video_encoder_accepts`). `None` falls
-/// back to the usual path. Creating the device and, the first time, an
-/// encoder takes a moment on the calling thread; the setting is
-/// experimental and off by default.
-fn gpu_frames_for(
-    encode: &EncodeSettings,
-    capture: (u32, u32),
-    output: (u32, u32),
-    fps: u32,
-    bitrate_bps: u32,
-) -> Option<GpuFrames> {
+/// `EncodeConfig::gpu_frames`), if that can work here: only a hardware
+/// encoder takes textures. The device is shared, and normally created
+/// already (see `GpuFrames::warm_up`). Whether the encoder takes the
+/// textures is found out by the recorder, on its own thread, which reads
+/// them back itself if not (see `RecordingWriter::start`). `None` keeps
+/// frames in system memory.
+fn gpu_frames_for(encode: &EncodeSettings) -> Option<GpuFrames> {
     if !matches!(encode.encoder_mode, EncoderMode::Hardware) {
         tracing::info!("frames stay in system memory: GPU frames need the hardware encoder");
         return None;
     }
-    let frames = GpuFrames::new()
+    GpuFrames::shared()
         .inspect_err(|e| tracing::warn!("frames stay in system memory: {e}"))
-        .ok()?;
-    let params = EncoderParams {
-        gpu: Some(GpuInput {
-            frames: frames.clone(),
-            size: capture,
-        }),
-        ..video_params(encode, output, fps, bitrate_bps)
-    };
-    if !video_encoder_accepts(&params) {
-        tracing::warn!("frames stay in system memory: the encoder doesn't take them as textures");
-        return None;
-    }
-    tracing::info!("frames stay on the GPU ({capture:?} scaled to {output:?} by the encoder)");
-    Some(frames)
+        .ok()
 }
 
 /// Whether the encoder `encode` selects takes video at `output` and `fps`.
@@ -399,6 +388,11 @@ impl CapturePipeline {
         log_prefix: &'static str,
     ) {
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
+        let max_in_flight = if dims.gpu.is_some() {
+            MAX_GPU_FRAMES_IN_FLIGHT
+        } else {
+            MAX_VIDEO_FRAMES_IN_FLIGHT
+        };
         let (kind, handle) = (source.kind, source.hwnd);
         let ctrl = self.ctrl.clone();
         let capture = spawn_capture_thread(format!("{log_prefix}VideoCapture"), move || {
@@ -413,12 +407,7 @@ impl CapturePipeline {
                 dims.gpu,
             )
         });
-        let pump = spawn_video_pump(
-            video_rx,
-            dest_tx.clone(),
-            frame_count,
-            MAX_VIDEO_FRAMES_IN_FLIGHT,
-        );
+        let pump = spawn_video_pump(video_rx, dest_tx.clone(), frame_count, max_in_flight);
         self.track(capture, pump);
     }
 

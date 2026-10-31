@@ -171,7 +171,13 @@ pub fn display_refresh_hz(target: CaptureTarget) -> Option<u32> {
 /// so the identity (common/default) path returns it straight back with no copy at
 /// all, instead of cloning a full frame (several MB at 1080p+) every frame for
 /// nothing -- only the actual mismatch path needs to allocate a new buffer.
-fn scale_bgra(src: FrameBuf, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> FrameBuf {
+pub(crate) fn scale_bgra(
+    src: FrameBuf,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> FrameBuf {
     if src_w == dst_w && src_h == dst_h {
         return src;
     }
@@ -210,7 +216,7 @@ fn ping_pong_indices(frame_counter: u64) -> (usize, usize) {
 /// # Safety
 /// `src` must be valid for reads of `(height - 1) * row_pitch + packed_row`
 /// bytes (zero bytes when `height == 0`).
-unsafe fn copy_rows(
+pub(crate) unsafe fn copy_rows(
     src: *const u8,
     row_pitch: usize,
     packed_row: usize,
@@ -581,6 +587,7 @@ pub async fn run_video_capture(
         Some(frames) => FrameOutput::Gpu {
             frames,
             newest: None,
+            failures: 0,
         },
         None => FrameOutput::Cpu {
             pool: FramePool::new(),
@@ -652,6 +659,9 @@ enum FrameOutput {
         frames: GpuFrames,
         /// The newest frame's texture (or a black one), if one has been sent.
         newest: Option<ID3D11Texture2D>,
+        /// Frames that couldn't be copied since the last one that could --
+        /// see `FrameOutput::skipped`.
+        failures: u64,
     },
 }
 
@@ -700,10 +710,21 @@ impl FrameOutput {
                 }
                 Ok(true)
             }
-            Self::Gpu { frames, newest } => {
+            Self::Gpu {
+                frames,
+                newest,
+                failures,
+            } => {
                 // A copy, since WGC reuses its own texture for a later frame
                 // while the encoder may still be reading this one.
-                let texture = frames.copy_of(&frame_texture(frame)?)?;
+                let texture = match frame_texture(frame).and_then(|t| frames.copy_of(&t)) {
+                    Ok(texture) => texture,
+                    Err(e) => return Ok(Self::skipped(failures, &e)),
+                };
+                if *failures > 0 {
+                    tracing::info!("frames copy again, after {failures} that couldn't be");
+                    *failures = 0;
+                }
                 *newest = Some(texture.clone());
                 Ok(send_texture(tx, pts, texture).await)
             }
@@ -754,18 +775,36 @@ impl FrameOutput {
                     }
                 }
             }
-            Self::Gpu { frames, newest } => {
+            Self::Gpu {
+                frames,
+                newest,
+                failures,
+            } => {
                 let texture = match newest {
                     Some(texture) => texture.clone(),
-                    None => newest
-                        .insert(frames.black_texture(capture_size.0, capture_size.1)?)
-                        .clone(),
+                    None => match frames.black_texture(capture_size.0, capture_size.1) {
+                        Ok(black) => newest.insert(black).clone(),
+                        Err(e) => return Ok(Self::skipped(failures, &e)),
+                    },
                 };
                 // Sending the same texture again is fine: nothing writes to
                 // a frame's texture once it's been sent.
                 Ok(send_texture(tx, now, texture).await)
             }
         }
+    }
+
+    /// A frame that stays on the GPU couldn't be copied (or a black one
+    /// made): out of video memory, say, with a game holding most of it.
+    /// It's skipped, and the video goes on with the frames around it (or
+    /// the newest one repeated) -- it used to end the video for the rest of
+    /// the recording. Logs only the first of a run of failures.
+    fn skipped(failures: &mut u64, error: &AppError) -> bool {
+        if *failures == 0 {
+            tracing::warn!("skipping frames that can't be copied on the GPU: {error}");
+        }
+        *failures += 1;
+        true
     }
 
     /// Capture stopped: sends what's still waiting to be read back. The

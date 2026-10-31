@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Keep frames on the GPU (experimental)** is sturdier:
+  - A frame that can't be copied on the GPU, say because a game is using most of the video memory, is now skipped. It used to end the video for the rest of the recording, with no message.
+  - Starting a recording, or Highlight following a new window, no longer freezes the window for up to half a second. The GPU device is set up once per run, in the background. The check of whether the encoder takes frames this way is now part of starting the recording itself, on the recorder's own thread.
+  - If the encoder doesn't take frames this way, or stops taking them partway through, PolyRec now reads them back the usual way and the recording goes on. That check used to stop short of writing a frame, and a frame turned down mid-recording was lost.
+  - At most 12 frames now wait for the encoder at once, about 180 MB of video memory at 1440p. It used to be up to 68, about 1 GB, if the encoder fell behind.
+  - A recording whose frame rate the encoder turns down now steps down to a lower rate it does take. It used to drop back to copying frames through system memory instead.
+
 ## [v0.5.113] - 2026-10-31
 
 ### Fixed

@@ -87,10 +87,9 @@ pub fn spawn_highlight_actor(
             let seg_path = segment_dir.join(format!("highlight_seg_{seg_id}.mp4"));
 
             // Later segments start straight at the rate the first one settled on.
-            let (writer, settled_fps) = RecordingWriter::new_at_highest_fps(&seg_path, &params)?;
+            let (writer, settled_fps) = RecordingWriter::start(&seg_path, &params)?;
             params.fps = settled_fps;
             fps.set(settled_fps);
-            writer.begin_writing()?;
 
             let seg_start = Instant::now();
             // Capture threads stamp frame/sample PTS from the shared
@@ -147,6 +146,11 @@ pub fn spawn_highlight_actor(
             // to finalize a sink with nothing written to it. That's expected
             // here, not a real failure: skip it instead of treating the whole
             // actor as errored.
+            // Later segments read texture frames back from the start if this
+            // one had to (see `RecordingWriter::takes_textures`).
+            if let Some(gpu) = &mut params.gpu {
+                gpu.direct = writer.takes_textures();
+            }
             match writer.finalize() {
                 Ok(finished_path) => {
                     let info = SegmentInfo {

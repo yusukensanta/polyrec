@@ -41,9 +41,8 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let (writer, settled_fps) = RecordingWriter::new_at_highest_fps(&temp_path, &params)?;
+        let (writer, settled_fps) = RecordingWriter::start(&temp_path, &params)?;
         fps.set(settled_fps);
-        writer.begin_writing()?;
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);
 

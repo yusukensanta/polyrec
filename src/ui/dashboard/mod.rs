@@ -175,6 +175,11 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, mut config: Config) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
+        if config.encode.gpu_frames
+            && config.encode.encoder_mode == crate::config::EncoderMode::Hardware
+        {
+            crate::encode::gpu::GpuFrames::warm_up();
+        }
         let overlay_enabled = config.overlay.enabled;
         let show_recording_border = config.show_recording_border;
         let app_audio_only = config.default_app_audio_only;
