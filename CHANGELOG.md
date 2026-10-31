@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A notification-area (tray) icon. Clicking it brings PolyRec up. Its menu hides or shows the window, starts recording the source selected in the list or stops the recording, and quits. Hovering over it shows whether a recording is running. Closing the window still quits.
+
 ## [v0.5.108] - 2026-10-31
 
 ### Fixed
