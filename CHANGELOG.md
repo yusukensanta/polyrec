@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.113] - 2026-10-31
+
 ### Fixed
 
 - A finished recording or Highlight save no longer replaces an existing file with the same name. Two recordings of the same app finishing in the same second, or two saves numbered with a custom prefix at once, used to get the same name, and the second one replaced the first. The second now gets the next free name, such as `app_2026-10-31-12-00-00_2.mp4` or the next number.
