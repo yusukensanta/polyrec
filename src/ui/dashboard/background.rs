@@ -122,8 +122,13 @@ impl App {
                     self.export.result_rx = None;
                     self.last_output_path = Some(path);
                     self.refresh_recent();
+                    let lost = std::mem::take(&mut self.finalizing.lost_sources);
                     if disk_full {
                         self.notice = Some(s.disk_full_mid_recording.to_string());
+                    } else if let Some(msg) =
+                        lost_sources_message(s, &lost, &self.last_recording_audio_labels)
+                    {
+                        self.notice = Some(msg);
                     } else if let Some(msg) = audio_tracks_missing_message(
                         s,
                         self.export.available_tracks,
@@ -286,6 +291,36 @@ fn needs_ui_while_minimized(minimized: bool, wanted: [bool; 2], up: [bool; 2]) -
 /// `track_label_fallback`'s doc comment for that case, which this doesn't
 /// need to warn about). Otherwise fills in `s.audio_tracks_missing_template`'s
 /// `{actual}`/`{expected}` placeholders.
+/// What a recording lost before it was stopped, if anything -- see
+/// `capture::LostSources`. `labels` names its audio tracks, in track order.
+fn lost_sources_message(
+    s: &Strings,
+    lost: &crate::capture::LostSources,
+    labels: &[String],
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if lost.video {
+        parts.push(s.notice_video_source_lost.to_owned());
+    }
+    if !lost.audio.is_empty() {
+        let tracks: Vec<String> = lost
+            .audio
+            .iter()
+            .map(|track| {
+                labels
+                    .get(track.0 as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("#{}", track.0 + 1))
+            })
+            .collect();
+        parts.push(
+            s.notice_audio_source_lost_template
+                .replace("{tracks}", &tracks.join(", ")),
+        );
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 fn audio_tracks_missing_message(s: &Strings, actual: usize, expected: usize) -> Option<String> {
     if actual >= expected {
         return None;
@@ -347,6 +382,46 @@ mod tests {
             [true, true],
             [false, false]
         ));
+    }
+
+    #[test]
+    fn lost_sources_name_the_tracks_that_went_quiet() {
+        use crate::capture::LostSources;
+        use crate::types::TrackId;
+        let s = Lang::En.strings();
+        let labels = [
+            "🔊 Speakers".to_string(),
+            "🎙 Mic".to_string(),
+            "Discord".to_string(),
+        ];
+        assert_eq!(
+            lost_sources_message(s, &LostSources::default(), &labels),
+            None
+        );
+
+        let audio = LostSources {
+            video: false,
+            audio: vec![TrackId::new(1), TrackId::new(2)],
+        };
+        assert_eq!(
+            lost_sources_message(s, &audio, &labels).unwrap(),
+            s.notice_audio_source_lost_template
+                .replace("{tracks}", "🎙 Mic, Discord")
+        );
+
+        let both = LostSources {
+            video: true,
+            audio: vec![TrackId::new(7)],
+        };
+        assert_eq!(
+            lost_sources_message(s, &both, &labels).unwrap(),
+            format!(
+                "{} {}",
+                s.notice_video_source_lost,
+                s.notice_audio_source_lost_template
+                    .replace("{tracks}", "#8")
+            )
+        );
     }
 
     #[test]

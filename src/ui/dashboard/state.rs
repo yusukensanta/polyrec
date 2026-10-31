@@ -67,6 +67,8 @@ pub(super) struct Finalizing {
     pub handle: Option<JoinHandle<Result<PathBuf, AppError>>>,
     pub path: Option<PathBuf>,
     pub disk_full: Option<Arc<AtomicBool>>,
+    /// What the recording being saved lost before it was stopped.
+    pub lost_sources: crate::capture::LostSources,
 }
 
 /// The post-recording export controls -- see `render_export_controls`.

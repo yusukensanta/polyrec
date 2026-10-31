@@ -449,7 +449,14 @@ impl CapturePipeline {
                     }
                 },
             );
-            let pump = spawn_audio_pump(audio_rx, dest_tx.clone(), self.new_audio_level());
+            let level = self.new_audio_level();
+            let pump = spawn_audio_pump(
+                audio_rx,
+                dest_tx.clone(),
+                level,
+                track_id,
+                self.ctrl.clone(),
+            );
             self.track(capture, pump);
         }
     }
@@ -497,7 +504,14 @@ impl CapturePipeline {
                         )
                     },
                 );
-                let pump = spawn_audio_pump(audio_rx, dest_tx.clone(), self.new_audio_level());
+                let level = self.new_audio_level();
+                let pump = spawn_audio_pump(
+                    audio_rx,
+                    dest_tx.clone(),
+                    level,
+                    track_id,
+                    self.ctrl.clone(),
+                );
                 self.track(capture, pump);
             }
         }

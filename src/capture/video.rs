@@ -596,24 +596,35 @@ pub async fn run_video_capture(
             newest_slot: None,
         },
     };
+    // Once the source is gone, the video goes on to the end of the recording
+    // -- holding its last picture, or black once capturing has failed --
+    // rather than stopping: a stream that stops getting frames stalls the
+    // whole file (see `pacer::STILL_FRAME_REPEAT`), so Stop could never
+    // finish saving it.
+    let mut gone: Option<SourceGone> = None;
     loop {
         if ctrl.is_stopped() {
             break;
         }
-        if res.item_closed() {
+        if gone.is_none() && res.item_closed() {
             tracing::warn!(
-                "capture item closed (captured window destroyed or its display disconnected), stopping video capture"
+                "capture item closed (captured window destroyed or its display disconnected); the rest of the video holds its last picture"
             );
-            break;
+            ctrl.video_source_lost();
+            gone = Some(SourceGone::Closed);
         }
 
         pacer.set_fps(fps.get());
         let paused = ctrl.is_paused();
         // A frame the pacer holds back (paused, or over the fps cap) gets no
         // GPU copy or readback unless it's recorded after all.
-        let step = match res.frame_pool.TryGetNextFrame() {
-            Ok(frame) => pacer.on_frame(frame, ctrl.clock.elapsed(), paused),
-            Err(_) => match pacer.on_idle(ctrl.clock.elapsed(), paused) {
+        let next = match gone {
+            None => res.frame_pool.TryGetNextFrame().ok(),
+            Some(_) => None,
+        };
+        let step = match next {
+            Some(frame) => pacer.on_frame(frame, ctrl.clock.elapsed(), paused),
+            None => match pacer.on_idle(ctrl.clock.elapsed(), paused) {
                 Step::Wait => {
                     tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                     continue;
@@ -622,16 +633,27 @@ pub async fn run_video_capture(
             },
         };
         let sent = match step {
-            Step::Record(frame, pts) => output.on_frame(&res, &frame, pts, &tx, sizes).await?,
-            Step::Repeat(now) => output.repeat(&res, now, &tx, sizes).await?,
-            Step::Wait => true,
+            Step::Record(frame, pts) => output.on_frame(&res, &frame, pts, &tx, sizes).await,
+            Step::Repeat(now) if gone == Some(SourceGone::Failed) => {
+                Ok(output.black(now, &tx, sizes).await)
+            }
+            Step::Repeat(now) => output.repeat(&res, now, &tx, sizes).await,
+            Step::Wait => Ok(true),
         };
+        let sent = sent.unwrap_or_else(|e| {
+            tracing::error!("video capture failed ({e}); the rest of the video is black");
+            ctrl.video_source_lost();
+            gone = Some(SourceGone::Failed);
+            true
+        });
         if !sent {
             break;
         }
     }
 
-    output.flush(&res, &tx, sizes).await?;
+    if gone != Some(SourceGone::Failed) {
+        output.flush(&res, &tx, sizes).await?;
+    }
     res.close();
 
     Ok(())
@@ -663,6 +685,17 @@ enum FrameOutput {
         /// see `FrameOutput::skipped`.
         failures: u64,
     },
+}
+
+/// How the video source went away partway through a recording -- see
+/// `run_video_capture`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceGone {
+    /// The window was closed, or its display disconnected: the video holds
+    /// its last picture.
+    Closed,
+    /// Capturing failed: the video is black.
+    Failed,
 }
 
 /// (capture size, output size).
@@ -761,18 +794,7 @@ impl FrameOutput {
                         }
                         None => Ok(true),
                     },
-                    None => {
-                        let (width, height) = output_size;
-                        let mut black = pool.take(width as usize * height as usize * 4);
-                        black.fill(0);
-                        Ok(tx
-                            .send(VideoFrame {
-                                pts,
-                                data: black.into(),
-                            })
-                            .await
-                            .is_ok())
-                    }
+                    None => Ok(send_black_frame(pool, tx, pts, output_size).await),
                 }
             }
             Self::Gpu {
@@ -791,6 +813,28 @@ impl FrameOutput {
                 // a frame's texture once it's been sent.
                 Ok(send_texture(tx, now, texture).await)
             }
+        }
+    }
+
+    /// A black frame of `now`, once capturing has failed (see
+    /// `run_video_capture`) -- made without the capture's device, which may
+    /// be what failed. `false` once the receiver is gone.
+    async fn black(
+        &mut self,
+        now: std::time::Duration,
+        tx: &mpsc::Sender<VideoFrame>,
+        (capture_size, output_size): FrameSizes,
+    ) -> bool {
+        match self {
+            Self::Cpu { pool, .. } => send_black_frame(pool, tx, now, output_size).await,
+            // The encoder shares the device here, so when it has failed the
+            // encoder has too, and there's nothing better to send.
+            Self::Gpu {
+                frames, failures, ..
+            } => match frames.black_texture(capture_size.0, capture_size.1) {
+                Ok(black) => send_texture(tx, now, black).await,
+                Err(e) => Self::skipped(failures, &e),
+            },
         }
     }
 
@@ -845,6 +889,24 @@ async fn send_texture(
     tx.send(VideoFrame {
         pts,
         data: FrameData::Gpu(texture),
+    })
+    .await
+    .is_ok()
+}
+
+/// Sends a black frame of `size`, as the frame at `pts`. `false` once the
+/// receiver is gone.
+async fn send_black_frame(
+    pool: &Arc<FramePool>,
+    tx: &mpsc::Sender<VideoFrame>,
+    pts: std::time::Duration,
+    (width, height): (u32, u32),
+) -> bool {
+    let mut black = pool.take(width as usize * height as usize * 4);
+    black.fill(0);
+    tx.send(VideoFrame {
+        pts,
+        data: black.into(),
     })
     .await
     .is_ok()

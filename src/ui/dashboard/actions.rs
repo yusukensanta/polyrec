@@ -449,6 +449,11 @@ impl App {
             tracing::info!("recording stop requested, finalizing: {}", p.display());
         }
         let disk_full = self.session.active().map(|a| Arc::clone(&a.disk_full_flag));
+        self.finalizing.lost_sources = self
+            .session
+            .active()
+            .map(|a| a.lost_sources())
+            .unwrap_or_default();
         self.finalizing.handle = self.session.stop_capture();
         self.finalizing.path = path;
         self.finalizing.disk_full = disk_full;

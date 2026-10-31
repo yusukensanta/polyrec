@@ -630,6 +630,54 @@ impl SilenceFill {
     }
 }
 
+/// How far an audio track's samples reach, and the silence that fills its
+/// gaps -- `SilenceFill` for one track's `AudioSamples`. Used by the capture
+/// loop for a quiet loopback track, and by the track's pump once its capture
+/// has ended while the recording goes on (see
+/// `encode::actor::spawn_audio_pump`).
+pub(crate) struct TrackCoverage {
+    track_id: TrackId,
+    silence: SilenceFill,
+}
+
+impl TrackCoverage {
+    /// A track whose audio starts at recording time `start`.
+    pub(crate) fn new(track_id: TrackId, start: std::time::Duration) -> Self {
+        Self {
+            track_id,
+            silence: SilenceFill::new(start),
+        }
+    }
+
+    /// `samples` were sent for the track.
+    pub(crate) fn on_samples(&mut self, samples: &AudioSamples) {
+        let frames = samples.samples.len() / usize::from(samples.channels.max(1));
+        let duration = std::time::Duration::from_nanos(
+            frames as u64 * 1_000_000_000 / u64::from(samples.sample_rate.max(1)),
+        );
+        self.silence.on_packet(samples.pts, duration);
+    }
+
+    /// Silence for the track's gap up to recording time `now`, once there's
+    /// enough of one to fill -- see `SilenceFill::gap_to_fill`.
+    pub(crate) fn silence_due(&mut self, now: std::time::Duration) -> Option<AudioSamples> {
+        let (pts, frames) = self.silence.gap_to_fill(now)?;
+        Some(AudioSamples {
+            track_id: self.track_id,
+            pts,
+            samples: vec![0.0; frames * usize::from(TARGET_CHANNELS)],
+            sample_rate: TARGET_SAMPLE_RATE,
+            channels: TARGET_CHANNELS,
+        })
+    }
+}
+
+/// How long `GetBuffer` may keep failing (with anything but
+/// `AUDCLNT_E_DEVICE_INVALIDATED`, which ends the track at once) before the
+/// track is given up on -- the audio service restarting, say. Its pump then
+/// keeps it going as silence.
+const GET_BUFFER_FAILING_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// `AUDCLNT_BUFFERFLAGS_SILENT` -- WASAPI's "this packet is silence" flag.
 const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 2;
 
@@ -771,7 +819,10 @@ async unsafe fn run_capture_loop(
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
         let mut diagnostics = PacketDiagnostics::new();
-        let mut silence = SilenceFill::new(ctrl.clock.elapsed());
+        let mut coverage = TrackCoverage::new(track_id, ctrl.clock.elapsed());
+        // Since when `GetBuffer` has been failing, if it is -- see
+        // `GET_BUFFER_FAILING_FOR`.
+        let mut failing_since: Option<std::time::Instant> = None;
         // Rate-limited like the disk-space guard elsewhere -- OpenProcess is
         // a real syscall, not worth doing on every 10ms idle poll.
         let mut last_pid_check = std::time::Instant::now();
@@ -793,8 +844,12 @@ async unsafe fn run_capture_loop(
             let mut frames_available: u32 = 0;
             let mut flags: u32 = 0;
 
-            match capture_client.GetBuffer(&mut data, &mut frames_available, &mut flags, None, None)
-            {
+            let got =
+                capture_client.GetBuffer(&mut data, &mut frames_available, &mut flags, None, None);
+            if got.is_ok() {
+                failing_since = None;
+            }
+            match got {
                 Ok(()) if frames_available > 0 => {
                     let sample_count = frames_available as usize * channels as usize;
                     // SAFETY: GetBuffer just handed us `frames_available`
@@ -835,10 +890,6 @@ async unsafe fn run_capture_loop(
                     let stereo = to_stereo(&samples, channels);
                     let mut resampled = resampler.process(&stereo);
                     apply_gain(&mut resampled, options.gain);
-                    silence.on_packet(
-                        pts,
-                        frames_duration(resampled.len() / usize::from(TARGET_CHANNELS)),
-                    );
                     let audio = AudioSamples {
                         track_id,
                         pts,
@@ -846,6 +897,7 @@ async unsafe fn run_capture_loop(
                         sample_rate: TARGET_SAMPLE_RATE,
                         channels: TARGET_CHANNELS,
                     };
+                    coverage.on_samples(&audio);
 
                     if tx.send(audio).await.is_err() {
                         // Receiver dropped — stop gracefully
@@ -856,18 +908,10 @@ async unsafe fn run_capture_loop(
                     diagnostics.check_no_packets_yet(track_id);
                     if options.fill_silence
                         && !ctrl.is_paused()
-                        && let Some((pts, frames)) = silence.gap_to_fill(ctrl.clock.elapsed())
+                        && let Some(audio) = coverage.silence_due(ctrl.clock.elapsed())
+                        && tx.send(audio).await.is_err()
                     {
-                        let audio = AudioSamples {
-                            track_id,
-                            pts,
-                            samples: vec![0.0; frames * usize::from(TARGET_CHANNELS)],
-                            sample_rate: TARGET_SAMPLE_RATE,
-                            channels: TARGET_CHANNELS,
-                        };
-                        if tx.send(audio).await.is_err() {
-                            break;
-                        }
+                        break;
                     }
                     if let Some(pid) = options.watch_pid
                         && last_pid_check.elapsed() >= std::time::Duration::from_secs(1)
@@ -888,14 +932,22 @@ async unsafe fn run_capture_loop(
                     // The endpoint was unplugged/disabled mid-capture -- retrying
                     // GetBuffer on it forever just spins and spams the warning
                     // below every 10ms, since the device is never coming back on
-                    // this handle. Log once at error level and stop the track
-                    // cleanly (other tracks/video are unaffected) instead.
+                    // this handle. Log once at error level and end the capture
+                    // (other tracks/video are unaffected); the track's pump
+                    // keeps it going as silence.
                     tracing::error!(
                         "audio device invalidated (unplugged/disabled), stopping this track: {e}"
                     );
                     break;
                 }
                 Err(e) => {
+                    let since = *failing_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= GET_BUFFER_FAILING_FOR {
+                        tracing::error!(
+                            "AudioCapture[{track_id:?}]: GetBuffer kept failing ({e}), stopping this track"
+                        );
+                        break;
+                    }
                     tracing::warn!("GetBuffer error: {e}");
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }

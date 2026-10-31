@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A recording whose source went away before you pressed Stop is saved again. If the recorded window closed, its display was disconnected, capturing it failed, or an audio device was unplugged, Stop used to never finish saving the file, and quitting PolyRec then lost it. Now the video holds its last picture (or goes black if capturing failed) and the lost audio track goes on as silence, so the file saves as usual. PolyRec says what was lost once the file is saved. Highlight buffering had the same problem and is fixed too.
+- An audio track whose capture kept failing (for example while the Windows audio service restarted) no longer stops the whole recording from saving.
+
 ## [v0.5.119] - 2026-11-01
 
 ### Fixed

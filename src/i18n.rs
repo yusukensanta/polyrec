@@ -229,6 +229,11 @@ pub struct Strings {
     /// is crash.log's.
     pub notice_restarted_graphics: &'static str,
     pub notice_restarted_error: &'static str,
+    /// Shown once a recording that lost its video source or an audio
+    /// track's device/app before it was stopped is saved -- see
+    /// `capture::LostSources`. `{tracks}` names the audio tracks.
+    pub notice_video_source_lost: &'static str,
+    pub notice_audio_source_lost_template: &'static str,
 
     // Notification-area icon (see `ui::dashboard::tray`)
     pub tray_show: &'static str,
@@ -450,6 +455,8 @@ pub static EN: Strings = Strings {
     toast_not_started: "⚠ Recording didn't start",
     notice_restarted_graphics: "PolyRec restarted itself after a problem with the graphics driver (for example a driver update or reset). A recording that was running was stopped and saved.",
     notice_restarted_error: "PolyRec restarted itself after an unexpected error. A recording that was running was stopped and saved. What went wrong is in {path}.",
+    notice_video_source_lost: "The video stopped before you did: the recorded window closed, its display was disconnected, or capturing it failed. From there on, the video doesn't change.",
+    notice_audio_source_lost_template: "Audio from {tracks} stopped partway through (a device was unplugged, or an app closed). From there on, that audio is silent.",
 
     tray_show: "Show PolyRec",
     tray_hide: "Hide PolyRec",
@@ -630,6 +637,8 @@ pub static JA: Strings = Strings {
     toast_not_started: "⚠ 録画を開始できませんでした",
     notice_restarted_graphics: "グラフィックドライバーの問題（ドライバーの更新やリセットなど）のため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。",
     notice_restarted_error: "予期しないエラーのため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。エラーの内容は {path} に記録されています。",
+    notice_video_source_lost: "停止する前に映像が止まりました（録画中のウィンドウが閉じられた、ディスプレイが切断された、またはキャプチャに失敗しました）。それ以降の映像は変化しません。",
+    notice_audio_source_lost_template: "{tracks} の音声が途中で止まりました（デバイスが外されたか、アプリが終了しました）。それ以降の音声は無音です。",
 
     tray_show: "PolyRec を表示",
     tray_hide: "PolyRec を隠す",
