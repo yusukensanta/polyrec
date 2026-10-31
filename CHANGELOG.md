@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.112] - 2026-10-31
+
 ### Fixed
 
 - The last change before a window goes still is now always recorded. Recording at a lower frame rate than the display refreshes (60 fps on a 144 Hz monitor, say), a change that came too soon after the frame before it was dropped. The recording then kept showing the picture before it for as long as the window stayed still. Changes made while a recording is paused now show up as soon as it resumes, too, instead of the picture from before the pause.
