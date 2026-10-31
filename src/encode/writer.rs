@@ -1,23 +1,26 @@
 use crate::capture::frame_pool::FrameBuf;
 use crate::capture::frame_rate::highest_encodable_fps;
 use crate::config::Codec;
+use crate::encode::gpu::GpuInput;
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
-use crate::types::{AudioSamples, VideoFrame};
+use crate::types::{AudioSamples, FrameData, VideoFrame};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFMediaBuffer,
-    IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
-    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MFAudioFormat_AAC,
-    MFAudioFormat_PCM, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_ARGB32,
-    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
+    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMF2DBuffer,
+    IMFMediaBuffer, IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter,
+    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
+    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SINK_WRITER_D3D_MANAGER, MFAudioFormat_AAC,
+    MFAudioFormat_PCM, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video,
+    MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 use windows::core::HSTRING;
@@ -100,9 +103,9 @@ pub(crate) fn video_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
 /// What the encoders have said about a video setting, for the whole process:
 /// the installed encoders don't change while it runs, and asking one means
 /// creating it (about half a second for a hardware encoder). Keyed by
-/// (is HEVC, width, height, fps, hardware allowed); the bitrate doesn't decide
-/// whether a frame rate is accepted.
-type EncoderAnswerKey = (bool, u32, u32, u32, bool);
+/// (is HEVC, width, height, fps, hardware allowed, frames as textures); the
+/// bitrate doesn't decide whether a frame rate is accepted.
+type EncoderAnswerKey = (bool, u32, u32, u32, bool, bool);
 static ENCODER_ANSWERS: Mutex<BTreeMap<EncoderAnswerKey, bool>> = Mutex::new(BTreeMap::new());
 
 fn encoder_answer_key(params: &EncoderParams) -> EncoderAnswerKey {
@@ -112,6 +115,7 @@ fn encoder_answer_key(params: &EncoderParams) -> EncoderAnswerKey {
         params.height,
         params.fps,
         params.allow_hardware_encode,
+        params.gpu.is_some(),
     )
 }
 
@@ -176,6 +180,9 @@ pub struct EncoderParams {
     /// `(sample_rate, channels)` per audio track, in track-id order.
     pub audio_tracks: Vec<(u32, u16)>,
     pub allow_hardware_encode: bool,
+    /// Frames come as textures (`FrameData::Gpu`) rather than memory
+    /// buffers -- see `encode::gpu`.
+    pub gpu: Option<GpuInput>,
 }
 
 #[cfg(test)]
@@ -191,6 +198,7 @@ impl EncoderParams {
             bitrate_bps: 500_000,
             audio_tracks: audio_tracks.to_vec(),
             allow_hardware_encode: false,
+            gpu: None,
         }
     }
 }
@@ -255,6 +263,7 @@ impl RecordingWriter {
             bitrate_bps,
             ref audio_tracks,
             allow_hardware_encode,
+            ref gpu,
         } = *params;
         let mf = MfSession::start()?;
         unsafe {
@@ -272,7 +281,7 @@ impl RecordingWriter {
                 MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MFCreateAttributes,
             };
             let mut attrs_opt: Option<IMFAttributes> = None;
-            MFCreateAttributes(&mut attrs_opt, 1).encode_ctx("MFCreateAttributes")?;
+            MFCreateAttributes(&mut attrs_opt, 2).encode_ctx("MFCreateAttributes")?;
             let attrs = attrs_opt
                 .ok_or_else(|| AppError::Encode("MFCreateAttributes returned None".into()))?;
             attrs
@@ -281,6 +290,14 @@ impl RecordingWriter {
                     allow_hardware_encode as u32,
                 )
                 .encode_ctx("SetUINT32 hw_transforms")?;
+            if let Some(gpu) = gpu {
+                // The encoder (and the video processor the sink writer puts
+                // in front of it to convert and scale) runs on the device the
+                // frames' textures are on.
+                attrs
+                    .SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &gpu.frames.manager)
+                    .encode_ctx("SetUnknown d3d_manager")?;
+            }
             let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
                 .encode_ctx("MFCreateSinkWriterFromURL")?;
 
@@ -307,7 +324,8 @@ impl RecordingWriter {
                 }
                 Err(e) => return Err(AppError::Encode(format!("AddStream video: {e}"))),
             };
-            let video_in = make_video_input_type(width, height, fps)?;
+            let (in_width, in_height) = gpu.as_ref().map_or((width, height), |gpu| gpu.size);
+            let video_in = make_video_input_type(in_width, in_height, fps)?;
             writer
                 .SetInputMediaType(video_stream, &video_in, None)
                 .encode_ctx("SetInputMediaType video")?;
@@ -363,7 +381,10 @@ impl RecordingWriter {
         let pts_hns = frame.pts.as_nanos() as i64 / 100;
         let duration_hns = 10_000_000i64 / self.fps as i64;
         unsafe {
-            let sample = make_frame_sample(frame.data, pts_hns, duration_hns)?;
+            let sample = match frame.data {
+                FrameData::Cpu(bytes) => make_frame_sample(bytes, pts_hns, duration_hns)?,
+                FrameData::Gpu(texture) => make_texture_sample(&texture, pts_hns, duration_hns)?,
+            };
             self.writer
                 .WriteSample(self.video_stream, &sample)
                 .encode_ctx("WriteSample video")
@@ -595,6 +616,36 @@ unsafe fn make_frame_sample(
     }
 }
 
+/// The sample for a frame that's still on the GPU (`FrameData::Gpu`): a DXGI
+/// surface buffer over the texture itself, which the encoder's video
+/// processor reads in place. The buffer holds a reference to the texture
+/// until the encoder is done with it.
+unsafe fn make_texture_sample(
+    texture: &ID3D11Texture2D,
+    pts_hns: i64,
+    duration_hns: i64,
+) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, AppError> {
+    unsafe {
+        let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false)
+            .encode_ctx("MFCreateDXGISurfaceBuffer")?;
+        let length = buffer
+            .cast::<IMF2DBuffer>()
+            .encode_ctx("IMF2DBuffer")?
+            .GetContiguousLength()
+            .encode_ctx("GetContiguousLength")?;
+        buffer
+            .SetCurrentLength(length)
+            .encode_ctx("SetCurrentLength")?;
+        let sample = MFCreateSample().encode_ctx("MFCreateSample")?;
+        sample.AddBuffer(&buffer).encode_ctx("AddBuffer")?;
+        sample.SetSampleTime(pts_hns).encode_ctx("SetSampleTime")?;
+        sample
+            .SetSampleDuration(duration_hns)
+            .encode_ctx("SetSampleDuration")?;
+        Ok(sample)
+    }
+}
+
 /// An `IMFMediaBuffer` over a captured frame's own bytes. `make_sample`
 /// copies its input into a freshly allocated `MFCreateMemoryBuffer`; for
 /// video that was a second full-frame copy (8.3 MB at 1080p, 33 MB at 4K)
@@ -772,6 +823,7 @@ mod tests {
                     bitrate_bps: video_bitrate_bps(W, H, fps),
                     audio_tracks: vec![],
                     allow_hardware_encode: true,
+                    gpu: None,
                 };
                 if !video_encoder_accepts(&params) {
                     println!("{codec:?} {fps} fps: rejected by this PC's encoder");
@@ -819,6 +871,7 @@ mod tests {
                 bitrate_bps: video_bitrate_bps(W, H, 240),
                 audio_tracks: vec![],
                 allow_hardware_encode: true,
+                gpu: None,
             };
             let output = dir.path().join(format!("{codec:?}_stepped.mp4"));
             let (writer, fps) =
@@ -918,6 +971,151 @@ mod tests {
         }
     }
 
+    type Rgb = (u8, u8, u8);
+
+    /// The size of the first video frame in `path` and its colour (R, G, B)
+    /// at a quarter and three quarters of the way down, decoded to RGB32
+    /// through a source reader (reading the rows the right way round
+    /// whichever way the frame is stored).
+    fn first_frame_colours(path: &std::path::Path) -> ((u32, u32), [Rgb; 2]) {
+        use windows::Win32::Media::MediaFoundation::{
+            MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            MFCreateAttributes, MFCreateSourceReaderFromURL, MFVideoFormat_RGB32,
+        };
+        unsafe {
+            let mut attrs = None;
+            MFCreateAttributes(&mut attrs, 1).unwrap();
+            let attrs = attrs.unwrap();
+            attrs
+                .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+                .unwrap();
+            let url = windows::core::HSTRING::from(path.to_str().unwrap());
+            let reader = MFCreateSourceReaderFromURL(&url, &attrs).expect("source reader");
+            let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+            let rgb = MFCreateMediaType().unwrap();
+            rgb.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).unwrap();
+            rgb.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).unwrap();
+            reader
+                .SetCurrentMediaType(stream, None, &rgb)
+                .expect("decode to RGB32");
+            let current = reader.GetCurrentMediaType(stream).unwrap();
+            let size = current.GetUINT64(&MF_MT_FRAME_SIZE).unwrap();
+            let (width, height) = ((size >> 32) as u32, size as u32);
+            // Negative: stored bottom-up.
+            let stride = current
+                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                .map_or(width as i32 * 4, |s| s as i32);
+            let mut flags = 0u32;
+            let mut sample = None;
+            reader
+                .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                .expect("ReadSample");
+            let buffer = sample
+                .expect("a decoded frame")
+                .ConvertToContiguousBuffer()
+                .unwrap();
+            let mut data = std::ptr::null_mut();
+            buffer.Lock(&mut data, None, None).unwrap();
+            let pixel = |y: u32| {
+                let row = if stride < 0 { height - 1 - y } else { y };
+                let p = data
+                    .add(row as usize * stride.unsigned_abs() as usize + (width / 2 * 4) as usize);
+                (*p.add(2), *p.add(1), *p)
+            };
+            let colours = [pixel(height / 4), pixel(height * 3 / 4)];
+            buffer.Unlock().unwrap();
+            ((width, height), colours)
+        }
+    }
+
+    /// Frames handed over as textures (`EncodeConfig::gpu_frames`) come out
+    /// of the encoder at the output size and in their own colours, the
+    /// right way up -- as frames handed over in memory do (checked side by
+    /// side, so a swapped red/blue or a flip in either shows). Top half red,
+    /// bottom half blue. Needs a GPU encoder, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn texture_frames_encode_scaled_in_their_own_colours() {
+        use crate::encode::gpu::{GpuFrames, GpuInput};
+        use crate::types::{FrameData, VideoFrame};
+        use std::time::Duration;
+
+        const CAPTURE: (u32, u32) = (1280, 720);
+        const OUTPUT: (u32, u32) = (640, 360);
+        const FPS: u32 = 30;
+        let red_over_blue = |(width, height): (u32, u32)| -> Vec<u8> {
+            let row = width as usize * 4;
+            let mut bgra = vec![0u8; row * height as usize];
+            for (y, line) in bgra.chunks_exact_mut(row).enumerate() {
+                let pixel = if y < height as usize / 2 {
+                    [0, 0, 255, 255]
+                } else {
+                    [255, 0, 0, 255]
+                };
+                for px in line.as_chunks_mut::<4>().0 {
+                    *px = pixel;
+                }
+            }
+            bgra
+        };
+
+        let _mf = crate::encode::mf::MfSession::start_mta().expect("MFStartup");
+        let dir = tempfile::tempdir().unwrap();
+        let gpu = GpuFrames::new().expect("GpuFrames");
+        let texture = gpu
+            .texture_from_bgra(CAPTURE.0, CAPTURE.1, &red_over_blue(CAPTURE))
+            .expect("texture");
+
+        let mut outputs = Vec::new();
+        for on_gpu in [false, true] {
+            let output = dir.path().join(format!("gpu_{on_gpu}.mp4"));
+            let params = EncoderParams {
+                width: OUTPUT.0,
+                height: OUTPUT.1,
+                fps: FPS,
+                codec: Codec::H264,
+                bitrate_bps: video_bitrate_bps(OUTPUT.0, OUTPUT.1, FPS),
+                audio_tracks: vec![],
+                allow_hardware_encode: true,
+                gpu: on_gpu.then(|| GpuInput {
+                    frames: gpu.clone(),
+                    size: CAPTURE,
+                }),
+            };
+            let writer = RecordingWriter::new(&output, &params).expect("writer");
+            writer.begin_writing().expect("begin_writing");
+            for i in 0..FPS {
+                let data = if on_gpu {
+                    FrameData::Gpu(texture.clone())
+                } else {
+                    red_over_blue(OUTPUT).into()
+                };
+                writer
+                    .write_video(VideoFrame {
+                        pts: Duration::from_secs(1) * i / FPS,
+                        data,
+                    })
+                    .expect("write_video");
+            }
+            let path = writer.finalize().expect("finalize");
+            let frames = read_keyframe_times(&path);
+            let (size, colours) = first_frame_colours(&path);
+            println!("on_gpu={on_gpu}: {size:?}, top/bottom {colours:?}, keyframes {frames:?}");
+            outputs.push((size, colours));
+        }
+        for (size, [top, bottom]) in outputs {
+            assert_eq!(size, OUTPUT);
+            let near = |(r, g, b): (u8, u8, u8), want: (u8, u8, u8)| {
+                r.abs_diff(want.0) < 40 && g.abs_diff(want.1) < 40 && b.abs_diff(want.2) < 40
+            };
+            assert!(near(top, (255, 0, 0)), "top should be red: {top:?}");
+            assert!(
+                near(bottom, (0, 0, 255)),
+                "bottom should be blue: {bottom:?}"
+            );
+        }
+    }
+
     /// A keyframe at least every `KEYFRAME_INTERVAL` of recording time,
     /// through the real encoders (hardware and software, both codecs), with
     /// a still screen's sparse frames (every 10th frame of 30 fps, where the
@@ -956,6 +1154,7 @@ mod tests {
                 bitrate_bps: video_bitrate_bps(W, H, FPS),
                 audio_tracks: vec![],
                 allow_hardware_encode: hardware,
+                gpu: None,
             };
             let writer = RecordingWriter::new(&output, &params).expect("writer");
             writer.begin_writing().expect("begin_writing");

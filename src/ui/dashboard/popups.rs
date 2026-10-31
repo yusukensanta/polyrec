@@ -35,6 +35,14 @@ impl App {
             )
             .on_hover_text(s.encoder_mode_software_tooltip);
         });
+        // Experimental, and only with the hardware encoder -- see
+        // `EncodeConfig::gpu_frames`.
+        ui.add_enabled(
+            self.config.encode.encoder_mode == EncoderMode::Hardware,
+            egui::Checkbox::new(&mut self.config.encode.gpu_frames, s.gpu_frames_label),
+        )
+        .on_hover_text(s.gpu_frames_tooltip)
+        .on_disabled_hover_text(s.gpu_frames_needs_hardware);
 
         section_header(ui, s.resolution_header);
         ui.horizontal(|ui| {

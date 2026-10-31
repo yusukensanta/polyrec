@@ -172,6 +172,11 @@ pub struct EncodeConfig {
     /// Only read when `bitrate_mode` is `Manual`.
     pub manual_bitrate_mbps: u32,
     pub encoder_mode: EncoderMode,
+    /// Experimental: keep captured frames on the GPU all the way into the
+    /// hardware encoder instead of copying each one through system memory
+    /// (see `encode::gpu`). Only with `EncoderMode::Hardware`; a recording
+    /// falls back to the usual path if it doesn't work on this machine.
+    pub gpu_frames: bool,
 }
 
 impl Default for EncodeConfig {
@@ -185,6 +190,7 @@ impl Default for EncodeConfig {
             bitrate_mode: BitrateKind::default(),
             manual_bitrate_mbps: 12,
             encoder_mode: EncoderMode::default(),
+            gpu_frames: false,
         }
     }
 }
@@ -861,6 +867,25 @@ mod tests {
         // Also confirms encoder_mode -- likewise absent from this pre-existing
         // TOML -- falls back to "hardware" instead of failing to parse.
         assert_eq!(parsed.encode.encoder_mode, EncoderMode::Hardware);
+    }
+
+    #[test]
+    fn gpu_frames_is_off_unless_turned_on_and_survives_a_save() {
+        // Absent from every config written before the setting existed.
+        assert!(!Config::default().encode.gpu_frames);
+        let parsed: Config = toml::from_str(
+            "[encode]
+codec = \"h264\"
+",
+        )
+        .unwrap();
+        assert!(!parsed.encode.gpu_frames);
+
+        let mut c = Config::default();
+        c.encode.gpu_frames = true;
+        let text = toml::to_string(&c).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert!(parsed.encode.gpu_frames);
     }
 
     #[test]

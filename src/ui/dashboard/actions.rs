@@ -510,6 +510,7 @@ impl App {
             resolution_mode: self.config.encode.resolution_mode(),
             bitrate_mode: self.config.encode.bitrate_mode(),
             encoder_mode: self.config.encode.encoder_mode,
+            gpu_frames: self.config.encode.gpu_frames,
         }
     }
 

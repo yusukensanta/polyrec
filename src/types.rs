@@ -50,14 +50,49 @@ pub struct CaptureSource {
     pub icon_rgba: Option<(Vec<u8>, u32, u32)>,
 }
 
-/// Captured video frame — CPU-mapped BGRA bytes (Plan 2).
-/// Plan 3 will add GPU texture path for NVENC.
+/// A captured video frame.
 #[derive(Debug)]
 pub struct VideoFrame {
     pub pts: Duration,
-    /// Raw BGRA pixel data, row-major, width*height*4 bytes -- usually a
-    /// recycled buffer from the capture loop's `FramePool`.
-    pub data: FrameBuf,
+    pub data: FrameData,
+}
+
+/// A frame's pixels: in system memory, or -- with `EncodeConfig::gpu_frames`
+/// -- still on the GPU (see `encode::gpu`).
+pub enum FrameData {
+    /// Raw BGRA pixel data at the encoder's output size, row-major,
+    /// width*height*4 bytes -- usually a recycled buffer from the capture
+    /// loop's `FramePool`.
+    Cpu(FrameBuf),
+    /// A BGRA texture at the capture size, on the device the recording's
+    /// `GpuFrames` shares with the encoder, which scales it as needed.
+    Gpu(windows::Win32::Graphics::Direct3D11::ID3D11Texture2D),
+}
+
+// SAFETY: a texture is only ever used through the device `GpuFrames` shares,
+// whose multithread protection serializes access to it; nothing writes to a
+// frame's texture once it has been sent.
+unsafe impl Send for FrameData {}
+
+impl std::fmt::Debug for FrameData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cpu(bytes) => write!(f, "Cpu({} bytes)", bytes.len()),
+            Self::Gpu(_) => f.write_str("Gpu"),
+        }
+    }
+}
+
+impl From<FrameBuf> for FrameData {
+    fn from(bytes: FrameBuf) -> Self {
+        Self::Cpu(bytes)
+    }
+}
+
+impl From<Vec<u8>> for FrameData {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Cpu(bytes.into())
+    }
 }
 
 #[derive(Debug)]
