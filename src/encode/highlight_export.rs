@@ -283,6 +283,18 @@ mod tests {
     }
 
     #[test]
+    fn concat_writes_over_the_empty_file_that_reserved_its_name() {
+        // See `recording_naming::reserve_finished_recording_path`.
+        let dir = tempfile::tempdir().unwrap();
+        let segments = vec![make_segment(dir.path(), "seg0.mp4", 5)];
+        let output = dir.path().join("reserved.mp4");
+        std::fs::write(&output, b"").unwrap();
+        let result = concat_and_trim(&segments, 3600, &output);
+        assert!(result.is_ok(), "concat_and_trim failed: {:?}", result.err());
+        assert!(output.metadata().unwrap().len() > 0, "output file is empty");
+    }
+
+    #[test]
     fn concat_trims_the_oldest_segment_when_target_is_shorter_than_total() {
         let dir = tempfile::tempdir().unwrap();
         let segments = vec![

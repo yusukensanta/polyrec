@@ -528,6 +528,14 @@ impl App {
     }
 
     pub(super) fn start_recording_with_source(&mut self, source: CaptureSource) {
+        // REC and the tray's Start are disabled meanwhile (see
+        // `why_rec_is_blocked`), but the start/stop hotkey comes here
+        // directly. Stopping a recording started now would replace the
+        // running save's handle, losing its result.
+        if self.finalizing.handle.is_some() {
+            tracing::warn!("not starting a recording while the last one is still being saved");
+            return;
+        }
         let source_title = source.window_title.clone();
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
         let inputs = self.resolve_capture_inputs();

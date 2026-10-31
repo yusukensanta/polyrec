@@ -2,7 +2,10 @@
 //! either the recorded process's name (historical default) or a
 //! user-specified prefix with an auto-incrementing sequence number.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Most names `reserve_finished_recording_path` tries before giving up.
+const MAX_NAME_ATTEMPTS: u32 = 10_000;
 
 /// Resolved once (from `Config`, by the caller) when a recording/highlight-
 /// save *starts*, then used at *finish* time to build the actual filename --
@@ -71,17 +74,72 @@ pub fn resolve_finished_recording_stem(
     process_app_name: &str,
     dir: &Path,
 ) -> String {
+    candidate_stems(naming, process_app_name, dir)
+        .next()
+        .unwrap_or_else(|| "recording".to_owned())
+}
+
+/// The stems a finished recording may be saved as, best first:
+/// `resolve_finished_recording_stem`'s, then the ones to fall back on if
+/// that's taken by the time the file is saved -- see `numbered_stems`.
+fn candidate_stems(
+    naming: &RecordingNaming,
+    process_app_name: &str,
+    dir: &Path,
+) -> impl Iterator<Item = String> {
     match naming {
         RecordingNaming::ProcessName => {
             let finish_stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
-            format!("{process_app_name}_{finish_stamp}")
+            numbered_stems(format!("{process_app_name}_{finish_stamp}"), None)
         }
         RecordingNaming::CustomPrefix(prefix) => {
             let prefix = sanitize_filename_component(prefix.trim());
             let next = next_sequence_number(dir, &prefix);
-            format!("{prefix}_{next:03}")
+            numbered_stems(prefix, Some(next))
         }
     }
+}
+
+/// `base_NNN` counting up from `first_number`, or without one, `base`
+/// itself and then `base_2`, `base_3`, ...
+fn numbered_stems(base: String, first_number: Option<u32>) -> impl Iterator<Item = String> {
+    (0..MAX_NAME_ATTEMPTS).map(move |i| match first_number {
+        Some(first) => format!("{base}_{:03}", first.saturating_add(i)),
+        None if i == 0 => base.clone(),
+        None => format!("{base}_{}", i + 1),
+    })
+}
+
+/// Claims the name a just-finished recording or Highlight save is to be
+/// saved as in `dir` -- the first of its `candidate_stems` that no file has
+/// yet -- by creating it empty, for the caller to move or write the
+/// recording over. Two recordings of the same app finishing in the same
+/// second, or two custom-prefix saves counting up at once, used to get the
+/// same name, and the second replaced the first.
+pub fn reserve_finished_recording_path(
+    naming: &RecordingNaming,
+    process_app_name: &str,
+    dir: &Path,
+) -> std::io::Result<PathBuf> {
+    for stem in candidate_stems(naming, process_app_name, dir) {
+        let path = dir.join(format!("{stem}.mp4"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "every name for this recording in {} is taken",
+            dir.display()
+        ),
+    ))
 }
 
 #[cfg(test)]
@@ -175,6 +233,60 @@ mod tests {
             dir.path(),
         );
         assert_eq!(stem, "My_Stream__001");
+    }
+
+    #[test]
+    fn numbered_stems_without_a_number_append_one_from_two() {
+        let stems: Vec<_> = numbered_stems("vivaldi_x".into(), None).take(3).collect();
+        assert_eq!(stems, ["vivaldi_x", "vivaldi_x_2", "vivaldi_x_3"]);
+    }
+
+    #[test]
+    fn numbered_stems_with_a_number_count_up_from_it() {
+        let stems: Vec<_> = numbered_stems("clip".into(), Some(9)).take(2).collect();
+        assert_eq!(stems, ["clip_009", "clip_010"]);
+    }
+
+    #[test]
+    fn reserving_skips_names_reserved_by_a_save_still_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("MyStream_001.mp4"), b"kept").unwrap();
+        let naming = RecordingNaming::CustomPrefix("MyStream".into());
+        let first = reserve_finished_recording_path(&naming, "vivaldi", dir.path()).unwrap();
+        let second = reserve_finished_recording_path(&naming, "vivaldi", dir.path()).unwrap();
+        assert_eq!(first, dir.path().join("MyStream_002.mp4"));
+        assert_eq!(second, dir.path().join("MyStream_003.mp4"));
+        assert!(first.is_file() && second.is_file());
+        assert_eq!(
+            std::fs::read(dir.path().join("MyStream_001.mp4")).unwrap(),
+            b"kept"
+        );
+    }
+
+    #[test]
+    fn reserving_never_reuses_a_process_name_taken_in_the_same_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..3)
+            .map(|_| {
+                reserve_finished_recording_path(
+                    &RecordingNaming::ProcessName,
+                    "vivaldi",
+                    dir.path(),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(paths[0] != paths[1] && paths[1] != paths[2] && paths[0] != paths[2]);
+        assert!(paths.iter().all(|p| p.is_file()));
+    }
+
+    #[test]
+    fn reserving_reports_a_folder_it_cannot_write_to() {
+        let missing = std::path::Path::new("Z:\\this\\does\\not\\exist\\at\\all");
+        let err =
+            reserve_finished_recording_path(&RecordingNaming::ProcessName, "vivaldi", missing)
+                .unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
     #[test]
