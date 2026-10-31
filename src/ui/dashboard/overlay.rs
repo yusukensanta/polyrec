@@ -77,12 +77,7 @@ impl App {
         show_viewport_immediate(
             ctx,
             overlay_viewport_id(),
-            egui::ViewportBuilder::default()
-                .with_title("PolyRec Overlay")
-                .with_always_on_top()
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_mouse_passthrough(true)
+            hud_window("PolyRec Overlay")
                 // Widened from 310 to fit longer modifier combos (e.g.
                 // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
                 .with_inner_size([400.0, 32.0])
@@ -124,6 +119,22 @@ impl App {
         // that back instead of relying on a one-time flag.
         keep_on_top_and_out_of_captures(windows::core::w!("PolyRec Overlay"));
     }
+}
+
+/// The window for one of PolyRec's own on-screen displays (the overlay HUD,
+/// the hotkey toast): borderless, see-through, always on top and
+/// click-through -- and never activated when it appears. These come up on
+/// Start and Stop, typically while a fullscreen game has focus; a window
+/// that took focus as it was shown pulled the player out of the game, and
+/// they had to switch back to it before they could play on.
+pub(super) fn hud_window(title: &str) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_active(false)
+        .with_always_on_top()
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_mouse_passthrough(true)
 }
 
 /// The panic message egui gives when eframe returns from showing an
@@ -208,5 +219,20 @@ pub(super) fn keep_on_top_and_out_of_captures(title: windows::core::PCWSTR) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The overlay and the toast come up on Start and Stop, typically over
+    /// a game that has focus: they're shown without taking it, and clicks go
+    /// through them.
+    #[test]
+    fn hud_windows_never_take_focus() {
+        let window = hud_window("PolyRec Overlay");
+        assert_eq!(window.active, Some(false));
+        assert_eq!(window.mouse_passthrough, Some(true));
     }
 }
