@@ -138,18 +138,15 @@ fn take_refresh_snapshot() -> RefreshSnapshot {
 /// `spawn_blocking` keeps that apartment off the tokio pool threads the
 /// recording actors run on. `None` if the thread couldn't be spawned.
 fn spawn_refresh_worker(ctx: &egui::Context) -> Option<std::sync::mpsc::Receiver<RefreshSnapshot>> {
-    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-
     let (tx, rx) = std::sync::mpsc::channel();
     let wake_ctx = ctx.clone();
     std::thread::Builder::new()
         .name("polyrec-source-refresh".into())
         .spawn(move || {
-            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-            let snapshot = take_refresh_snapshot();
-            if com.is_ok() {
-                unsafe { CoUninitialize() };
-            }
+            let snapshot = {
+                let _com = crate::sources::SingleThreadedApartment::join();
+                take_refresh_snapshot()
+            };
             let _ = tx.send(snapshot);
             wake_ctx.request_repaint();
         })

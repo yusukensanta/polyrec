@@ -410,12 +410,10 @@ pub struct InstalledApp {
 /// since multiple shortcuts commonly point at the same exe (e.g. a "Safe
 /// Mode" variant alongside the normal one).
 pub fn enumerate_installed_apps() -> Vec<InstalledApp> {
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
-        );
-    }
+    // Resolving shortcuts takes COM. The apartment is left again on the way
+    // out: this runs on tokio's blocking pool, whose threads the capture
+    // loops reuse, and they need a multithreaded one.
+    let _com = SingleThreadedApartment::join();
 
     let mut start_menu_dirs = Vec::new();
     if let Some(appdata) = dirs::data_dir() {
@@ -642,9 +640,57 @@ pub(crate) fn resolve_possibly_stale_exe_path(exe_path: &str) -> String {
     resolved.unwrap_or_else(|| exe_path.to_string())
 }
 
+/// A single-threaded COM apartment, joined for as long as this lives -- the
+/// one shell calls (`SHGetFileInfoW`, `IShellLinkW`) expect -- and left again
+/// when it's dropped. A thread that was already in a multithreaded apartment
+/// stays there (joining fails), which those calls cope with.
+pub(crate) struct SingleThreadedApartment {
+    joined: bool,
+}
+
+impl SingleThreadedApartment {
+    pub(crate) fn join() -> Self {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+        // S_FALSE (already joined) counts too: each success needs its own
+        // CoUninitialize.
+        let joined = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        Self { joined }
+    }
+}
+
+impl Drop for SingleThreadedApartment {
+    fn drop(&mut self) {
+        if self.joined {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `enumerate_installed_apps` runs on tokio's blocking pool (the Audio
+    /// popup's app picker), whose threads are reused for a recording's
+    /// capture loops -- which need a multithreaded COM apartment. It used to
+    /// leave its thread in a single-threaded one, and a capture started on
+    /// that thread then failed before its first frame: a recording with no
+    /// video.
+    #[test]
+    fn enumerating_installed_apps_leaves_the_thread_free_for_a_capture_loop() {
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+        std::thread::spawn(|| {
+            let _ = enumerate_installed_apps();
+            let joined = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            assert!(
+                joined.is_ok(),
+                "the thread was left in another apartment: {joined:?}"
+            );
+            unsafe { CoUninitialize() };
+        })
+        .join()
+        .unwrap();
+    }
 
     /// The previous implementation needed PROCESS_QUERY_INFORMATION |
     /// PROCESS_VM_READ (for GetModuleFileNameExW). Integrity-level and
