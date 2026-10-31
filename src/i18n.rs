@@ -224,6 +224,11 @@ pub struct Strings {
     /// The start/stop hotkey didn't start a recording (the dashboard says
     /// why).
     pub toast_not_started: &'static str,
+    /// Shown by a copy started in place of one that closed on its own (see
+    /// `restart`): its graphics device was lost, or it panicked. `{path}`
+    /// is crash.log's.
+    pub notice_restarted_graphics: &'static str,
+    pub notice_restarted_error: &'static str,
 
     // Notification-area icon (see `ui::dashboard::tray`)
     pub tray_show: &'static str,
@@ -443,6 +448,8 @@ pub static EN: Strings = Strings {
     toast_resumed: "▶ Resumed",
     toast_highlight_off: "Highlight isn't on",
     toast_not_started: "⚠ Recording didn't start",
+    notice_restarted_graphics: "PolyRec restarted itself after a problem with the graphics driver (for example a driver update or reset). A recording that was running was stopped and saved.",
+    notice_restarted_error: "PolyRec restarted itself after an unexpected error. A recording that was running was stopped and saved. What went wrong is in {path}.",
 
     tray_show: "Show PolyRec",
     tray_hide: "Hide PolyRec",
@@ -621,6 +628,8 @@ pub static JA: Strings = Strings {
     toast_resumed: "▶ 再開",
     toast_highlight_off: "ハイライトは無効です",
     toast_not_started: "⚠ 録画を開始できませんでした",
+    notice_restarted_graphics: "グラフィックドライバーの問題（ドライバーの更新やリセットなど）のため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。",
+    notice_restarted_error: "予期しないエラーのため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。エラーの内容は {path} に記録されています。",
 
     tray_show: "PolyRec を表示",
     tray_hide: "PolyRec を隠す",
