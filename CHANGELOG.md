@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.116] - 2026-10-31
+
 ### Fixed
 
 - Launching PolyRec again while it's running, say when it's hidden in the tray, now brings the running one up instead of starting a second copy. A second copy registered every hotkey again, added a second tray icon, and saved over the same settings.
