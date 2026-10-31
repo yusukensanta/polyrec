@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.121] - 2026-11-01
+
 ### Fixed
 
 - A recording started within about 10 seconds of opening the app list in **🔊 Audio** (**+ Add app**) could come out with no video. Listing the installed apps left a background thread set up in a way that video capture, started on the same thread, couldn't use. Highlight buffering could lose its video the same way.
