@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.118] - 2026-11-01
+
 ### Fixed
 
 - Starting or stopping a recording no longer takes focus away from the game or app you're in. The overlay and the hotkey confirmation ("● Recording", "⏹ Stopped, saving") could grab focus as they appeared, most noticeably with PolyRec's window minimized, leaving the taskbar or PolyRec in front so you had to switch back to the game before you could play on.
