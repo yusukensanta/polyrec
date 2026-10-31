@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A video encoder that won't take PolyRec's keyframe spacing now gets a keyframe forced every 2 seconds. Before, PolyRec assumed it had taken the spacing, so at the full frame rate keyframes could end up far apart, which makes seeking and Highlight cuts coarse.
+- Quitting no longer leaves PolyRec running in the background if saving the last recording hangs. It now waits for the save for at most 30 seconds. A normal save takes well under a second. Starting PolyRec again while the last copy is still saving now opens a new window. Before, the new launch handed off to the closing copy, so nothing appeared.
+
 ## [v0.5.116] - 2026-10-31
 
 ### Fixed

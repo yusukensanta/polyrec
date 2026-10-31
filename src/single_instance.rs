@@ -6,9 +6,11 @@
 //! installed one don't stand in each other's way, and neither do
 //! development builds.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{HANDLE, WAIT_ABANDONED, WAIT_EVENT, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, INFINITE, SetEvent, WaitForSingleObject,
+    CreateEventW, CreateMutexW, INFINITE, ReleaseMutex, SetEvent, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
 use windows::core::HSTRING;
@@ -21,13 +23,19 @@ pub const AFTER_UPDATE_ARG: &str = "--after-update";
 /// exit -- which may first have a recording to finish saving.
 const PREVIOUS_EXIT_TIMEOUT_MS: u32 = 60_000;
 
-/// This process is the running copy. Its claim lasts until the process
-/// exits: the handles are never closed, and the claim belongs to the thread
-/// that called `claim` -- the main thread, which runs until then.
+/// This process is the running copy. Its claim lasts until `release`, or
+/// until the process exits: the handles are never closed, and the claim
+/// belongs to the thread that called `claim` -- the main thread, which runs
+/// until then.
 pub struct Instance {
     /// Signalled by a later launch -- see `listen`. `None` if Windows
     /// wouldn't make it (logged).
     show_event: Option<usize>,
+    /// The claim itself; `None` if Windows wouldn't make the mutex (logged),
+    /// in which case there's nothing to release.
+    mutex: Option<usize>,
+    /// Set by `release`.
+    released: Arc<AtomicBool>,
 }
 
 /// Claims the running copy for this process. If another process has it,
@@ -50,8 +58,10 @@ fn claim_named(name: &str, timeout_ms: u32) -> Option<Instance> {
         let show_event = CreateEventW(None, false, false, &HSTRING::from(format!("{name}-show")))
             .inspect_err(|e| tracing::warn!("a later launch can't bring this one up: {e}"))
             .ok();
-        let instance = Instance {
+        let mut instance = Instance {
             show_event: show_event.map(|event| event.0 as usize),
+            mutex: None,
+            released: Arc::new(AtomicBool::new(false)),
         };
         let mutex = match CreateMutexW(None, false, &HSTRING::from(name)) {
             Ok(mutex) => mutex,
@@ -61,6 +71,7 @@ fn claim_named(name: &str, timeout_ms: u32) -> Option<Instance> {
             }
         };
         if owned(WaitForSingleObject(mutex, timeout_ms)) {
+            instance.mutex = Some(mutex.0 as usize);
             return Some(instance);
         }
         // The user just started this process, so it may hand the right to
@@ -81,21 +92,42 @@ fn owned(wait: WAIT_EVENT) -> bool {
 
 impl Instance {
     /// Calls `on_show`, on a thread of its own, every time a later launch
-    /// asks this copy to show itself.
+    /// asks this copy to show itself -- until `release`.
     pub fn listen(&self, on_show: impl Fn() + Send + 'static) {
         let Some(event) = self.show_event else {
             return;
         };
+        let released = Arc::clone(&self.released);
         let spawned = std::thread::Builder::new()
             .name("ShowRequests".into())
             .spawn(move || {
                 let event = HANDLE(event as *mut core::ffi::c_void);
                 while unsafe { WaitForSingleObject(event, INFINITE) } == WAIT_OBJECT_0 {
+                    if released.load(Ordering::SeqCst) {
+                        // Meant for the copy that's up now: pass it back.
+                        let _ = unsafe { SetEvent(event) };
+                        return;
+                    }
                     on_show();
                 }
             });
         if let Err(e) = spawned {
             tracing::warn!("a later launch can't bring this one up: {e}");
+        }
+    }
+}
+
+impl Instance {
+    /// Lets a later launch run as the copy that's up, once this one's window
+    /// is gone but the process isn't yet -- it may still be finishing a
+    /// recording's save. Call it on the thread that called `claim`.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        if let Some(mutex) = self.mutex {
+            let mutex = HANDLE(mutex as *mut core::ffi::c_void);
+            if let Err(e) = unsafe { ReleaseMutex(mutex) } {
+                tracing::warn!("couldn't let a later launch run yet: {e}");
+            }
         }
     }
 }
@@ -148,15 +180,18 @@ mod tests {
     }
 
     /// Claims `name` on a thread of its own, which holds the claim until
-    /// told to let go (by sending on, or dropping, the returned sender).
-    /// Returns once the claim was tried, with whether it got it.
+    /// told to let go: sending `true` on the returned sender releases it
+    /// (`Instance::release`) and keeps the thread running, as a closing
+    /// PolyRec finishing a save does; sending `false`, or dropping the
+    /// sender, ends the thread. Returns once the claim was tried, with
+    /// whether it got it.
     fn claim_on_a_thread(
         name: &str,
         timeout_ms: u32,
         shows: Arc<AtomicU32>,
-    ) -> (bool, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    ) -> (bool, mpsc::Sender<bool>, std::thread::JoinHandle<()>) {
         let (claimed_tx, claimed_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<bool>();
         let name = name.to_owned();
         let thread = std::thread::spawn(move || {
             let instance = claim_named(&name, timeout_ms);
@@ -166,7 +201,11 @@ mod tests {
                 });
             }
             claimed_tx.send(instance.is_some()).unwrap();
-            let _ = release_rx.recv();
+            while let Ok(true) = release_rx.recv() {
+                if let Some(instance) = &instance {
+                    instance.release();
+                }
+            }
         });
         (claimed_rx.recv().unwrap(), release_tx, thread)
     }
@@ -201,6 +240,27 @@ mod tests {
         drop(release_first);
         first_thread.join().unwrap();
         drop((second_thread, third_thread));
+    }
+
+    #[test]
+    fn a_launch_while_the_last_copy_finishes_saving_runs_and_gets_show_requests() {
+        let name = test_name("released");
+        let old_shows = Arc::new(AtomicU32::new(0));
+        let (old, release_old, _old_thread) = claim_on_a_thread(&name, 0, Arc::clone(&old_shows));
+        assert!(old);
+        // The old copy's window is gone; its process lives on, saving.
+        release_old.send(true).unwrap();
+
+        let new_shows = Arc::new(AtomicU32::new(0));
+        let (new, _release_new, _new_thread) = claim_on_a_thread(&name, 0, Arc::clone(&new_shows));
+        assert!(new, "a launch after the window closed didn't run");
+
+        // A third launch asks the copy that's up to show itself: that's the
+        // new one, even if the old one's listener wakes up first.
+        let (third, _release, _thread) = claim_on_a_thread(&name, 0, Arc::new(0.into()));
+        assert!(!third);
+        wait_for(&new_shows, 1);
+        assert_eq!(old_shows.load(Ordering::SeqCst), 0);
     }
 
     #[test]
