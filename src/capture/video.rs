@@ -2,6 +2,7 @@ use crate::capture::CaptureControl;
 use crate::capture::device::D3dDevice;
 use crate::capture::frame_pool::{FrameBuf, FramePool};
 use crate::capture::frame_rate::{FrameRateLimiter, LiveFps};
+use crate::capture::pacer::{FramePacer, Step};
 use crate::encode::gpu::GpuFrames;
 use crate::error::{AppError, ResultExt};
 use crate::types::{CaptureKind, FrameData, VideoFrame};
@@ -538,17 +539,10 @@ async fn send_frame(
     .is_ok()
 }
 
-/// How long the video may go without a new frame before the newest one is
-/// sent again. Windows hands out a frame only when the picture changes, so a
-/// still window gives one and then nothing -- and the MP4 sink, waiting on
-/// the video, then throttles every audio track too (the file stays at its
-/// 79-byte header) until stopping deadlocks. The audio side of the same
-/// stall is `SilenceFill`'s.
-const STILL_FRAME_REPEAT: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// Captures `target` and sends its frames, at most `fps` per second (see
-/// `FrameRateLimiter`), until `ctrl` is stopped or the target goes away. The
-/// cap follows `fps` if the writer lowers it while running. With `gpu`, the
+/// Captures `target` and sends its frames, at most `fps` per second, with
+/// the newest one sent again while nothing changes (see `FramePacer`), until
+/// `ctrl` is stopped or the target goes away. The cap follows `fps` if the
+/// writer lowers it while running. With `gpu`, the
 /// frames stay on the GPU (`FrameData::Gpu`, at `capture_size`) instead of
 /// being read back and scaled to `output_size`.
 #[allow(clippy::too_many_arguments)]
@@ -571,8 +565,6 @@ pub async fn run_video_capture(
         .capture_ctx("CoInitializeEx")?;
     }
 
-    let mut cap = fps.get();
-    let mut limiter = FrameRateLimiter::new(cap);
     // Half a slot, not a whole one: a minimum interval of exactly 1/fps would
     // make WGC skip a frame whenever one lands a hair early against the
     // display's vsync, halving a 60 Hz source recorded at 60 fps.
@@ -580,9 +572,10 @@ pub async fn run_video_capture(
         target,
         capture_size,
         show_border,
-        limiter.interval() / 2,
+        FrameRateLimiter::new(fps.get()).interval() / 2,
         gpu.as_ref(),
     )?;
+    let mut pacer = FramePacer::new(fps.get(), ctrl.clock.elapsed());
     let sizes = (capture_size, output_size);
     let mut output = match gpu {
         Some(frames) => FrameOutput::Gpu {
@@ -596,10 +589,6 @@ pub async fn run_video_capture(
             newest_slot: None,
         },
     };
-    // When a frame was last captured or sent again -- see
-    // `STILL_FRAME_REPEAT`.
-    let mut idle_since = std::time::Duration::ZERO;
-
     loop {
         if ctrl.is_stopped() {
             break;
@@ -611,39 +600,26 @@ pub async fn run_video_capture(
             break;
         }
 
-        let frame = match res.frame_pool.TryGetNextFrame() {
-            Ok(f) => f,
-            Err(_) => {
-                let now = ctrl.clock.elapsed();
-                if !ctrl.is_paused() && now.saturating_sub(idle_since) >= STILL_FRAME_REPEAT {
-                    idle_since = now;
-                    if !output.repeat(&res, now, &mut limiter, &tx, sizes).await? {
-                        break;
-                    }
+        pacer.set_fps(fps.get());
+        let paused = ctrl.is_paused();
+        // A frame the pacer holds back (paused, or over the fps cap) gets no
+        // GPU copy or readback unless it's recorded after all.
+        let step = match res.frame_pool.TryGetNextFrame() {
+            Ok(frame) => pacer.on_frame(frame, ctrl.clock.elapsed(), paused),
+            Err(_) => match pacer.on_idle(ctrl.clock.elapsed(), paused) {
+                Step::Wait => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                     continue;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-                continue;
-            }
+                step => step,
+            },
         };
-
-        // Discard frame when paused — skip GPU readback to save CPU/memory bandwidth.
-        if ctrl.is_paused() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
-            continue;
-        }
-
-        // Over the fps cap: drop it before any GPU copy or readback.
-        if fps.get() != cap {
-            cap = fps.get();
-            limiter = FrameRateLimiter::new(cap);
-        }
-        let pts = ctrl.clock.elapsed();
-        if !limiter.admit(pts) {
-            continue;
-        }
-        idle_since = pts;
-        if !output.on_frame(&res, &frame, pts, &tx, sizes).await? {
+        let sent = match step {
+            Step::Record(frame, pts) => output.on_frame(&res, &frame, pts, &tx, sizes).await?,
+            Step::Repeat(now) => output.repeat(&res, now, &tx, sizes).await?,
+            Step::Wait => true,
+        };
+        if !sent {
             break;
         }
     }
@@ -734,16 +710,16 @@ impl FrameOutput {
         }
     }
 
-    /// Nothing new has come for `STILL_FRAME_REPEAT`: keeps the video going
-    /// with the newest frame -- as itself if it's still waiting to be read
-    /// back (for a next frame that isn't coming), else again as a frame of
-    /// `now` -- or, before any frame has come at all (a minimized window
-    /// gives none), a black one. `Ok(false)` once the receiver is gone.
+    /// Nothing new has come for `STILL_FRAME_REPEAT` (see `FramePacer`):
+    /// keeps the video going with the newest frame -- as itself if it's
+    /// still waiting to be read back (for a next frame that isn't coming),
+    /// else again as a frame of `now` -- or, before any frame has come at all
+    /// (a minimized window gives none), a black one. `Ok(false)` once the
+    /// receiver is gone.
     async fn repeat(
         &mut self,
         res: &CaptureResources,
         now: std::time::Duration,
-        limiter: &mut FrameRateLimiter,
         tx: &mpsc::Sender<VideoFrame>,
         (capture_size, output_size): FrameSizes,
     ) -> Result<bool, AppError> {
@@ -756,8 +732,7 @@ impl FrameOutput {
             } => {
                 let pts = newest_slot
                     .and_then(|slot| pending[slot].take())
-                    .or_else(|| limiter.admit(now).then_some(now));
-                let Some(pts) = pts else { return Ok(true) };
+                    .unwrap_or(now);
                 match *newest_slot {
                     Some(slot) => match unsafe { res.read_back(slot, false, pool)? } {
                         Some(pixels) => {
@@ -780,9 +755,6 @@ impl FrameOutput {
                 }
             }
             Self::Gpu { frames, newest } => {
-                if !limiter.admit(now) {
-                    return Ok(true);
-                }
                 let texture = match newest {
                     Some(texture) => texture.clone(),
                     None => newest
@@ -842,6 +814,7 @@ async fn send_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::pacer::STILL_FRAME_REPEAT;
 
     #[test]
     fn ping_pong_indices_alternate_and_never_collide() {
@@ -953,29 +926,39 @@ mod tests {
     struct SlidingBarWindow {
         hwnd: usize,
         stop: Arc<std::sync::atomic::AtomicBool>,
+        /// The bar moves only once this is set.
+        go: Arc<std::sync::atomic::AtomicBool>,
+        /// Set once the bar has made all its moves.
+        settled: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
     impl SlidingBarWindow {
         const W: i32 = 320;
         const H: i32 = 240;
+        const BAR: i32 = 8;
 
         fn spawn() -> Self {
-            Self::spawn_with(true)
+            Self::spawn_with(u32::MAX, true)
         }
 
         fn spawn_still() -> Self {
-            Self::spawn_with(false)
+            Self::spawn_with(1, true)
         }
 
-        fn spawn_with(sliding: bool) -> Self {
+        /// The bar moves one pixel `steps` times, once `go` is called unless
+        /// `going` already, and then stays put.
+        fn spawn_with(steps: u32, going: bool) -> Self {
             use windows::Win32::Graphics::Gdi::{BLACKNESS, GetDC, PatBlt, ReleaseDC, WHITENESS};
             use windows::Win32::UI::WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
                 WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
             };
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let thread_stop = Arc::clone(&stop);
+            let go = Arc::new(std::sync::atomic::AtomicBool::new(going));
+            let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (thread_stop, thread_go, thread_settled) =
+                (Arc::clone(&stop), Arc::clone(&go), Arc::clone(&settled));
             let (tx, rx) = std::sync::mpsc::channel();
             let thread = std::thread::spawn(move || unsafe {
                 let hwnd = CreateWindowExW(
@@ -994,19 +977,22 @@ mod tests {
                 )
                 .expect("CreateWindowExW");
                 tx.send(hwnd.0 as usize).unwrap();
-                let bar = 8;
                 let mut msg = MSG::default();
-                let mut x = 0;
+                let (mut x, mut moved) = (0, 0);
                 while !thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
                     while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                         DispatchMessageW(&msg);
                     }
-                    if sliding || x == 0 {
+                    if moved < steps && thread_go.load(std::sync::atomic::Ordering::Relaxed) {
                         let dc = GetDC(Some(hwnd));
-                        let _ = PatBlt(dc, x, 0, bar, Self::H, BLACKNESS);
-                        x = (x + 1) % (Self::W - bar);
-                        let _ = PatBlt(dc, x, 0, bar, Self::H, WHITENESS);
+                        let _ = PatBlt(dc, x, 0, Self::BAR, Self::H, BLACKNESS);
+                        x = (x + 1) % (Self::W - Self::BAR);
+                        let _ = PatBlt(dc, x, 0, Self::BAR, Self::H, WHITENESS);
                         ReleaseDC(Some(hwnd), dc);
+                        moved += 1;
+                        if moved == steps {
+                            thread_settled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
@@ -1016,8 +1002,23 @@ mod tests {
             Self {
                 hwnd,
                 stop,
+                go,
+                settled,
                 thread: Some(thread),
             }
+        }
+
+        fn go(&self) {
+            self.go.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn settled(&self) -> bool {
+            self.settled.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Where the bar's left edge ends up after `steps` moves.
+        fn bar_x_after(steps: u32) -> i32 {
+            (steps % (Self::W - Self::BAR) as u32) as i32
         }
     }
 
@@ -1148,6 +1149,85 @@ mod tests {
             frames >= expected - 2,
             "{frames} frames in {SECS} s from a minimized window"
         );
+    }
+
+    /// The left edge of the white bar a `SlidingBarWindow` frame of `width`
+    /// pixels shows, if any, judged along its middle row.
+    fn white_bar_x(frame: &[u8], (width, height): (u32, u32)) -> Option<usize> {
+        let row = (height / 2) as usize * width as usize * 4;
+        frame[row..row + width as usize * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .position(|px| px[..3].iter().all(|&c| c >= 250))
+    }
+
+    /// The last change before a window goes still makes it into the
+    /// recording, even when it came too soon after the frame before it for
+    /// the fps cap: it used to be dropped, and the frame before it repeated
+    /// in its place for as long as the window stayed still. Slides the bar
+    /// of a small window, stops it, and checks where the recording's last
+    /// frame shows it -- four times, at 20 fps so most display refreshes are
+    /// over the cap. Shows a small window for ~6 s, so it's ignored by
+    /// default.
+    #[test]
+    #[ignore]
+    fn the_last_change_before_a_still_picture_is_recorded() {
+        for steps in [97, 131, 173, 211] {
+            let window = SlidingBarWindow::spawn_with(steps, false);
+            let handle = window.hwnd;
+            let target = CaptureTarget::from_raw(CaptureKind::Window, handle);
+            let (w, h) = query_capture_size(target).expect("query_capture_size");
+            let size = (w & !1, h & !1);
+            let ctrl = CaptureControl::new();
+            let (tx, mut rx) = mpsc::channel(256);
+            let capture_ctrl = ctrl.clone();
+            let capture = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(run_video_capture(
+                        CaptureTarget::from_raw(CaptureKind::Window, handle),
+                        size,
+                        size,
+                        LiveFps::new(20),
+                        capture_ctrl,
+                        tx,
+                        false,
+                        None,
+                    ))
+            });
+            let last = std::thread::spawn(move || {
+                let mut last = None;
+                while let Some(frame) = rx.blocking_recv() {
+                    if let FrameData::Cpu(pixels) = frame.data {
+                        last = Some(pixels);
+                    }
+                }
+                last
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            window.go();
+            while !window.settled() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // A slot to record a held frame in, and a repeat to send it.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            ctrl.request_stop();
+            capture.join().unwrap().expect("run_video_capture failed");
+            let last = last.join().unwrap().expect("no frame recorded");
+
+            // The window may be stretched for the display's scaling.
+            let scale = f64::from(size.0) / f64::from(SlidingBarWindow::W);
+            let expected = f64::from(SlidingBarWindow::bar_x_after(steps)) * scale;
+            let found = white_bar_x(&last, size).expect("no bar in the last frame");
+            println!("{steps} steps: bar at {found}, expected {expected:.0}");
+            assert!(
+                (found as f64 - expected).abs() <= scale.ceil() + 1.0,
+                "after {steps} steps the recording ends with the bar at {found}, not {expected:.0}"
+            );
+        }
     }
 
     /// End-to-end fps cap: a window that changes every millisecond makes WGC
