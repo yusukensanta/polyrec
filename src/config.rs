@@ -67,6 +67,11 @@ pub struct Config {
     /// buffering, which always suppresses it regardless of this setting so
     /// buffering isn't mistaken for an active recording. Defaults to `true`.
     pub show_recording_border: bool,
+    /// Whether the window's close button hides PolyRec in the notification
+    /// area (tray) instead of quitting it, so the hotkeys keep working --
+    /// "Quit PolyRec" in the tray menu quits either way. Defaults to `false`:
+    /// the close button quits, as it always has.
+    pub close_to_tray: bool,
     /// Whether a finished manual recording or Highlight save is named after
     /// the recorded process (the historical default, `true`) or
     /// `custom_recording_prefix` (see `crate::recording_naming::RecordingNaming`).
@@ -331,6 +336,7 @@ impl Default for Config {
             registered_app_audio: Vec::new(),
             selected_audio_device_ids: None,
             show_recording_border: true,
+            close_to_tray: false,
             use_process_name_for_recording: true,
             custom_recording_prefix: String::new(),
         }
@@ -1043,6 +1049,22 @@ codec = \"h264\"
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.selected_audio_device_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_close_button_quits_unless_set_to_hide_and_the_setting_survives_a_save() {
+        // Also absent from every config written before the setting existed.
+        assert!(!Config::default().close_to_tray);
+        let parsed: Config = toml::from_str("output_dir = \".\"").unwrap();
+        assert!(!parsed.close_to_tray);
+
+        let original = Config {
+            close_to_tray: true,
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert!(parsed.close_to_tray);
     }
 
     #[test]
