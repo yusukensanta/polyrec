@@ -221,6 +221,9 @@ pub struct Strings {
     pub toast_paused: &'static str,
     pub toast_resumed: &'static str,
     pub toast_highlight_off: &'static str,
+    /// The start/stop hotkey didn't start a recording (the dashboard says
+    /// why).
+    pub toast_not_started: &'static str,
 
     // Notification-area icon (see `ui::dashboard::tray`)
     pub tray_show: &'static str,
@@ -439,6 +442,7 @@ pub static EN: Strings = Strings {
     toast_paused: "⏸ Paused",
     toast_resumed: "▶ Resumed",
     toast_highlight_off: "Highlight isn't on",
+    toast_not_started: "⚠ Recording didn't start",
 
     tray_show: "Show PolyRec",
     tray_hide: "Hide PolyRec",
@@ -616,6 +620,7 @@ pub static JA: Strings = Strings {
     toast_paused: "⏸ 一時停止",
     toast_resumed: "▶ 再開",
     toast_highlight_off: "ハイライトは無効です",
+    toast_not_started: "⚠ 録画を開始できませんでした",
 
     tray_show: "PolyRec を表示",
     tray_hide: "PolyRec を隠す",

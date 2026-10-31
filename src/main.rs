@@ -11,13 +11,24 @@ mod i18n;
 mod recording_naming;
 mod self_update;
 mod session;
+mod single_instance;
 mod sources;
 mod types;
 mod ui;
 mod update_check;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
+
+    // Before anything registers a hotkey or a tray icon.
+    let after_update = std::env::args().any(|arg| arg == single_instance::AFTER_UPDATE_ARG);
+    let Some(instance) = single_instance::claim(after_update) else {
+        tracing::info!("PolyRec is already running; brought that one up instead");
+        return Ok(());
+    };
 
     // Build a multi-thread runtime so tokio::task::spawn_blocking and mpsc channels
     // work from the egui main thread (eframe is not async, so we enter the runtime
@@ -76,6 +87,15 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PolyRec",
         native_options,
-        Box::new(|cc| Ok(Box::new(ui::App::new(cc, config)))),
+        Box::new(|cc| {
+            let show_requested = Arc::new(AtomicBool::new(false));
+            let ctx = cc.egui_ctx.clone();
+            let flag = Arc::clone(&show_requested);
+            instance.listen(move || {
+                flag.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+            Ok(Box::new(ui::App::new(cc, config, show_requested)))
+        }),
     )
 }

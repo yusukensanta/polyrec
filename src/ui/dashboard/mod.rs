@@ -33,7 +33,7 @@ use state::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 use theme::{setup_fonts, setup_theme};
@@ -148,6 +148,9 @@ pub struct App {
     /// Whether the dashboard was hidden through the tray -- see
     /// `App::dashboard_shown`.
     dashboard_hidden: bool,
+    /// Set when PolyRec was launched again while running -- see
+    /// `single_instance`.
+    show_requested: Arc<AtomicBool>,
     /// Set while the Hotkeys popup is waiting for the user to press a key to
     /// bind, after clicking "Change" for that row.
     recording_hotkey: Option<HotkeySlot>,
@@ -172,7 +175,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, mut config: Config) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        mut config: Config,
+        show_requested: Arc<AtomicBool>,
+    ) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         if config.encode.gpu_frames
@@ -267,6 +274,7 @@ impl App {
             toast: None,
             tray,
             dashboard_hidden: false,
+            show_requested,
             recording_hotkey: None,
             hotkey_capture_warning: None,
             last_window_pos: None,
@@ -290,6 +298,9 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let s: &'static Strings = self.config.lang().strings();
         self.poll_background_work(ctx, s);
+        if self.show_requested.swap(false, Ordering::Relaxed) {
+            self.set_dashboard_shown(ctx, true);
+        }
         self.poll_tray(ctx, s);
         self.request_repaints(ctx);
         self.request_ui_for_new_windows_while_minimized(ctx);
@@ -315,11 +326,19 @@ impl eframe::App for App {
             self.last_window_pos = Some(outer_rect.min);
         }
 
+        // The overlay HUD and the toast are windows of their own, drawn from
+        // this pass however the dashboard is. Hidden in the tray, the
+        // dashboard itself has nothing to draw -- while recording with the
+        // overlay on, this pass still runs at the overlay's full rate (see
+        // `recording_needs_fast_repaint`).
+        self.render_overlay_viewport(ctx, s);
+        self.render_toast_viewport(ctx);
+        if self.dashboard_hidden {
+            return;
+        }
         self.render_menu_bar(ui, s);
         self.render_source_panel(ui, s);
         self.render_center_panel(ui, s);
-        self.render_overlay_viewport(ctx, s);
-        self.render_toast_viewport(ctx);
         self.render_audio_popup(ctx, s);
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);

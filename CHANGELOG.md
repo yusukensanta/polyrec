@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Launching PolyRec again while it's running, say when it's hidden in the tray, now brings the running one up instead of starting a second copy. A second copy registered every hotkey again, added a second tray icon, and saved over the same settings.
+- **Start recording** from the tray menu now brings the window up if the recording doesn't start, so you can see why. Before, an error showed only inside the hidden window.
+- The start/stop hotkey now shows a "Recording didn't start" toast when it doesn't start one, for example because nothing recordable is in front or the last recording is still being saved. Before, nothing happened.
+- While hidden in the tray, the window no longer redraws itself during a recording with the overlay on. Only the overlay is drawn.
+
 ## [v0.5.115] - 2026-10-31
 
 ### Fixed

@@ -223,7 +223,9 @@ async fn update_portable(version_tag: &str) -> Result<(), AppError> {
     let _ = std::fs::remove_file(&temp_path);
 
     let current_exe = std::env::current_exe().update_ctx("current_exe after self_replace")?;
+    // This copy is still closing (see `single_instance`).
     std::process::Command::new(&current_exe)
+        .arg(crate::single_instance::AFTER_UPDATE_ARG)
         .spawn()
         .update_ctx("spawning updated exe")?;
     Ok(())

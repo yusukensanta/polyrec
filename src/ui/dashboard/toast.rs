@@ -39,8 +39,9 @@ impl Toast {
 }
 
 /// The toast for `event`, judged by what it actually changed (`before` →
-/// `after`). `None` when it changed nothing, e.g. a start that was refused:
-/// the dashboard already shows why.
+/// `after`). A start that was refused says so -- the dashboard says why,
+/// but it's likely behind whatever is being recorded. `None` for anything
+/// else that changed nothing, like Pause while idle.
 pub(super) fn hotkey_toast(
     event: HotkeyEvent,
     before: &SessionState,
@@ -54,6 +55,7 @@ pub(super) fn hotkey_toast(
         HotkeyEvent::StartStop => match (before, after) {
             (Idle, Recording) => s.toast_recording,
             (Recording | Paused, Idle) => s.toast_stopped,
+            (Idle, Idle) => s.toast_not_started,
             _ => return None,
         },
         HotkeyEvent::Pause => match (before, after) {
@@ -180,9 +182,16 @@ mod tests {
     }
 
     #[test]
-    fn a_hotkey_that_changed_nothing_gets_no_toast() {
-        // A refused start, or pause while idle.
-        assert_eq!(toast(HotkeyEvent::StartStop, Idle, Idle), None);
+    fn a_refused_start_says_so() {
+        let s = Lang::En.strings();
+        assert_eq!(
+            toast(HotkeyEvent::StartStop, Idle, Idle).as_deref(),
+            Some(s.toast_not_started)
+        );
+    }
+
+    #[test]
+    fn pause_while_idle_gets_no_toast() {
         assert_eq!(toast(HotkeyEvent::Pause, Idle, Idle), None);
     }
 

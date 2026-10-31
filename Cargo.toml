@@ -65,6 +65,8 @@ features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_System_Diagnostics_ToolHelp",
+    # Named mutex and event for `single_instance`.
+    "Win32_Security",
 ]
 
 [dev-dependencies]
