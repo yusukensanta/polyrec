@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.108] - 2026-10-31
+
 ### Fixed
 
 - Recording a window whose picture doesn't change, such as an idle app, or a minimized window, no longer freezes PolyRec on Stop. Windows hands out no new frames for such a window, so the recording got no video at all: nothing was saved, and the dashboard stopped responding when stopped. The last frame is now sent again four times a second while nothing changes, and a minimized window records as black.
