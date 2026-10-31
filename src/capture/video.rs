@@ -513,6 +513,14 @@ async fn send_frame(
     tx.send(VideoFrame { pts, data }).await.is_ok()
 }
 
+/// How long the video may go without a new frame before the newest one is
+/// sent again. Windows hands out a frame only when the picture changes, so a
+/// still window gives one and then nothing -- and the MP4 sink, waiting on
+/// the video, then throttles every audio track too (the file stays at its
+/// 79-byte header) until stopping deadlocks. The audio side of the same
+/// stall is `SilenceFill`'s.
+const STILL_FRAME_REPEAT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Captures `target` and sends its frames, at most `fps` per second (see
 /// `FrameRateLimiter`), until `ctrl` is stopped or the target goes away. The
 /// cap follows `fps` if the writer lowers it while running.
@@ -547,6 +555,10 @@ pub async fn run_video_capture(
     // and not yet read back -- None means there's nothing unread there.
     let mut pending: [Option<std::time::Duration>; 2] = [None, None];
     let mut frame_counter: u64 = 0;
+    // The slot holding the newest frame, if one has come yet, and when a
+    // frame was last captured or sent again -- see `STILL_FRAME_REPEAT`.
+    let mut newest_slot: Option<usize> = None;
+    let mut idle_since = std::time::Duration::ZERO;
 
     loop {
         if ctrl.is_stopped() {
@@ -562,6 +574,37 @@ pub async fn run_video_capture(
         let frame = match res.frame_pool.TryGetNextFrame() {
             Ok(f) => f,
             Err(_) => {
+                let now = ctrl.clock.elapsed();
+                if !ctrl.is_paused() && now.saturating_sub(idle_since) >= STILL_FRAME_REPEAT {
+                    idle_since = now;
+                    // The newest frame as itself if it's still waiting to be
+                    // read back (for a next frame that isn't coming), else
+                    // again as a frame of now.
+                    let pts = newest_slot
+                        .and_then(|slot| pending[slot].take())
+                        .or_else(|| limiter.admit(now).then_some(now));
+                    let Some(pts) = pts else { continue };
+                    let sent = match newest_slot {
+                        Some(slot) => match unsafe { res.read_back(slot, false, &pool)? } {
+                            Some(pixels) => {
+                                send_frame(&tx, pts, pixels, capture_size, output_size).await
+                            }
+                            None => true,
+                        },
+                        // No frame has come at all (a minimized window gives
+                        // none): black.
+                        None => {
+                            let (width, height) = output_size;
+                            let mut black = pool.take(width as usize * height as usize * 4);
+                            black.fill(0);
+                            tx.send(VideoFrame { pts, data: black }).await.is_ok()
+                        }
+                    };
+                    if !sent {
+                        break;
+                    }
+                    continue;
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 continue;
             }
@@ -588,6 +631,8 @@ pub async fn run_video_capture(
 
         res.copy_into_staging(write_idx, &frame)?;
         pending[write_idx] = Some(pts);
+        newest_slot = Some(write_idx);
+        idle_since = pts;
 
         // Read back the slot copied last iteration -- see the ping-pong comment
         // in `CaptureResources::open`. Non-blocking first (the GPU copy from
@@ -735,7 +780,8 @@ mod tests {
 
     /// A small topmost window with a white bar sliding across it about once
     /// a millisecond, so DWM -- and WGC -- produce a new frame on every display
-    /// refresh. Closed on drop.
+    /// refresh (or, from `spawn_still`, a bar that never moves). Closed on
+    /// drop.
     struct SlidingBarWindow {
         hwnd: usize,
         stop: Arc<std::sync::atomic::AtomicBool>,
@@ -747,6 +793,14 @@ mod tests {
         const H: i32 = 240;
 
         fn spawn() -> Self {
+            Self::spawn_with(true)
+        }
+
+        fn spawn_still() -> Self {
+            Self::spawn_with(false)
+        }
+
+        fn spawn_with(sliding: bool) -> Self {
             use windows::Win32::Graphics::Gdi::{BLACKNESS, GetDC, PatBlt, ReleaseDC, WHITENESS};
             use windows::Win32::UI::WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
@@ -779,11 +833,13 @@ mod tests {
                     while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                         DispatchMessageW(&msg);
                     }
-                    let dc = GetDC(Some(hwnd));
-                    let _ = PatBlt(dc, x, 0, bar, Self::H, BLACKNESS);
-                    x = (x + 1) % (Self::W - bar);
-                    let _ = PatBlt(dc, x, 0, bar, Self::H, WHITENESS);
-                    ReleaseDC(Some(hwnd), dc);
+                    if sliding || x == 0 {
+                        let dc = GetDC(Some(hwnd));
+                        let _ = PatBlt(dc, x, 0, bar, Self::H, BLACKNESS);
+                        x = (x + 1) % (Self::W - bar);
+                        let _ = PatBlt(dc, x, 0, bar, Self::H, WHITENESS);
+                        ReleaseDC(Some(hwnd), dc);
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 let _ = DestroyWindow(hwnd);
@@ -872,6 +928,51 @@ mod tests {
         capture.join().unwrap().expect("run_video_capture failed");
         let frames = counter.join().unwrap();
         (frames, process_cpu_time() - cpu_before)
+    }
+
+    /// A still window keeps the video flowing. Windows hands out a frame only
+    /// when the picture changes, so a still window gives one and then nothing
+    /// -- which used to leave the recording with no video at all (the one
+    /// frame waited for a next one to be read back), stalling the MP4 sink
+    /// and, on stop, the dashboard. Now the last frame is sent again every
+    /// `STILL_FRAME_REPEAT`. Shows a small window in the top-left corner for
+    /// ~3 s, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn still_window_keeps_sending_frames() {
+        const SECS: u64 = 3;
+        let window = SlidingBarWindow::spawn_still();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (frames, _) = capture_for((CaptureKind::Window, window.hwnd), 30, SECS);
+        let expected = (std::time::Duration::from_secs(SECS).as_millis()
+            / STILL_FRAME_REPEAT.as_millis()) as u64;
+        println!("still window: {frames} frames in {SECS} s (repeats due: {expected})");
+        assert!(
+            frames >= expected - 2,
+            "{frames} frames in {SECS} s from a still window"
+        );
+    }
+
+    /// A minimized window gives no frame at all, so there's nothing to send
+    /// again: black frames keep the video going instead. Minimizes a small
+    /// window for ~3 s, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn minimized_window_gets_black_frames() {
+        use windows::Win32::UI::WindowsAndMessaging::{SW_MINIMIZE, ShowWindow};
+        const SECS: u64 = 3;
+        let window = SlidingBarWindow::spawn_still();
+        let hwnd = HWND(window.hwnd as *mut core::ffi::c_void);
+        let _ = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (frames, _) = capture_for((CaptureKind::Window, window.hwnd), 30, SECS);
+        let expected = (std::time::Duration::from_secs(SECS).as_millis()
+            / STILL_FRAME_REPEAT.as_millis()) as u64;
+        println!("minimized window: {frames} frames in {SECS} s (due: {expected})");
+        assert!(
+            frames >= expected - 2,
+            "{frames} frames in {SECS} s from a minimized window"
+        );
     }
 
     /// End-to-end fps cap: a window that changes every millisecond makes WGC
