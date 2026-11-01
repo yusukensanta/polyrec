@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A red dot on PolyRec's tray icon and taskbar button while it's recording, amber while paused, so you can tell it's recording without opening the window. Windows shows the taskbar dot only when **Show badges on taskbar apps** is on in its taskbar settings; see the user guide.
+
 ## [v0.5.124] - 2026-11-01
 
 ### Fixed

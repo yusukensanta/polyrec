@@ -12,6 +12,7 @@ mod panel_source;
 mod popups;
 mod recent;
 mod state;
+mod status_badge;
 mod theme;
 mod toast;
 mod tray;
@@ -148,6 +149,9 @@ pub struct App {
     /// The notification-area icon; `None` if Windows wouldn't take one
     /// (logged), which leaves everything else working as before.
     tray: Option<tray::Tray>,
+    /// The dot on the dashboard's taskbar button while recording; `None`
+    /// if Windows wouldn't give one.
+    taskbar_badge: Option<status_badge::TaskbarBadge>,
     /// Whether the dashboard was hidden through the tray -- see
     /// `App::dashboard_shown`.
     dashboard_hidden: bool,
@@ -254,6 +258,11 @@ impl App {
         let tray = tray::Tray::new(move || wake_ctx.request_repaint())
             .inspect_err(|e| tracing::warn!("no tray icon: {e}"))
             .ok();
+        let taskbar_badge = status_badge::dashboard_hwnd(cc).and_then(|hwnd| {
+            status_badge::TaskbarBadge::new(hwnd)
+                .inspect_err(|e| tracing::warn!("no taskbar badge: {e}"))
+                .ok()
+        });
 
         // Fire-and-forget: checked once at startup, polled in `update()`. Any failure
         // (offline, GitHub unreachable, no releases yet) just means no banner shows —
@@ -303,6 +312,7 @@ impl App {
             notice,
             toast: None,
             tray,
+            taskbar_badge,
             dashboard_hidden: false,
             show_requested,
             graphics,

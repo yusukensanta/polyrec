@@ -2961,6 +2961,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "self-replace",
