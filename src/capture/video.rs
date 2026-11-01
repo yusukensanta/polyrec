@@ -249,6 +249,9 @@ struct CaptureResources {
     /// textures were created at.
     width: u32,
     height: u32,
+    /// Whether Windows took `show_border` -- it can't leave the border out
+    /// before Windows 11 24H2.
+    border_as_asked: bool,
 }
 
 impl CaptureResources {
@@ -322,7 +325,7 @@ impl CaptureResources {
         // `SetIsBorderRequired`) only exists on Windows 11 24H2+; the cast/call
         // fails harmlessly on older Windows, which just keeps the OS default
         // (border shown) since there's no way to suppress it there.
-        let _ = session.SetIsBorderRequired(show_border);
+        let border_as_asked = session.SetIsBorderRequired(show_border).is_ok();
 
         // Asks WGC itself to deliver fewer frames on a high-refresh display, so
         // the frames `FrameRateLimiter` would drop anyway aren't composed and
@@ -405,6 +408,7 @@ impl CaptureResources {
             staging,
             width: capture_width,
             height: capture_height,
+            border_as_asked,
         })
     }
 
@@ -505,6 +509,55 @@ impl CaptureResources {
         let _ = self.session.Close();
         let _ = self.frame_pool.Close();
     }
+}
+
+/// One picture of a capture target (`capture_still`): BGRA rows, tightly
+/// packed.
+pub struct Still {
+    pub bgra: FrameBuf,
+    pub width: u32,
+    pub height: u32,
+    /// Whether Windows left its capture border out. It can't before
+    /// Windows 11 24H2, where taking a picture flashes the border around the
+    /// target.
+    pub border_left_out: bool,
+}
+
+/// One picture of `target` as a recording would see it, for the dashboard's
+/// preview of the selected source. Runs a capture session only until the
+/// first frame arrives, waiting at most `timeout` -- a minimized window sends
+/// none. Joins the calling thread to COM's multithreaded apartment, so call
+/// it from a thread of its own.
+pub fn capture_still(
+    target: CaptureTarget,
+    timeout: std::time::Duration,
+) -> Result<Still, AppError> {
+    let (width, height) = query_capture_size(target)?;
+    let size = (width.max(2) & !1, height.max(2) & !1);
+    let res = CaptureResources::open(target, size, false, std::time::Duration::ZERO, None)?;
+    let deadline = std::time::Instant::now() + timeout;
+    let frame = loop {
+        if let Ok(frame) = res.frame_pool.TryGetNextFrame() {
+            break frame;
+        }
+        if res.item_closed() || std::time::Instant::now() >= deadline {
+            res.close();
+            return Err(AppError::Capture("no frame for a preview".into()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let copied = res.copy_into_staging(0, &frame);
+    drop(frame);
+    let read = copied.and_then(|()| unsafe { res.read_back(0, false, &FramePool::new()) });
+    let border_left_out = res.border_as_asked;
+    res.close();
+    let bgra = read?.ok_or_else(|| AppError::Capture("preview frame not read back".into()))?;
+    Ok(Still {
+        bgra,
+        width: size.0,
+        height: size.1,
+        border_left_out,
+    })
 }
 
 /// A captured frame's underlying D3D11 texture (WGC's own, recycled once

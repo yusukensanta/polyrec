@@ -11,6 +11,7 @@ mod panel_center;
 mod panel_menu;
 mod panel_source;
 mod popups;
+mod preview;
 mod recent;
 mod state;
 mod status_badge;
@@ -154,6 +155,8 @@ pub struct App {
     /// The notification-area icon; `None` if Windows wouldn't take one
     /// (logged), which leaves everything else working as before.
     tray: Option<tray::Tray>,
+    /// The selected source's picture, in its card.
+    preview: preview::SourcePreview,
     /// The dot on the dashboard's taskbar button while recording; `None`
     /// if Windows wouldn't give one.
     taskbar_badge: Option<status_badge::TaskbarBadge>,
@@ -319,6 +322,7 @@ impl App {
             notice,
             toast: None,
             tray,
+            preview: preview::SourcePreview::default(),
             taskbar_badge,
             dashboard_hidden: false,
             show_requested,
@@ -386,6 +390,7 @@ impl eframe::App for App {
         }
         self.poll_tray(ctx, s);
         self.run_recording_checks(s);
+        self.update_preview(ctx);
         self.request_repaints(ctx);
         self.request_ui_for_new_windows_while_minimized(ctx);
     }

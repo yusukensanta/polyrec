@@ -164,6 +164,8 @@ pub struct Strings {
     pub recording_stats_tooltip: &'static str,
     pub saving_recording: &'static str,
     pub select_source_prompt: &'static str,
+    /// In the selected source's card when it has no picture to show.
+    pub preview_unavailable: &'static str,
     // Only shown while Idle -- Recording/Paused already show their state via
     // the pulsing dot + colored label at the top of the center panel.
     pub state_prefix: &'static str, // "State: " — followed by session_state_idle
@@ -434,6 +436,7 @@ pub static EN: Strings = Strings {
     recording_stats_tooltip: "Audio tracks, frames per second achieved so far, and the file size so far. Frames are only captured when the picture changes, so a still screen records fewer per second than the setting.",
     saving_recording: "Saving recording…",
     select_source_prompt: "Select a source and press REC to start.",
+    preview_unavailable: "No preview while it's minimized",
     state_prefix: "State: ",
     session_state_idle: "Idle",
 
@@ -626,6 +629,7 @@ pub static JA: Strings = Strings {
     recording_stats_tooltip: "音声トラック数、ここまでの実フレームレート、ここまでのファイルサイズです。フレームは画面が変化したときだけ取り込まれるため、静止した画面では設定より少なくなります。",
     saving_recording: "録画を保存中…",
     select_source_prompt: "ソースを選択して REC を押すと開始します。",
+    preview_unavailable: "最小化中はプレビューできません",
     state_prefix: "状態: ",
     session_state_idle: "待機中",
 
