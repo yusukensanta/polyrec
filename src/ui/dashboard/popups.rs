@@ -1,8 +1,6 @@
 use super::App;
 use super::state::SelfUpdateState;
-use super::theme::{
-    ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY, text_px,
-};
+use super::theme::{POPUP_WIDTH, TEXT_BODY, pal, text_px};
 use super::util::{open_url, take_if_finished};
 use super::widgets::{accent_button, caption, section_header};
 use crate::capture::frame_rate::{FPS_PRESETS, fps_fits_display};
@@ -158,7 +156,7 @@ impl App {
             ui.label(caption(
                 s.fps_display_caption_template
                     .replace("{hz}", &hz.to_string()),
-                TEXT_MUTED,
+                pal().text_muted,
             ));
         }
         let recorded = support.recorded_fps(self.config.encode.fps());
@@ -166,7 +164,7 @@ impl App {
             ui.label(caption(
                 s.fps_recorded_template
                     .replace("{fps}", &recorded.to_string()),
-                ACCENT_PAUSE,
+                pal().accent_pause,
             ));
         }
     }
@@ -210,7 +208,10 @@ impl App {
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
-                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                if ui
+                    .add(accent_button(s.close_button, pal().text_muted))
+                    .clicked()
+                {
                     close = true;
                 }
             });
@@ -234,10 +235,13 @@ impl App {
                 ui.label(
                     egui::RichText::new(&msg)
                         .size(text_px(TEXT_BODY))
-                        .color(ACCENT_REC),
+                        .color(pal().accent_rec),
                 );
                 ui.add_space(8.0);
-                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                if ui
+                    .add(accent_button(s.close_button, pal().text_muted))
+                    .clicked()
+                {
                     close = true;
                 }
             });
@@ -271,20 +275,20 @@ impl App {
                                 s.update_confirm_prefix, update.version, s.update_confirm_suffix
                             ))
                             .size(text_px(TEXT_BODY))
-                            .color(TEXT_PRIMARY),
+                            .color(pal().text_primary),
                         );
                         ui.add_space(4.0);
-                        ui.label(caption(s.update_confirm_uac_note, TEXT_MUTED));
+                        ui.label(caption(s.update_confirm_uac_note, pal().text_muted));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if ui
-                                .add(accent_button(s.update_now_button, ACCENT_PAUSE))
+                                .add(accent_button(s.update_now_button, pal().accent_pause))
                                 .clicked()
                             {
                                 action = Some("now");
                             }
                             if ui
-                                .add(accent_button(s.update_not_now_button, TEXT_MUTED))
+                                .add(accent_button(s.update_not_now_button, pal().text_muted))
                                 .clicked()
                             {
                                 action = Some("not_now");
@@ -322,7 +326,7 @@ impl App {
                         ui.label(
                             egui::RichText::new(s.update_working_message)
                                 .size(text_px(TEXT_BODY))
-                                .color(TEXT_PRIMARY),
+                                .color(pal().text_primary),
                         );
                     });
             }
@@ -337,10 +341,13 @@ impl App {
                         ui.label(
                             egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
                                 .size(text_px(TEXT_BODY))
-                                .color(ACCENT_REC),
+                                .color(pal().accent_rec),
                         );
                         ui.add_space(8.0);
-                        if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                        if ui
+                            .add(accent_button(s.close_button, pal().text_muted))
+                            .clicked()
+                        {
                             close = true;
                         }
                     });

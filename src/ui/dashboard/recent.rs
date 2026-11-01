@@ -3,7 +3,7 @@
 
 use super::App;
 use super::icons::{Icon, add_named};
-use super::theme::{ACCENT_SECONDARY, SPACE_TIGHT, TEXT_BODY, TEXT_MUTED, text_px};
+use super::theme::{SPACE_TIGHT, TEXT_BODY, pal, text_px};
 use super::util::{open_file, show_in_folder};
 use super::widgets::{caption, format_bytes, section_header};
 use crate::i18n::Strings;
@@ -86,8 +86,12 @@ impl App {
             if add_named(
                 ui,
                 true,
-                egui::Button::new(Icon::Play.rich(text_px(TEXT_BODY)).color(ACCENT_SECONDARY))
-                    .small(),
+                egui::Button::new(
+                    Icon::Play
+                        .rich(text_px(TEXT_BODY))
+                        .color(pal().accent_secondary),
+                )
+                .small(),
                 s.recent_play_tooltip,
             )
             .on_hover_text(s.recent_play_tooltip)
@@ -101,7 +105,7 @@ impl App {
                 egui::Button::new(
                     Icon::Folder
                         .rich(text_px(TEXT_BODY))
-                        .color(ACCENT_SECONDARY),
+                        .color(pal().accent_secondary),
                 )
                 .small(),
                 s.recent_show_tooltip,
@@ -114,7 +118,7 @@ impl App {
             ui.add(
                 egui::Label::new(caption(
                     format!("{name}  ·  {}", format_bytes(recording.bytes)),
-                    TEXT_MUTED,
+                    pal().text_muted,
                 ))
                 .truncate(),
             )

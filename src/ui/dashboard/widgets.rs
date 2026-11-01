@@ -67,7 +67,7 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
             .size(text_px(TEXT_SUBTITLE))
-            .color(TEXT_MUTED)
+            .color(pal().text_muted)
             .strong(),
     );
     ui.add_space(SPACE_TIGHT);

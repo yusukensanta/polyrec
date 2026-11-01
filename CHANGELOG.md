@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- PolyRec follows Windows' theme: light or dark mode, a high-contrast theme (in Windows' own colours), and your accent colour for what's selected. Every text colour passes WCAG AA contrast in both the light and the dark colours, whatever the accent. Its title bar already followed Windows.
+- With Windows' **Animation effects** off, PolyRec doesn't animate either; the recording dot stops pulsing.
+
 ## [v0.5.129] - 2026-11-01
 
 ### Changed

@@ -1,5 +1,5 @@
 use super::App;
-use super::theme::{BG_OVERLAY, TEXT_BODY};
+use super::theme::{Palette, TEXT_BODY};
 use crate::i18n::Strings;
 use crate::types::CaptureKind;
 use eframe::egui;
@@ -91,7 +91,7 @@ impl App {
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::NONE
-                            .fill(BG_OVERLAY)
+                            .fill(Palette::DARK.bg_overlay)
                             .inner_margin(6i8),
                     )
                     .show(ctx, |ui| {

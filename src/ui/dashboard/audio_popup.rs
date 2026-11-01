@@ -1,6 +1,6 @@
 use super::App;
 use super::icons::Icon;
-use super::theme::{ACCENT_IDLE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_MUTED};
+use super::theme::{POPUP_WIDTH, pal};
 use super::widgets::{
     RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, section_header,
 };
@@ -74,7 +74,10 @@ impl App {
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
-                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                if ui
+                    .add(accent_button(s.close_button, pal().text_muted))
+                    .clicked()
+                {
                     close = true;
                 }
             });
@@ -88,7 +91,7 @@ impl App {
     fn render_system_audio_rows(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         section_header(ui, s.system_audio_header);
         if self.audio_devices.is_empty() {
-            ui.label(caption(s.no_audio_devices, TEXT_MUTED));
+            ui.label(caption(s.no_audio_devices, pal().text_muted));
         }
         // Iterated from cloned (label, id) pairs, not
         // `self.audio_devices` directly -- persisting a
@@ -128,7 +131,7 @@ impl App {
     fn render_app_audio_rows(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         section_header(ui, s.applications_header);
         if self.app_audio_sources.is_empty() {
-            ui.label(caption(s.no_app_audio_sources, TEXT_MUTED));
+            ui.label(caption(s.no_app_audio_sources, pal().text_muted));
         }
         // Iterated from a clone, not `self.app_audio_sources`
         // directly -- an uncheck below rebuilds that Vec
@@ -187,7 +190,7 @@ impl App {
         // A fresh install shows nothing here but this button.
         if !self.add_app.open {
             if ui
-                .add(accent_button(s.add_app_button, ACCENT_SECONDARY))
+                .add(accent_button(s.add_app_button, pal().accent_secondary))
                 .clicked()
             {
                 self.add_app.open = true;
@@ -229,7 +232,7 @@ impl App {
             let response = ui
                 .checkbox(
                     &mut self.app_audio_only,
-                    egui::RichText::new(s.app_audio_only_label).color(ACCENT_SECONDARY),
+                    egui::RichText::new(s.app_audio_only_label).color(pal().accent_secondary),
                 )
                 .on_hover_text(if !has_loopback_device {
                     s.tooltip_no_loopback_device
@@ -277,7 +280,7 @@ impl App {
         // -- distinct from "no matches", it's telling the user more
         // (installed-only) results may still be on the way.
         if self.add_app.installed_rx.is_some() {
-            ui.label(caption(s.add_app_scanning, TEXT_MUTED));
+            ui.label(caption(s.add_app_scanning, pal().text_muted));
         }
         if candidates.is_empty() && self.add_app.installed_rx.is_none() {
             let msg = if filter.is_empty() {
@@ -285,7 +288,7 @@ impl App {
             } else {
                 s.add_app_no_matches
             };
-            ui.label(caption(msg, TEXT_MUTED));
+            ui.label(caption(msg, pal().text_muted));
         }
         let picked = self.render_add_app_candidate_list(ui, s, &candidates);
         if let Some((exe_name, source)) = picked {
@@ -437,7 +440,7 @@ impl App {
                             picked = Some((candidate.exe_name.clone(), candidate.source.clone()));
                         }
                         if candidate.is_running() {
-                            ui.label(caption(s.add_app_running_tag, ACCENT_IDLE));
+                            ui.label(caption(s.add_app_running_tag, pal().accent_idle));
                         }
                     });
                 }

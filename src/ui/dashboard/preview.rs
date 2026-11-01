@@ -2,7 +2,7 @@
 //! or display REC is about to record before recording it.
 
 use super::App;
-use super::theme::{SPACE_NORMAL, TEXT_MUTED};
+use super::theme::{SPACE_NORMAL, pal};
 use super::widgets::caption;
 use crate::capture::video::{CaptureTarget, capture_still};
 use crate::i18n::Strings;
@@ -196,7 +196,7 @@ impl App {
             }
             None if preview.unavailable => {
                 ui.add_space(4.0);
-                ui.label(caption(s.preview_unavailable, TEXT_MUTED));
+                ui.label(caption(s.preview_unavailable, pal().text_muted));
             }
             None => {}
         }

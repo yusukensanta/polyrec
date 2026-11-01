@@ -1,35 +1,360 @@
 use eframe::egui;
 
-// WCAG 2.2 AA palette — all contrast ratios verified against BG_BASE (rgb 18,18,28)
-pub(super) const BG_DEEP: egui::Color32 = egui::Color32::from_rgb(10, 10, 16);
-pub(super) const BG_WINDOW: egui::Color32 = egui::Color32::from_rgb(22, 22, 34);
-pub(super) const BG_FAINT: egui::Color32 = egui::Color32::from_rgb(14, 14, 22);
-pub(super) const BG_BASE: egui::Color32 = egui::Color32::from_rgb(18, 18, 28);
-pub(super) const BG_CARD: egui::Color32 = egui::Color32::from_rgb(26, 26, 40);
-// Midpoint between BG_CARD and BG_SELECTED -- a hovered, not-yet-selected
-// source card should read as "about to be clickable", distinct from both
-// resting and selected states.
-pub(super) const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(32, 32, 53);
-pub(super) const BG_SELECTED: egui::Color32 = egui::Color32::from_rgb(38, 38, 66);
-pub(super) const BORDER: egui::Color32 = egui::Color32::from_rgb(40, 40, 60);
-pub(super) const BORDER_HOVER: egui::Color32 = egui::Color32::from_rgb(65, 65, 125);
-pub(super) const BORDER_SEL: egui::Color32 = egui::Color32::from_rgb(90, 90, 190);
-pub(super) const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(0x86, 0x86, 0xCF);
-pub(super) const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 235);
-// 140/140/165, not 130/130/155: the darker value passed WCAG AA (4.5:1) on panel
-// backgrounds but only hit 4.49:1 on button fill (28,28,44) -- brightening it here
-// only ever increases contrast on every other background it's already used on.
-pub(super) const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(140, 140, 165);
-pub(super) const ACCENT_REC: egui::Color32 = egui::Color32::from_rgb(248, 80, 80);
-pub(super) const ACCENT_IDLE: egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
-pub(super) const ACCENT_PAUSE: egui::Color32 = egui::Color32::from_rgb(224, 178, 56);
-pub(super) const BG_BTN_STOP: egui::Color32 = egui::Color32::from_rgb(52, 18, 18);
-pub(super) const BG_BTN_IDLE: egui::Color32 = egui::Color32::from_rgb(18, 46, 28);
-/// The small pause button next to STOP.
-pub(super) const BG_BTN_PAUSE: egui::Color32 = egui::Color32::from_rgb(30, 30, 46);
-/// The recording HUD overlay's translucent backdrop (premultiplied alpha).
-pub(super) const BG_OVERLAY: egui::Color32 =
-    egui::Color32::from_rgba_premultiplied(20, 20, 20, 200);
+/// The dashboard's colours, for the theme Windows is in -- see `pal` and
+/// `ThemeWatch`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Palette {
+    pub(super) bg_deep: egui::Color32,
+    pub(super) bg_window: egui::Color32,
+    pub(super) bg_faint: egui::Color32,
+    pub(super) bg_base: egui::Color32,
+    pub(super) bg_card: egui::Color32,
+    /// A hovered, not-yet-selected source card: between resting and
+    /// selected, so it reads as "about to be clickable".
+    pub(super) bg_hover: egui::Color32,
+    pub(super) bg_selected: egui::Color32,
+    pub(super) border: egui::Color32,
+    pub(super) border_hover: egui::Color32,
+    pub(super) border_sel: egui::Color32,
+    pub(super) accent_secondary: egui::Color32,
+    pub(super) text_primary: egui::Color32,
+    pub(super) text_muted: egui::Color32,
+    pub(super) accent_rec: egui::Color32,
+    pub(super) accent_idle: egui::Color32,
+    pub(super) accent_pause: egui::Color32,
+    pub(super) bg_btn_stop: egui::Color32,
+    pub(super) bg_btn_idle: egui::Color32,
+    /// The small pause button next to STOP.
+    pub(super) bg_btn_pause: egui::Color32,
+    /// The recording HUD overlay's translucent backdrop (premultiplied
+    /// alpha). The HUDs sit over games, so they're dark in every theme.
+    pub(super) bg_overlay: egui::Color32,
+    /// Buttons' and checkboxes' fills: resting, hovered, pressed.
+    pub(super) widget_inactive: egui::Color32,
+    pub(super) widget_hovered: egui::Color32,
+    pub(super) widget_active: egui::Color32,
+    /// Selected toggles (H264/H265, ...) and the text on them.
+    pub(super) selection: egui::Color32,
+    pub(super) selection_text: egui::Color32,
+    /// Whether egui's dark widgets are the base.
+    pub(super) dark: bool,
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
+    egui::Color32::from_rgb(r, g, b)
+}
+
+impl Palette {
+    /// WCAG 2.2 AA (see `palette_tests`). `text_muted` is 140/140/165, not
+    /// 130/130/155: the darker value passed on panels but only hit 4.49:1 on
+    /// a button's fill.
+    pub(super) const DARK: Self = Self {
+        bg_deep: rgb(10, 10, 16),
+        bg_window: rgb(22, 22, 34),
+        bg_faint: rgb(14, 14, 22),
+        bg_base: rgb(18, 18, 28),
+        bg_card: rgb(26, 26, 40),
+        bg_hover: rgb(32, 32, 53),
+        bg_selected: rgb(38, 38, 66),
+        border: rgb(40, 40, 60),
+        border_hover: rgb(65, 65, 125),
+        border_sel: rgb(90, 90, 190),
+        accent_secondary: rgb(0x86, 0x86, 0xCF),
+        text_primary: rgb(220, 220, 235),
+        text_muted: rgb(140, 140, 165),
+        accent_rec: rgb(248, 80, 80),
+        accent_idle: rgb(74, 222, 128),
+        accent_pause: rgb(224, 178, 56),
+        bg_btn_stop: rgb(52, 18, 18),
+        bg_btn_idle: rgb(18, 46, 28),
+        bg_btn_pause: rgb(30, 30, 46),
+        bg_overlay: egui::Color32::from_rgba_premultiplied(20, 20, 20, 200),
+        widget_inactive: rgb(28, 28, 44),
+        widget_hovered: rgb(38, 38, 58),
+        widget_active: rgb(48, 48, 72),
+        selection: rgb(0, 92, 128),
+        selection_text: rgb(210, 210, 210),
+        dark: true,
+    };
+
+    /// Windows 11's light colours: its light-theme backgrounds, and its
+    /// success/caution/critical colours (#0F7B0F, #9D5D00, #C42B1C, on
+    /// #DFF6DD/#FDE7E9) for REC, Paused and STOP. AA like `DARK`.
+    pub(super) const LIGHT: Self = Self {
+        bg_deep: rgb(255, 255, 255),
+        bg_window: rgb(249, 249, 249),
+        bg_faint: rgb(250, 250, 250),
+        bg_base: rgb(243, 243, 243),
+        bg_card: rgb(251, 251, 251),
+        bg_hover: rgb(240, 240, 245),
+        bg_selected: rgb(230, 234, 245),
+        border: rgb(224, 224, 224),
+        border_hover: rgb(180, 180, 200),
+        border_sel: rgb(0, 95, 184),
+        accent_secondary: rgb(0, 84, 166),
+        text_primary: rgb(27, 27, 27),
+        text_muted: rgb(96, 96, 96),
+        accent_rec: rgb(196, 43, 28),
+        accent_idle: rgb(15, 123, 15),
+        accent_pause: rgb(157, 93, 0),
+        bg_btn_stop: rgb(253, 231, 233),
+        bg_btn_idle: rgb(223, 246, 221),
+        bg_btn_pause: rgb(235, 235, 235),
+        bg_overlay: Self::DARK.bg_overlay,
+        widget_inactive: rgb(251, 251, 251),
+        widget_hovered: rgb(245, 245, 245),
+        widget_active: rgb(238, 238, 238),
+        selection: rgb(0, 95, 184),
+        selection_text: rgb(255, 255, 255),
+        dark: false,
+    };
+
+    /// The palette for Windows' theme (`dark`), or its own colours when a
+    /// high-contrast theme is on -- which wins whatever the theme. Windows'
+    /// accent colour, if known, marks what's selected.
+    pub(super) fn choose(
+        dark: bool,
+        high_contrast: Option<SystemColors>,
+        accent: Option<egui::Color32>,
+    ) -> Self {
+        if let Some(system) = high_contrast {
+            return Self::high_contrast(system);
+        }
+        let base = if dark { Self::DARK } else { Self::LIGHT };
+        match accent {
+            Some(accent) => Self {
+                border_sel: accent,
+                selection: shade_for_text(accent, base.text_primary, dark),
+                selection_text: base.text_primary,
+                ..base
+            },
+            None => base,
+        }
+    }
+
+    /// Windows' high-contrast colours, and nothing else: no dimmed text,
+    /// borders in the text colour so every edge shows.
+    fn high_contrast(c: SystemColors) -> Self {
+        Self {
+            bg_deep: c.window,
+            bg_window: c.window,
+            bg_faint: c.window,
+            bg_base: c.window,
+            bg_card: c.window,
+            bg_hover: c.window,
+            bg_selected: c.window,
+            border: c.window_text,
+            border_hover: c.hotlight,
+            border_sel: c.highlight,
+            accent_secondary: c.hotlight,
+            text_primary: c.window_text,
+            text_muted: c.window_text,
+            accent_rec: c.window_text,
+            accent_idle: c.window_text,
+            accent_pause: c.window_text,
+            bg_btn_stop: c.window,
+            bg_btn_idle: c.window,
+            bg_btn_pause: c.window,
+            bg_overlay: Self::DARK.bg_overlay,
+            widget_inactive: c.window,
+            widget_hovered: c.window,
+            widget_active: c.window,
+            selection: c.highlight,
+            selection_text: c.highlight_text,
+            dark: luminance(c.window) < 0.5,
+        }
+    }
+}
+
+/// A colour's relative luminance (WCAG), 0 (black) to 1 (white).
+fn luminance(c: egui::Color32) -> f32 {
+    let lin = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG 2.2's contrast ratio between two opaque colours.
+fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// `accent`, darkened on a `dark` theme (lightened on a light one) just
+/// enough for `text` to read on it at WCAG AA. egui draws a selected toggle's
+/// label in the theme's text colour, so the fill has to suit that colour --
+/// Windows' own accent shades assume the opposite.
+fn shade_for_text(accent: egui::Color32, text: egui::Color32, dark: bool) -> egui::Color32 {
+    let toward = if dark {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    };
+    (0..=20)
+        .map(|step| accent.lerp_to_gamma(toward, step as f32 / 20.0))
+        .find(|&fill| contrast(fill, text) >= 4.5)
+        .unwrap_or(toward)
+}
+
+/// Windows' own colours for a high-contrast theme (`GetSysColor`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SystemColors {
+    pub(super) window: egui::Color32,
+    pub(super) window_text: egui::Color32,
+    pub(super) highlight: egui::Color32,
+    pub(super) highlight_text: egui::Color32,
+    pub(super) button_face: egui::Color32,
+    pub(super) button_text: egui::Color32,
+    pub(super) hotlight: egui::Color32,
+}
+
+thread_local! {
+    /// The palette in use; set on the UI thread by `ThemeWatch`.
+    static PALETTE: std::cell::Cell<Palette> = const { std::cell::Cell::new(Palette::DARK) };
+}
+
+/// The colours to draw with.
+pub(super) fn pal() -> Palette {
+    PALETTE.with(std::cell::Cell::get)
+}
+
+/// Whether Windows' "Animation effects" setting is on (`apply_motion`).
+static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// egui's animation time while animations are on, its own default.
+const ANIMATION_TIME: f32 = 1.0 / 12.0;
+
+/// Turns egui's animations, and PolyRec's own (`motion`), on or off with
+/// Windows' "Animation effects" setting.
+pub(super) fn apply_motion(ctx: &egui::Context, animations: bool) {
+    MOTION.store(animations, std::sync::atomic::Ordering::Relaxed);
+    let mut style = (*ctx.global_style()).clone();
+    style.animation_time = if animations { ANIMATION_TIME } else { 0.0 };
+    ctx.set_global_style(style);
+}
+
+/// Whether to animate -- e.g. pulse the recording dot.
+pub(super) fn motion() -> bool {
+    MOTION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Follows Windows' theme while PolyRec runs: light or dark (what egui
+/// hears from the window), a high-contrast theme, the accent colour, and
+/// whether animations are on. The last three are asked of Windows every
+/// `CHECK_EVERY`.
+pub(super) struct ThemeWatch {
+    settings: Option<windows::UI::ViewManagement::UISettings>,
+    checked_at: Option<std::time::Instant>,
+    high_contrast: Option<SystemColors>,
+    accent: Option<egui::Color32>,
+    animations: bool,
+    applied: Option<Palette>,
+}
+
+impl ThemeWatch {
+    const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+    pub(super) fn new() -> Self {
+        Self {
+            settings: windows::UI::ViewManagement::UISettings::new()
+                .inspect_err(|e| {
+                    tracing::warn!("Windows' accent and animation settings aren't followed: {e}")
+                })
+                .ok(),
+            checked_at: None,
+            high_contrast: None,
+            accent: None,
+            animations: true,
+            applied: None,
+        }
+    }
+
+    /// Runs every frame; changes the dashboard's colours when Windows'
+    /// change.
+    pub(super) fn apply(&mut self, ctx: &egui::Context) {
+        if self
+            .checked_at
+            .is_none_or(|at| at.elapsed() >= Self::CHECK_EVERY)
+        {
+            self.checked_at = Some(std::time::Instant::now());
+            self.high_contrast = system_high_contrast();
+            self.accent = self.settings.as_ref().and_then(accent);
+            let animations = self
+                .settings
+                .as_ref()
+                .and_then(|s| s.AnimationsEnabled().ok())
+                .unwrap_or(true);
+            if animations != self.animations || self.applied.is_none() {
+                self.animations = animations;
+                apply_motion(ctx, animations);
+            }
+        }
+        let dark = ctx.input(|i| i.raw.system_theme) != Some(egui::Theme::Light);
+
+        let palette = Palette::choose(dark, self.high_contrast, self.accent);
+        if self.applied != Some(palette) {
+            PALETTE.with(|p| p.set(palette));
+            ctx.set_visuals(visuals_for(&palette));
+            self.applied = Some(palette);
+        }
+    }
+}
+
+/// Windows' accent colour (Settings -> Personalization -> Colors).
+fn accent(settings: &windows::UI::ViewManagement::UISettings) -> Option<egui::Color32> {
+    let c = settings
+        .GetColorValue(windows::UI::ViewManagement::UIColorType::Accent)
+        .ok()?;
+    Some(egui::Color32::from_rgb(c.R, c.G, c.B))
+}
+
+/// Windows' own colours, if a high-contrast theme is on.
+fn system_high_contrast() -> Option<SystemColors> {
+    use windows::Win32::Graphics::Gdi::{
+        COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_HOTLIGHT,
+        COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
+    };
+    use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut hc = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some((&raw mut hc).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .ok()?;
+    if !hc.dwFlags.contains(HCF_HIGHCONTRASTON) {
+        return None;
+    }
+    // COLORREF is 0x00BBGGRR.
+    let color = |index| {
+        let c = unsafe { GetSysColor(index) };
+        egui::Color32::from_rgb(c as u8, (c >> 8) as u8, (c >> 16) as u8)
+    };
+    Some(SystemColors {
+        window: color(COLOR_WINDOW),
+        window_text: color(COLOR_WINDOWTEXT),
+        highlight: color(COLOR_HIGHLIGHT),
+        highlight_text: color(COLOR_HIGHLIGHTTEXT),
+        button_face: color(COLOR_BTNFACE),
+        button_text: color(COLOR_BTNTEXT),
+        hotlight: color(COLOR_HOTLIGHT),
+    })
+}
+
 /// Larger, pill-like rounding used only for the primary REC/STOP/RESUME
 /// action buttons, so they read as the one clearly primary action instead
 /// of blending into every other rounded rectangle in the UI.
@@ -200,14 +525,37 @@ fn font_definitions() -> egui::FontDefinitions {
 }
 
 pub(super) fn setup_theme(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
+    ctx.set_visuals(visuals_for(&pal()));
+    let mut s = (*ctx.global_style()).clone();
+    // egui's default interact_size.y (18.0) is well under Fluent's 32px / Material's
+    // 36-40dp desktop minimum control height — every button in the app (Refresh,
+    // Browse, Quality, Close, etc.) was inheriting that undersized floor. 32.0 is
+    // the Fluent minimum and lands on the 8px spacing grid used everywhere else here.
+    s.spacing.interact_size = egui::Vec2::new(40.0, 32.0);
+    s.spacing.item_spacing = egui::Vec2::new(8.0, 8.0);
+    s.spacing.button_padding = egui::Vec2::new(14.0, 8.0);
+    s.spacing.window_margin = egui::Margin::same(16);
+    s.spacing.indent = 16.0;
+    ctx.set_global_style(s);
+    apply_text_scale(ctx, 1.0);
+}
+
+/// egui's visuals in `p`'s colours.
+fn visuals_for(p: &Palette) -> egui::Visuals {
+    let mut v = if p.dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
 
     // Background layers
-    v.panel_fill = BG_BASE;
-    v.window_fill = BG_WINDOW;
-    v.extreme_bg_color = BG_DEEP;
-    v.faint_bg_color = BG_FAINT;
-    v.override_text_color = Some(TEXT_PRIMARY);
+    v.panel_fill = p.bg_base;
+    v.window_fill = p.bg_window;
+    v.extreme_bg_color = p.bg_deep;
+    v.faint_bg_color = p.bg_faint;
+    v.override_text_color = Some(p.text_primary);
+    v.selection.bg_fill = p.selection;
+    v.selection.stroke.color = p.selection_text;
 
     // Window chrome
     v.window_corner_radius = egui::CornerRadius::same(10);
@@ -221,24 +569,10 @@ pub(super) fn setup_theme(ctx: &egui::Context) {
     v.widgets.open.corner_radius = r;
 
     // Subtle hover/active bg fills for checkboxes, buttons, etc.
-    v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(28, 28, 44);
-    v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(38, 38, 58);
-    v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(48, 48, 72);
-
-    ctx.set_visuals(v);
-
-    let mut s = (*ctx.global_style()).clone();
-    // egui's default interact_size.y (18.0) is well under Fluent's 32px / Material's
-    // 36-40dp desktop minimum control height — every button in the app (Refresh,
-    // Browse, Quality, Close, etc.) was inheriting that undersized floor. 32.0 is
-    // the Fluent minimum and lands on the 8px spacing grid used everywhere else here.
-    s.spacing.interact_size = egui::Vec2::new(40.0, 32.0);
-    s.spacing.item_spacing = egui::Vec2::new(8.0, 8.0);
-    s.spacing.button_padding = egui::Vec2::new(14.0, 8.0);
-    s.spacing.window_margin = egui::Margin::same(16);
-    s.spacing.indent = 16.0;
-    ctx.set_global_style(s);
-    apply_text_scale(ctx, 1.0);
+    v.widgets.inactive.weak_bg_fill = p.widget_inactive;
+    v.widgets.hovered.weak_bg_fill = p.widget_hovered;
+    v.widgets.active.weak_bg_fill = p.widget_active;
+    v
 }
 
 #[cfg(test)]
@@ -352,5 +686,129 @@ mod tests {
                 .collect()
         });
         assert_eq!(missing, "", "characters with no glyph in the bundled fonts");
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    /// Every text colour against every background it's drawn on, at WCAG AA
+    /// (4.5:1 for normal text).
+    fn assert_readable(p: &Palette, name: &str) {
+        let backgrounds = [
+            ("base", p.bg_base),
+            ("card", p.bg_card),
+            ("window", p.bg_window),
+            ("faint", p.bg_faint),
+            ("button", p.widget_inactive),
+        ];
+        for (text_name, text) in [
+            ("primary", p.text_primary),
+            ("muted", p.text_muted),
+            ("secondary", p.accent_secondary),
+            ("rec", p.accent_rec),
+            ("idle", p.accent_idle),
+            ("pause", p.accent_pause),
+        ] {
+            for (bg_name, bg) in backgrounds {
+                let ratio = contrast(text, bg);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: {text_name} on {bg_name} is {ratio:.2}:1"
+                );
+            }
+        }
+        for (text, bg, what) in [
+            (p.accent_rec, p.bg_btn_stop, "STOP"),
+            (p.accent_idle, p.bg_btn_idle, "REC"),
+            (p.text_muted, p.bg_btn_pause, "pause"),
+            (p.selection_text, p.selection, "selection"),
+        ] {
+            let ratio = contrast(text, bg);
+            assert!(ratio >= 4.5, "{name}: {what} button is {ratio:.2}:1");
+        }
+    }
+
+    #[test]
+    fn the_dark_and_light_palettes_are_readable() {
+        assert_readable(&Palette::DARK, "dark");
+        assert_readable(&Palette::LIGHT, "light");
+        const { assert!(Palette::DARK.dark && !Palette::LIGHT.dark) };
+    }
+
+    #[test]
+    fn the_palette_follows_windows_theme_and_its_accent() {
+        let green = egui::Color32::from_rgb(16, 137, 62);
+        assert_eq!(Palette::choose(true, None, None), Palette::DARK);
+        assert_eq!(Palette::choose(false, None, None), Palette::LIGHT);
+        // The selected card's border is the accent itself; a selected
+        // toggle's fill is the accent shaded until the theme's text -- which
+        // egui draws every label in -- reads on it.
+        let accented = Palette::choose(true, None, Some(green));
+        assert_eq!(accented.border_sel, green);
+        assert_eq!(accented.selection_text, Palette::DARK.text_primary);
+        assert_ne!(
+            accented.selection,
+            Palette::DARK.selection,
+            "the accent, not the default"
+        );
+        assert_readable(&accented, "dark with green accent");
+        let navy = egui::Color32::from_rgb(0, 40, 120);
+        let light = Palette::choose(false, None, Some(navy));
+        assert_eq!(light.selection_text, Palette::LIGHT.text_primary);
+        assert_readable(&light, "light with navy accent");
+        for accent in [
+            egui::Color32::YELLOW,
+            egui::Color32::BLACK,
+            egui::Color32::WHITE,
+        ] {
+            assert_readable(
+                &Palette::choose(true, None, Some(accent)),
+                "dark, any accent",
+            );
+            assert_readable(
+                &Palette::choose(false, None, Some(accent)),
+                "light, any accent",
+            );
+        }
+    }
+
+    #[test]
+    fn a_high_contrast_theme_uses_windows_own_colours() {
+        let black = egui::Color32::BLACK;
+        let white = egui::Color32::WHITE;
+        let yellow = egui::Color32::from_rgb(255, 255, 0);
+        let cyan = egui::Color32::from_rgb(0, 255, 255);
+        let system = SystemColors {
+            window: black,
+            window_text: white,
+            highlight: cyan,
+            highlight_text: black,
+            button_face: black,
+            button_text: white,
+            hotlight: yellow,
+        };
+        // Whatever Windows' theme is, high contrast wins.
+        let p = Palette::choose(false, Some(system), Some(egui::Color32::RED));
+        assert_eq!(p.bg_base, black);
+        assert_eq!(p.text_primary, white);
+        assert_eq!(p.text_muted, white, "no dimmed text in high contrast");
+        assert_eq!(p.selection, cyan);
+        assert_eq!(p.selection_text, black);
+        assert_eq!(p.accent_secondary, yellow);
+        assert!(p.dark, "a black window is a dark theme");
+        assert_readable(&p, "high contrast");
+    }
+
+    #[test]
+    fn reduced_motion_turns_off_animation() {
+        let ctx = egui::Context::default();
+        apply_motion(&ctx, false);
+        assert_eq!(ctx.global_style().animation_time, 0.0);
+        assert!(!motion());
+        apply_motion(&ctx, true);
+        assert!(ctx.global_style().animation_time > 0.0);
+        assert!(motion());
     }
 }

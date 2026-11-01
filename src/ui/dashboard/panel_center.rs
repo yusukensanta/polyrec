@@ -3,10 +3,8 @@ use super::actions::{TrackKind, TrackLabel};
 use super::icons::{Icon, add_named, icon_button};
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
-    ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
-    BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL,
-    SPACE_SECTION, SPACE_TIGHT, TEXT_BODY, TEXT_BUTTON, TEXT_CAPTION, TEXT_DISPLAY, TEXT_MUTED,
-    TEXT_PRIMARY, text_px,
+    CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL, SPACE_SECTION, SPACE_TIGHT,
+    TEXT_BODY, TEXT_BUTTON, TEXT_CAPTION, TEXT_DISPLAY, motion, pal, text_px,
 };
 use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_problem};
 use super::widgets::{
@@ -50,8 +48,8 @@ impl App {
         };
         let mut dismissed = false;
         egui::Frame::NONE
-            .fill(BG_FAINT)
-            .stroke(egui::Stroke::new(1.0, ACCENT_PAUSE))
+            .fill(pal().bg_faint)
+            .stroke(egui::Stroke::new(1.0, pal().accent_pause))
             .corner_radius(CORNER_CONTROL)
             .inner_margin(SPACE_GROUP)
             .show(ui, |ui| {
@@ -60,7 +58,9 @@ impl App {
                     ui.allocate_ui(
                         egui::vec2(ui.available_width() - dismiss_width, 0.0),
                         |ui| {
-                            ui.add(egui::Label::new(caption(text.as_str(), ACCENT_PAUSE)).wrap());
+                            ui.add(
+                                egui::Label::new(caption(text.as_str(), pal().accent_pause)).wrap(),
+                            );
                         },
                     );
                     dismissed = add_named(
@@ -117,12 +117,12 @@ impl App {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(90.0, 6.0), egui::Sense::hover());
                     let painter = ui.painter();
-                    painter.rect_filled(rect, 2.0, BG_FAINT);
+                    painter.rect_filled(rect, 2.0, pal().bg_faint);
                     let mut lit = rect;
                     lit.set_width(rect.width() * fill);
                     painter.rect_filled(lit, 2.0, meter_color(fill));
                     icon_slot(ui, icon.map_or(RowIcon::None, RowIcon::Icon));
-                    ui.label(caption(name, TEXT_MUTED));
+                    ui.label(caption(name, pal().text_muted));
                 });
             }
         });
@@ -198,11 +198,16 @@ impl App {
 
             // Pulsing dot — alpha oscillates 56%–100% (never fully off)
             let t = ui.ctx().input(|i| i.time) as f32;
-            let alpha = ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0);
+            // Steady with Windows' animation effects off.
+            let alpha = if motion() {
+                ((t * 1.8_f32).sin() * 0.22 + 0.78).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             let dot_col = egui::Color32::from_rgba_unmultiplied(
-                ACCENT_REC.r(),
-                ACCENT_REC.g(),
-                ACCENT_REC.b(),
+                pal().accent_rec.r(),
+                pal().accent_rec.g(),
+                pal().accent_rec.b(),
                 (alpha * 255.0) as u8,
             );
             ui.horizontal(|ui| {
@@ -215,9 +220,13 @@ impl App {
                     s.state_recording
                 };
                 // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
-                // which previously computed to 4.18:1 contrast on BG_BASE (fails
-                // WCAG AA's 4.5:1 minimum for normal text). ACCENT_REC is 5.54:1.
-                let state_color = if is_paused { ACCENT_PAUSE } else { ACCENT_REC };
+                // which previously computed to 4.18:1 contrast on pal().bg_base (fails
+                // WCAG AA's 4.5:1 minimum for normal text). pal().accent_rec is 5.54:1.
+                let state_color = if is_paused {
+                    pal().accent_pause
+                } else {
+                    pal().accent_rec
+                };
                 ui.label(caption(state_label, state_color).strong());
             });
 
@@ -232,7 +241,7 @@ impl App {
                     secs % 60,
                 ))
                 .font(egui::FontId::monospace(text_px(TEXT_DISPLAY)))
-                .color(TEXT_PRIMARY),
+                .color(pal().text_primary),
             );
 
             ui.add_space(4.0);
@@ -268,7 +277,7 @@ impl App {
             if let Some(bytes) = self.recording_status.as_ref().and_then(|c| c.file_bytes) {
                 stats.push(format_bytes(bytes));
             }
-            ui.label(caption(stats.join("  ·  "), TEXT_MUTED))
+            ui.label(caption(stats.join("  ·  "), pal().text_muted))
                 .on_hover_text(s.recording_stats_tooltip);
 
             ui.add_space(4.0);
@@ -276,7 +285,7 @@ impl App {
                 self.recording_status
                     .as_ref()
                     .map_or("recording.mp4", |c| c.name.as_str()),
-                TEXT_MUTED,
+                pal().text_muted,
             ));
 
             self.render_audio_meters(ui, is_paused);
@@ -285,7 +294,7 @@ impl App {
             ui.label(
                 egui::RichText::new(s.saving_recording)
                     .size(text_px(TEXT_BODY))
-                    .color(TEXT_MUTED),
+                    .color(pal().text_muted),
             );
         } else if let Some(path) = self.last_output_path.clone() {
             self.render_export_controls(ui, s, &path);
@@ -294,7 +303,7 @@ impl App {
             ui.label(
                 egui::RichText::new(s.select_source_prompt)
                     .size(text_px(TEXT_BODY))
-                    .color(TEXT_MUTED),
+                    .color(pal().text_muted),
             );
         }
     }
@@ -307,7 +316,12 @@ impl App {
             if add_named(
                 ui,
                 true,
-                icon_button(Icon::Settings, s.quality_button, ACCENT_SECONDARY, body),
+                icon_button(
+                    Icon::Settings,
+                    s.quality_button,
+                    pal().accent_secondary,
+                    body,
+                ),
                 s.quality_button,
             )
             .on_hover_text(s.quality_tooltip)
@@ -318,7 +332,12 @@ impl App {
             if add_named(
                 ui,
                 true,
-                icon_button(Icon::Keyboard, s.hotkeys_button, ACCENT_SECONDARY, body),
+                icon_button(
+                    Icon::Keyboard,
+                    s.hotkeys_button,
+                    pal().accent_secondary,
+                    body,
+                ),
                 s.hotkeys_button,
             )
             .on_hover_text(s.hotkeys_tooltip)
@@ -329,7 +348,7 @@ impl App {
             if add_named(
                 ui,
                 true,
-                icon_button(Icon::Speaker, s.audio_button, ACCENT_SECONDARY, body),
+                icon_button(Icon::Speaker, s.audio_button, pal().accent_secondary, body),
                 s.audio_button,
             )
             .on_hover_text(s.audio_tooltip)
@@ -350,7 +369,7 @@ impl App {
             } else {
                 format!("{audio_selected_count} {}", s.audio_sources_word)
             },
-            TEXT_MUTED,
+            pal().text_muted,
         ));
         ui.add_space(8.0);
 
@@ -369,7 +388,7 @@ impl App {
                 if ui
                     .add_enabled(
                         self.output_dir_problem.is_none(),
-                        accent_button(s.open_output_dir_button, ACCENT_SECONDARY),
+                        accent_button(s.open_output_dir_button, pal().accent_secondary),
                     )
                     .on_hover_text(s.open_output_dir_tooltip)
                     .clicked()
@@ -382,7 +401,7 @@ impl App {
                     });
                 }
                 if ui
-                    .add(accent_button(s.browse_button, ACCENT_SECONDARY))
+                    .add(accent_button(s.browse_button, pal().accent_secondary))
                     .clicked()
                     && let Some(path) = FileDialog::new()
                         .set_directory(&self.config.output_dir)
@@ -401,7 +420,10 @@ impl App {
             },
         );
         if let Some(problem) = self.output_dir_problem {
-            ui.label(caption(output_dir_problem_text(problem, s), ACCENT_PAUSE));
+            ui.label(caption(
+                output_dir_problem_text(problem, s),
+                pal().accent_pause,
+            ));
         }
 
         ui.add_space(SPACE_NORMAL);
@@ -442,8 +464,8 @@ impl App {
         if show_free_space || show_highlight_active || show_highlight_save {
             ui.add_space(SPACE_NORMAL);
             egui::Frame::NONE
-                .fill(BG_FAINT)
-                .stroke(egui::Stroke::new(1.0, BORDER))
+                .fill(pal().bg_faint)
+                .stroke(egui::Stroke::new(1.0, pal().border))
                 .corner_radius(CORNER_CONTROL)
                 .inner_margin(SPACE_GROUP)
                 .show(ui, |ui| {
@@ -466,7 +488,11 @@ impl App {
                             text.push_str(&left);
                             low |= short;
                         }
-                        let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
+                        let color = if low {
+                            pal().accent_pause
+                        } else {
+                            pal().text_muted
+                        };
                         ui.label(caption(text, color));
                         first = false;
                     }
@@ -475,7 +501,7 @@ impl App {
                         if !first {
                             ui.add_space(SPACE_TIGHT);
                         }
-                        ui.label(caption(s.highlight_status_active, TEXT_PRIMARY));
+                        ui.label(caption(s.highlight_status_active, pal().text_primary));
                         first = false;
                     }
 
@@ -485,7 +511,7 @@ impl App {
                     match &self.highlight_save.state {
                         HighlightSaveState::Idle => {}
                         HighlightSaveState::Saving => {
-                            ui.label(caption(s.highlight_saving_label, TEXT_MUTED));
+                            ui.label(caption(s.highlight_saving_label, pal().text_muted));
                         }
                         HighlightSaveState::Done(path) => {
                             ui.label(caption(
@@ -496,13 +522,13 @@ impl App {
                                         .and_then(|n| n.to_str())
                                         .unwrap_or("highlight.mp4")
                                 ),
-                                ACCENT_IDLE,
+                                pal().accent_idle,
                             ));
                         }
                         HighlightSaveState::Failed(msg) => {
                             ui.label(caption(
                                 format!("{}{msg}", s.highlight_save_failed_prefix),
-                                ACCENT_REC,
+                                pal().accent_rec,
                             ));
                         }
                     }
@@ -535,7 +561,7 @@ impl App {
             } else {
                 String::new()
             };
-            ui.label(caption(state_line, TEXT_MUTED));
+            ui.label(caption(state_line, pal().text_muted));
 
             // The global hotkeys for what the buttons above do right now.
             // Always rendered (empty when nothing's bound), for the same
@@ -543,14 +569,19 @@ impl App {
             let hotkeys = &self.config.hotkeys;
             ui.label(caption(
                 hotkey_hint(self.session.state(), &hotkeys.start_stop, &hotkeys.pause, s),
-                TEXT_MUTED,
+                pal().text_muted,
             ));
 
             let stop_btn = || {
-                icon_button(Icon::Stop, s.stop_button, ACCENT_REC, text_px(TEXT_BUTTON))
-                    .fill(BG_BTN_STOP)
-                    .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(STOP_WIDTH, 52.0))
+                icon_button(
+                    Icon::Stop,
+                    s.stop_button,
+                    pal().accent_rec,
+                    text_px(TEXT_BUTTON),
+                )
+                .fill(pal().bg_btn_stop)
+                .corner_radius(ROUNDING_PRIMARY_BTN)
+                .min_size(egui::Vec2::new(STOP_WIDTH, 52.0))
             };
             if is_paused {
                 // Stop stays reachable while paused, next to Resume -- it used
@@ -560,10 +591,10 @@ impl App {
                     let btn = icon_button(
                         Icon::Play,
                         s.resume_button,
-                        ACCENT_IDLE,
+                        pal().accent_idle,
                         text_px(TEXT_BUTTON),
                     )
-                    .fill(BG_BTN_IDLE)
+                    .fill(pal().bg_btn_idle)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(RESUME_WIDTH, 52.0));
                     if add_named(ui, true, btn, s.resume_button).clicked() {
@@ -580,10 +611,13 @@ impl App {
                         self.handle_rec_button(is_recording);
                     }
 
-                    let pause_btn =
-                        egui::Button::new(Icon::Pause.rich(text_px(TEXT_BUTTON)).color(TEXT_MUTED))
-                            .fill(BG_BTN_PAUSE)
-                            .min_size(egui::Vec2::new(44.0, 52.0));
+                    let pause_btn = egui::Button::new(
+                        Icon::Pause
+                            .rich(text_px(TEXT_BUTTON))
+                            .color(pal().text_muted),
+                    )
+                    .fill(pal().bg_btn_pause)
+                    .min_size(egui::Vec2::new(44.0, 52.0));
                     if add_named(ui, true, pause_btn, s.pause_tooltip)
                         .on_hover_text(s.pause_tooltip)
                         .clicked()
@@ -596,10 +630,10 @@ impl App {
                     let btn = icon_button(
                         Icon::Record,
                         s.rec_button,
-                        ACCENT_IDLE,
+                        pal().accent_idle,
                         text_px(TEXT_BUTTON),
                     )
-                    .fill(BG_BTN_IDLE)
+                    .fill(pal().bg_btn_idle)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     let blocked = self.rec_blocked_reason(s);
@@ -717,9 +751,9 @@ impl App {
         s: &'static Strings,
         path: &std::path::Path,
     ) {
-        ui.label(caption(s.recording_saved_label, TEXT_MUTED));
+        ui.label(caption(s.recording_saved_label, pal().text_muted));
         ui.add_space(SPACE_TIGHT);
-        ui.label(caption(path.to_string_lossy().as_ref(), TEXT_PRIMARY));
+        ui.label(caption(path.to_string_lossy().as_ref(), pal().text_primary));
         ui.add_space(8.0);
 
         // Fewer than 2 tracks means there's nothing a track-selection export
@@ -728,7 +762,7 @@ impl App {
         // be a confusing no-op. Still offer Open Folder either way.
         if self.export.available_tracks < 2 {
             if ui
-                .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
+                .add(accent_button(s.open_folder_button, pal().accent_secondary))
                 .on_hover_text(s.open_folder_tooltip)
                 .clicked()
             {
@@ -757,14 +791,14 @@ impl App {
         if is_idle {
             ui.horizontal(|ui| {
                 if ui
-                    .add(accent_button(s.export_button, ACCENT_IDLE))
+                    .add(accent_button(s.export_button, pal().accent_idle))
                     .on_hover_text(s.export_tooltip)
                     .clicked()
                 {
                     self.start_export(path, &track_groups);
                 }
                 if ui
-                    .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
+                    .add(accent_button(s.open_folder_button, pal().accent_secondary))
                     .on_hover_text(s.open_folder_tooltip)
                     .clicked()
                 {
@@ -773,16 +807,16 @@ impl App {
             });
         } else if is_running {
             section_header(ui, s.exporting_header);
-            ui.label(caption(s.please_wait, TEXT_MUTED));
+            ui.label(caption(s.please_wait, pal().text_muted));
         } else if let Some(export_path) = done_path {
             section_header(ui, s.export_complete_header);
             ui.label(caption(
                 export_path.to_string_lossy().as_ref(),
-                TEXT_PRIMARY,
+                pal().text_primary,
             ));
             ui.add_space(4.0);
             if ui
-                .add(accent_button(s.open_folder_button, ACCENT_SECONDARY))
+                .add(accent_button(s.open_folder_button, pal().accent_secondary))
                 .on_hover_text(s.open_folder_tooltip)
                 .clicked()
             {
@@ -790,7 +824,7 @@ impl App {
             }
         } else if let Some(msg) = failed_msg {
             section_header(ui, s.export_failed_header);
-            ui.label(caption(&msg, ACCENT_REC));
+            ui.label(caption(&msg, pal().accent_rec));
         }
     }
 }
@@ -856,11 +890,11 @@ fn meter_decay(shown: f32, fill: f32, dt: f32) -> f32 {
 /// clipping), by meter fill (see `meter_fill`).
 fn meter_color(fill: f32) -> egui::Color32 {
     if fill >= 0.95 {
-        ACCENT_REC
+        pal().accent_rec
     } else if fill >= 0.8 {
-        ACCENT_PAUSE
+        pal().accent_pause
     } else {
-        ACCENT_IDLE
+        pal().accent_idle
     }
 }
 
@@ -1046,9 +1080,9 @@ mod meter_tests {
 
     #[test]
     fn meter_turns_amber_then_red_near_full_scale() {
-        assert_eq!(meter_color(meter_fill(0.1)), ACCENT_IDLE); // -20 dBFS
-        assert_eq!(meter_color(meter_fill(0.5)), ACCENT_PAUSE); // -6 dBFS
-        assert_eq!(meter_color(meter_fill(0.9)), ACCENT_REC); // -0.9 dBFS
+        assert_eq!(meter_color(meter_fill(0.1)), pal().accent_idle); // -20 dBFS
+        assert_eq!(meter_color(meter_fill(0.5)), pal().accent_pause); // -6 dBFS
+        assert_eq!(meter_color(meter_fill(0.9)), pal().accent_rec); // -0.9 dBFS
     }
 }
 
