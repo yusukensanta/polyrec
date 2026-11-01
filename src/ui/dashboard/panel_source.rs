@@ -1,4 +1,5 @@
 use super::App;
+use super::icons::Icon;
 use super::theme::{
     BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, SPACE_GROUP, SPACE_NORMAL,
     TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY, text_px,
@@ -117,7 +118,7 @@ impl App {
                                         let (icon, title) =
                                             match source.window_title.strip_prefix(MONITOR_GLYPH) {
                                                 Some(title) => (
-                                                    RowIcon::Glyph(MONITOR_GLYPH),
+                                                    RowIcon::Icon(Icon::Monitor),
                                                     title.trim_start(),
                                                 ),
                                                 None => (

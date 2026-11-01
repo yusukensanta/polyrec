@@ -195,6 +195,7 @@ fn font_definitions() -> egui::FontDefinitions {
         }
         names.push(PLEX_SANS_JP_KEY.to_owned());
     }
+    super::icons::load_icon_font(&mut fonts);
     fonts
 }
 

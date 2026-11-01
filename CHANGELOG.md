@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Buttons and lists use Windows' own icons (Segoe Fluent Icons, as in Windows 11's apps; Segoe MDL2 Assets on Windows 10) in place of emoji, and the decorative emoji are gone from labels. Screen readers hear just each button's name. Where neither icon font is installed, the emoji stay.
+
 ## [v0.5.128] - 2026-11-01
 
 ### Changed

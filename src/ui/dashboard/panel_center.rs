@@ -1,11 +1,12 @@
 use super::App;
 use super::actions::{TrackKind, TrackLabel};
+use super::icons::{Icon, add_named, icon_button};
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
     BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL,
-    SPACE_SECTION, SPACE_TIGHT, TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
-    text_px,
+    SPACE_SECTION, SPACE_TIGHT, TEXT_BODY, TEXT_BUTTON, TEXT_CAPTION, TEXT_DISPLAY, TEXT_MUTED,
+    TEXT_PRIMARY, text_px,
 };
 use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_problem};
 use super::widgets::{
@@ -62,7 +63,14 @@ impl App {
                             ui.add(egui::Label::new(caption(text.as_str(), ACCENT_PAUSE)).wrap());
                         },
                     );
-                    dismissed = ui.small_button("✕").on_hover_text(s.close_button).clicked();
+                    dismissed = add_named(
+                        ui,
+                        true,
+                        egui::Button::new(Icon::Close.rich(text_px(TEXT_CAPTION))).small(),
+                        s.close_button,
+                    )
+                    .on_hover_text(s.close_button)
+                    .clicked();
                 });
             });
         if dismissed {
@@ -101,8 +109,8 @@ impl App {
             ui.spacing_mut().interact_size.y = 16.0;
             ui.spacing_mut().item_spacing.y = 2.0;
             for (i, &fill) in meter_levels.iter().enumerate() {
-                let (glyph, name) = match labels.get(i) {
-                    Some(label) => (label.glyph(), label.name.clone()),
+                let (icon, name) = match labels.get(i) {
+                    Some(label) => (label.icon(), label.name.clone()),
                     None => (None, format!("#{}", i + 1)),
                 };
                 ui.horizontal(|ui| {
@@ -113,7 +121,7 @@ impl App {
                     let mut lit = rect;
                     lit.set_width(rect.width() * fill);
                     painter.rect_filled(lit, 2.0, meter_color(fill));
-                    icon_slot(ui, glyph.map_or(RowIcon::None, RowIcon::Glyph));
+                    icon_slot(ui, icon.map_or(RowIcon::None, RowIcon::Icon));
                     ui.label(caption(name, TEXT_MUTED));
                 });
             }
@@ -295,24 +303,37 @@ impl App {
     /// summary, output folder, and recording-name options.
     fn render_output_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         ui.horizontal(|ui| {
-            if ui
-                .add(accent_button(s.quality_button, ACCENT_SECONDARY))
-                .on_hover_text(s.quality_tooltip)
-                .clicked()
+            let body = text_px(TEXT_BODY);
+            if add_named(
+                ui,
+                true,
+                icon_button(Icon::Settings, s.quality_button, ACCENT_SECONDARY, body),
+                s.quality_button,
+            )
+            .on_hover_text(s.quality_tooltip)
+            .clicked()
             {
                 self.show_quality_popup = true;
             }
-            if ui
-                .add(accent_button(s.hotkeys_button, ACCENT_SECONDARY))
-                .on_hover_text(s.hotkeys_tooltip)
-                .clicked()
+            if add_named(
+                ui,
+                true,
+                icon_button(Icon::Keyboard, s.hotkeys_button, ACCENT_SECONDARY, body),
+                s.hotkeys_button,
+            )
+            .on_hover_text(s.hotkeys_tooltip)
+            .clicked()
             {
                 self.show_hotkeys_popup = true;
             }
-            if ui
-                .add(accent_button(s.audio_button, ACCENT_SECONDARY))
-                .on_hover_text(s.audio_tooltip)
-                .clicked()
+            if add_named(
+                ui,
+                true,
+                icon_button(Icon::Speaker, s.audio_button, ACCENT_SECONDARY, body),
+                s.audio_button,
+            )
+            .on_hover_text(s.audio_tooltip)
+            .clicked()
             {
                 self.show_audio_popup = true;
             }
@@ -526,65 +547,63 @@ impl App {
             ));
 
             let stop_btn = || {
-                egui::Button::new(
-                    egui::RichText::new(s.stop_button)
-                        .color(ACCENT_REC)
-                        .size(text_px(TEXT_BUTTON)),
-                )
-                .fill(BG_BTN_STOP)
-                .corner_radius(ROUNDING_PRIMARY_BTN)
-                .min_size(egui::Vec2::new(90.0, 52.0))
+                icon_button(Icon::Stop, s.stop_button, ACCENT_REC, text_px(TEXT_BUTTON))
+                    .fill(BG_BTN_STOP)
+                    .corner_radius(ROUNDING_PRIMARY_BTN)
+                    .min_size(egui::Vec2::new(STOP_WIDTH, 52.0))
             };
             if is_paused {
                 // Stop stays reachable while paused, next to Resume -- it used
                 // to take a Resume first, recording a moment more.
-                let content_width = 110.0 + ui.spacing().item_spacing.x + 90.0;
+                let content_width = RESUME_WIDTH + ui.spacing().item_spacing.x + STOP_WIDTH;
                 centered_action_row(ui, content_width, 52.0, |ui| {
-                    let btn = egui::Button::new(
-                        egui::RichText::new(s.resume_button)
-                            .color(ACCENT_IDLE)
-                            .size(text_px(TEXT_BUTTON)),
+                    let btn = icon_button(
+                        Icon::Play,
+                        s.resume_button,
+                        ACCENT_IDLE,
+                        text_px(TEXT_BUTTON),
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(110.0, 52.0));
-                    if ui.add(btn).clicked() {
+                    .min_size(egui::Vec2::new(RESUME_WIDTH, 52.0));
+                    if add_named(ui, true, btn, s.resume_button).clicked() {
                         self.handle_pause_button();
                     }
-                    if ui.add(stop_btn()).clicked() {
+                    if add_named(ui, true, stop_btn(), s.stop_button).clicked() {
                         self.handle_rec_button(is_recording);
                     }
                 });
             } else if is_recording {
-                let content_width = 90.0 + ui.spacing().item_spacing.x + 44.0;
+                let content_width = STOP_WIDTH + ui.spacing().item_spacing.x + 44.0;
                 centered_action_row(ui, content_width, 52.0, |ui| {
-                    if ui.add(stop_btn()).clicked() {
+                    if add_named(ui, true, stop_btn(), s.stop_button).clicked() {
                         self.handle_rec_button(is_recording);
                     }
 
-                    let pause_btn = egui::Button::new(
-                        egui::RichText::new("⏸")
-                            .color(TEXT_MUTED)
-                            .size(text_px(TEXT_BUTTON)),
-                    )
-                    .fill(BG_BTN_PAUSE)
-                    .min_size(egui::Vec2::new(44.0, 52.0));
-                    if ui.add(pause_btn).on_hover_text(s.pause_tooltip).clicked() {
+                    let pause_btn =
+                        egui::Button::new(Icon::Pause.rich(text_px(TEXT_BUTTON)).color(TEXT_MUTED))
+                            .fill(BG_BTN_PAUSE)
+                            .min_size(egui::Vec2::new(44.0, 52.0));
+                    if add_named(ui, true, pause_btn, s.pause_tooltip)
+                        .on_hover_text(s.pause_tooltip)
+                        .clicked()
+                    {
                         self.handle_pause_button();
                     }
                 });
             } else {
                 centered_action_row(ui, 130.0, 52.0, |ui| {
-                    let btn = egui::Button::new(
-                        egui::RichText::new(s.rec_button)
-                            .color(ACCENT_IDLE)
-                            .size(text_px(TEXT_BUTTON)),
+                    let btn = icon_button(
+                        Icon::Record,
+                        s.rec_button,
+                        ACCENT_IDLE,
+                        text_px(TEXT_BUTTON),
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     let blocked = self.rec_blocked_reason(s);
-                    let rec = ui.add_enabled(blocked.is_none(), btn);
+                    let rec = add_named(ui, blocked.is_none(), btn, s.rec_button);
                     if let Some(reason) = blocked {
                         rec.on_disabled_hover_text(reason);
                     } else if rec.clicked() {
@@ -624,7 +643,7 @@ impl App {
             let mut checked = indices.iter().all(|&i| self.export.track_selection[i]);
             let changed = ui
                 .horizontal(|ui| {
-                    icon_slot(ui, label.glyph().map_or(RowIcon::None, RowIcon::Glyph));
+                    icon_slot(ui, label.icon().map_or(RowIcon::None, RowIcon::Icon));
                     ui.checkbox(&mut checked, label.name.as_str()).changed()
                 })
                 .inner;
@@ -805,6 +824,12 @@ fn output_dir_problem_text(problem: OutputDirProblem, s: &Strings) -> &'static s
         OutputDirProblem::NotAFolder => s.output_dir_not_a_folder,
     }
 }
+
+/// The STOP and RESUME buttons' widths, as wide as they are with their icon
+/// and English label, so the row they share is centered exactly
+/// (`centered_action_row` is given the width up front).
+const STOP_WIDTH: f32 = 100.0;
+const RESUME_WIDTH: f32 = 124.0;
 
 /// How much of a level meter to fill for a linear peak: a dBFS scale from
 /// -60 dB (empty) to 0 dB (full), so quiet but present audio still shows.

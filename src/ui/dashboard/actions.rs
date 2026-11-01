@@ -1,6 +1,6 @@
 use super::App;
+use super::icons::Icon;
 use super::state::HighlightSaveState;
-use super::widgets::{MICROPHONE_GLYPH, SPEAKERS_GLYPH};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -245,12 +245,12 @@ pub(super) enum TrackKind {
 }
 
 impl TrackLabel {
-    /// The glyph lists draw in their icon column; apps have none (their
+    /// The icon lists draw in their icon column; apps have none (their
     /// tracks are named after them).
-    pub(super) fn glyph(&self) -> Option<&'static str> {
+    pub(super) fn icon(&self) -> Option<Icon> {
         match self.kind {
-            TrackKind::Speakers => Some(SPEAKERS_GLYPH),
-            TrackKind::Microphone => Some(MICROPHONE_GLYPH),
+            TrackKind::Speakers => Some(Icon::Speaker),
+            TrackKind::Microphone => Some(Icon::Microphone),
             TrackKind::App => None,
         }
     }
@@ -258,8 +258,8 @@ impl TrackLabel {
 
 impl std::fmt::Display for TrackLabel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.glyph() {
-            Some(glyph) => write!(f, "{glyph} {}", self.name),
+        match self.icon() {
+            Some(icon) => write!(f, "{} {}", icon.emoji(), self.name),
             None => f.write_str(&self.name),
         }
     }
