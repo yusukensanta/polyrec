@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A blank white box no longer flashes up for a moment before the message a hotkey brings up ("● Recording", "Stopped" and so on), or before the recording overlay. Their windows appeared before anything was drawn in them, which showed as white, for longer while a game kept the graphics card busy; they now stay hidden until drawn.
+
 ## [v0.5.134] - 2026-11-01
 
 ### Changed

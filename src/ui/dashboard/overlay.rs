@@ -84,7 +84,7 @@ impl App {
             format!("  |  {}", hint_template.replace("{key}", key))
         };
 
-        show_viewport_immediate(
+        self.overlay_window.show(
             ctx,
             overlay_viewport_id(),
             hud_window("PolyRec Overlay")
@@ -92,7 +92,7 @@ impl App {
                 // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
                 .with_inner_size([400.0, 32.0])
                 .with_position(egui::pos2(screen_right - 410.0, screen_top + 10.0)),
-            move |ctx, _class| {
+            move |ctx| {
                 // CentralPanel::show(ctx, ...) is soft-deprecated in favor of
                 // show_inside(ui, ...), but this closure only ever receives a
                 // fresh viewport's &Context -- there's no pre-existing Ui to
@@ -145,6 +145,46 @@ pub(super) fn hud_window(title: &str) -> egui::ViewportBuilder {
         .with_decorations(false)
         .with_transparent(true)
         .with_mouse_passthrough(true)
+}
+
+/// One of PolyRec's own on-screen windows (the overlay HUD, the hotkey
+/// toast), kept hidden until it has been drawn. A window shows whatever it
+/// has the moment it appears, and before its first frame that's blank
+/// white: a white box flashed up before a hotkey's toast -- for a frame or
+/// two normally, longer with a game keeping the graphics card busy, which
+/// is when hotkeys get pressed.
+#[derive(Default)]
+pub(super) struct HudWindow {
+    /// The pass it was last drawn on (`Context::cumulative_pass_nr`).
+    drawn_on: Option<u64>,
+}
+
+impl HudWindow {
+    /// Shows it for this pass, drawn by `ui`. Called on every pass it's
+    /// wanted: egui closes the window on a pass that doesn't show it.
+    pub(super) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::ViewportId,
+        builder: egui::ViewportBuilder,
+        mut ui: impl FnMut(&mut egui::Ui),
+    ) {
+        let pass = ctx.cumulative_pass_nr();
+        // Up and drawn only if it was drawn on the pass before this one.
+        let drawn = self.drawn_on.is_some_and(|on| on + 1 >= pass);
+        let mut drawn_now = false;
+        show_viewport_immediate(ctx, id, builder.with_visible(drawn), |viewport_ui, _| {
+            drawn_now = true;
+            ui(viewport_ui);
+        });
+        if drawn_now {
+            self.drawn_on = Some(pass);
+            if !drawn {
+                // Drawn while hidden: shown next pass, with that picture.
+                ctx.request_repaint();
+            }
+        }
+    }
 }
 
 /// The panic message egui gives when eframe returns from showing an
@@ -250,5 +290,84 @@ mod tests {
         let window = hud_window("PolyRec Overlay");
         assert_eq!(window.active, Some(false));
         assert_eq!(window.mouse_passthrough, Some(true));
+    }
+
+    /// Runs one dashboard pass per entry of `passes` against a stand-in for
+    /// eframe's window backend, with a `HudWindow` shown on the passes that
+    /// want it (`.0`). The backend draws the window only when it can
+    /// (`.1`; it can't on a pass where the window can't be created yet --
+    /// see `show_viewport_immediate`). Returns, for each pass the window was
+    /// shown on, the visibility it asked the backend for.
+    fn visibility_asked_for(passes: &[(bool, bool)]) -> Vec<Option<bool>> {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let can_draw = Rc::new(Cell::new(true));
+        {
+            let (asked, can_draw) = (Rc::clone(&asked), Rc::clone(&can_draw));
+            egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+                asked.borrow_mut().push(viewport.builder.visible);
+                if can_draw.get() {
+                    let mut input = egui::RawInput {
+                        viewport_id: viewport.ids.this,
+                        ..Default::default()
+                    };
+                    input
+                        .viewports
+                        .insert(viewport.ids.this, Default::default());
+                    ctx.run_ui(input, |ui| (viewport.viewport_ui_cb)(ui))
+                        .textures_delta
+                        .clear();
+                }
+            });
+        }
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut window = HudWindow::default();
+        for &(wanted, drawable) in passes {
+            can_draw.set(drawable);
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                if wanted {
+                    window.show(
+                        ui.ctx(),
+                        egui::ViewportId::from_hash_of("test hud"),
+                        hud_window("Test HUD"),
+                        |_| {},
+                    );
+                }
+            })
+            .textures_delta
+            .clear();
+        }
+        asked.take()
+    }
+
+    /// A window shows whatever it has on screen the moment it appears --
+    /// before its first frame, blank white: the white box that flashed up
+    /// before a hotkey's toast.
+    #[test]
+    fn a_hud_window_stays_hidden_until_it_has_been_drawn() {
+        assert_eq!(
+            visibility_asked_for(&[(true, true), (true, true), (true, true)]),
+            [Some(false), Some(true), Some(true)]
+        );
+    }
+
+    #[test]
+    fn a_hud_window_that_could_not_be_created_yet_is_still_hidden_next_time() {
+        assert_eq!(
+            visibility_asked_for(&[(true, false), (true, true), (true, true)]),
+            [Some(false), Some(false), Some(true)]
+        );
+    }
+
+    /// egui closes the window of a pass that doesn't show it; the next one
+    /// is a new window, blank until drawn.
+    #[test]
+    fn a_hud_window_that_went_away_is_hidden_again_until_drawn() {
+        assert_eq!(
+            visibility_asked_for(&[(true, true), (true, true), (false, true), (true, true)]),
+            [Some(false), Some(true), Some(false)]
+        );
     }
 }
