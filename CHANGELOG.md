@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.139] - 2026-11-02
+
 ### Changed
 
 - REC is red: solid red, like STOP, once a source is picked; before that (always, if you record with the hotkey) a red outline and red text on the same fill as the buttons around it, as clear as they are, where it was a flat grey.
