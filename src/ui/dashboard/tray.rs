@@ -4,6 +4,7 @@
 //! hotkey. Closing the dashboard still quits, as before.
 
 use super::App;
+use super::status_badge::{Badge, Pixels, app_icon_pixels, small_icon_size, tray_icon_with};
 use crate::i18n::Strings;
 use crate::types::SessionState;
 use eframe::egui;
@@ -37,6 +38,7 @@ pub(super) enum TrayAction {
 /// `tray_view`, but handed to Windows only when it changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TrayView {
+    badge: Badge,
     tooltip: String,
     window_item: &'static str,
     record_item: String,
@@ -46,6 +48,10 @@ pub(super) struct TrayView {
 
 pub(super) struct Tray {
     icon: TrayIcon,
+    /// The icon with each badge's dot on it (`Badge::None`, `Recording`,
+    /// `Paused`); `None` if the app icon's pixels couldn't be read, which
+    /// leaves the icon as it is.
+    badged: Option<[Icon; 3]>,
     window_item: MenuItem,
     record_item: MenuItem,
     quit_item: MenuItem,
@@ -70,6 +76,9 @@ impl Tray {
             &quit_item,
         ])
         .map_err(|e| format!("tray menu: {e}"))?;
+        let badged = badged_icons()
+            .inspect_err(|e| tracing::warn!("no recording dot on the tray icon: {e}"))
+            .ok();
         let icon = TrayIconBuilder::new()
             .with_icon(app_icon()?)
             .with_tooltip("PolyRec")
@@ -101,6 +110,7 @@ impl Tray {
 
         Ok(Self {
             icon,
+            badged,
             window_item,
             record_item,
             quit_item,
@@ -118,6 +128,14 @@ impl Tray {
     fn show(&mut self, view: TrayView) {
         if self.shown.as_ref() == Some(&view) {
             return;
+        }
+        if self.shown.as_ref().map(|shown| shown.badge) != Some(view.badge)
+            && let Some(badged) = &self.badged
+        {
+            let icon = badged[view.badge as usize].clone();
+            if let Err(e) = self.icon.set_icon(Some(icon)) {
+                tracing::warn!("tray icon: {e}");
+            }
         }
         if let Err(e) = self.icon.set_tooltip(Some(&view.tooltip)) {
             tracing::warn!("tray tooltip: {e}");
@@ -137,6 +155,21 @@ fn app_icon() -> Result<Icon, String> {
     let size = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) };
     let size = (size.0 > 0 && size.1 > 0).then_some((size.0 as u32, size.1 as u32));
     Icon::from_resource(APP_ICON_RESOURCE, size).map_err(|e| format!("tray icon image: {e}"))
+}
+
+/// The app icon at the notification area's size with each badge's dot on
+/// it, indexed by `Badge as usize`.
+fn badged_icons() -> Result<[Icon; 3], String> {
+    let icon = app_icon_pixels(small_icon_size()).ok_or("can't read the app icon")?;
+    let make = |badge| {
+        let Pixels { rgba, size } = tray_icon_with(&icon, badge);
+        Icon::from_rgba(rgba, size, size).map_err(|e| format!("tray icon image: {e}"))
+    };
+    Ok([
+        make(Badge::None)?,
+        make(Badge::Recording)?,
+        make(Badge::Paused)?,
+    ])
 }
 
 fn is_left_click(event: &TrayIconEvent) -> bool {
@@ -177,6 +210,7 @@ fn tray_view(
         (SessionState::Idle, None) => (s.tray_start.to_owned(), false),
     };
     TrayView {
+        badge: Badge::for_state(state),
         tooltip,
         window_item: if window_shown {
             s.tray_hide
@@ -242,6 +276,12 @@ impl App {
         if let Some(tray) = &mut self.tray {
             tray.show(view);
         }
+        // A hidden dashboard has no taskbar button to badge.
+        if !self.dashboard_hidden
+            && let Some(taskbar) = &mut self.taskbar_badge
+        {
+            taskbar.show(Badge::for_state(self.session.state()), s);
+        }
     }
 
     /// Whether the dashboard is on screen: neither hidden to the tray nor
@@ -254,6 +294,11 @@ impl App {
         self.dashboard_hidden = !shown;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(shown));
         if shown {
+            // Shown again, the window gets a new taskbar button, without
+            // the badge.
+            if let Some(taskbar) = &mut self.taskbar_badge {
+                taskbar.forget();
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -269,6 +314,7 @@ mod tests {
     fn idle_with_a_source_offers_to_record_it() {
         let s = Lang::En.strings();
         let view = tray_view(s, &SessionState::Idle, true, Some("Game"));
+        assert_eq!(view.badge, Badge::None);
         assert_eq!(view.tooltip, "PolyRec");
         assert_eq!(view.window_item, s.tray_hide);
         assert_eq!(view.record_item, "Start recording: Game");
@@ -288,6 +334,7 @@ mod tests {
     fn recording_or_paused_offers_stop_and_says_so_in_the_tooltip() {
         let s = Lang::En.strings();
         let recording = tray_view(s, &SessionState::Recording, false, None);
+        assert_eq!(recording.badge, Badge::Recording);
         assert_eq!(
             recording.tooltip,
             format!("PolyRec — {}", s.state_recording)
@@ -295,6 +342,7 @@ mod tests {
         assert_eq!(recording.record_item, s.tray_stop);
         assert!(recording.record_enabled);
         let paused = tray_view(s, &SessionState::Paused, false, Some("Game"));
+        assert_eq!(paused.badge, Badge::Paused);
         assert_eq!(paused.tooltip, format!("PolyRec — {}", s.state_paused));
         assert_eq!(paused.record_item, s.tray_stop);
     }
