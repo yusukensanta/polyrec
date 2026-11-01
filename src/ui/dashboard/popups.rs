@@ -1,6 +1,8 @@
 use super::App;
 use super::state::SelfUpdateState;
-use super::theme::{ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY};
+use super::theme::{
+    ACCENT_PAUSE, ACCENT_REC, POPUP_WIDTH, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY, text_px,
+};
 use super::util::{open_url, take_if_finished};
 use super::widgets::{accent_button, caption, section_header};
 use crate::capture::frame_rate::{FPS_PRESETS, fps_fits_display};
@@ -229,7 +231,11 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(&msg).size(TEXT_BODY).color(ACCENT_REC));
+                ui.label(
+                    egui::RichText::new(&msg)
+                        .size(text_px(TEXT_BODY))
+                        .color(ACCENT_REC),
+                );
                 ui.add_space(8.0);
                 if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
                     close = true;
@@ -264,7 +270,7 @@ impl App {
                                 "{}{}{}",
                                 s.update_confirm_prefix, update.version, s.update_confirm_suffix
                             ))
-                            .size(TEXT_BODY)
+                            .size(text_px(TEXT_BODY))
                             .color(TEXT_PRIMARY),
                         );
                         ui.add_space(4.0);
@@ -315,7 +321,7 @@ impl App {
                     .show(ctx, |ui| {
                         ui.label(
                             egui::RichText::new(s.update_working_message)
-                                .size(TEXT_BODY)
+                                .size(text_px(TEXT_BODY))
                                 .color(TEXT_PRIMARY),
                         );
                     });
@@ -330,7 +336,7 @@ impl App {
                     .show(ctx, |ui| {
                         ui.label(
                             egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
-                                .size(TEXT_BODY)
+                                .size(text_px(TEXT_BODY))
                                 .color(ACCENT_REC),
                         );
                         ui.add_space(8.0);

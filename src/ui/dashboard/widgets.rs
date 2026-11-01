@@ -10,7 +10,9 @@ pub(super) fn accent_button(text: &str, color: egui::Color32) -> egui::Button<'s
 /// Caption-size text in `color` -- the dashboard's small status/hint line
 /// style (timer stats, free space, Highlight status, ...).
 pub(super) fn caption(text: impl Into<String>, color: egui::Color32) -> egui::RichText {
-    egui::RichText::new(text).size(TEXT_CAPTION).color(color)
+    egui::RichText::new(text)
+        .size(text_px(TEXT_CAPTION))
+        .color(color)
 }
 
 /// Renders `add_contents` in a `row_height`-tall, `left_to_right` row
@@ -63,13 +65,13 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new(title)
-            .size(TEXT_SUBTITLE)
+            .size(text_px(TEXT_SUBTITLE))
             .color(TEXT_MUTED)
             .strong(),
     );
-    ui.add_space(2.0);
+    ui.add_space(SPACE_TIGHT);
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(SPACE_TIGHT);
 }
 
 /// Icon for an audio-device checkbox label — used in the source panel's
@@ -116,7 +118,7 @@ pub(super) fn icon_slot(ui: &mut egui::Ui, icon: RowIcon<'_>) {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 glyph,
-                egui::FontId::proportional(TEXT_BODY),
+                egui::FontId::proportional(text_px(TEXT_BODY)),
                 ui.visuals().text_color(),
             );
         }

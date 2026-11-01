@@ -39,13 +39,13 @@ pub(super) const ROUNDING_PRIMARY_BTN: u8 = 14;
 /// whatever the theme's own default happens to be.
 pub(super) const CORNER_CONTROL: u8 = 6;
 
-// Named type scale -- consolidates what had drifted into seven ad-hoc sizes
-// (10/11/12/13/14/18/40) down to five. Roughly modeled on Fluent 2's type
-// ramp (Microsoft's current Windows design system: Caption/Body/Subtitle/
-// Title steps), not copied literally -- this app's own already-similar
-// numbers just needed names, not a redesign.
-pub(super) const TEXT_CAPTION: f32 = 11.0; // status lines, tooltips, secondary info
-pub(super) const TEXT_BODY: f32 = 13.0; // popup body copy, prompts
+// Named type scale, on Windows 11's type ramp ("Typography in Windows":
+// caption 12, body 14, body large 18, title large 40 epx). 12 px is the
+// smallest Windows considers legible; captions used to be 11 and egui's own
+// body text 12.5. Shown through `text_px`, which follows Windows' text size
+// setting.
+pub(super) const TEXT_CAPTION: f32 = 12.0; // status lines, tooltips, secondary info
+pub(super) const TEXT_BODY: f32 = 14.0; // popup body copy, prompts
 pub(super) const TEXT_SUBTITLE: f32 = 14.0; // section headers
 pub(super) const TEXT_BUTTON: f32 = 18.0; // primary action button labels
 pub(super) const TEXT_DISPLAY: f32 = 40.0; // the recording timer
@@ -56,6 +56,93 @@ pub(super) const TEXT_DISPLAY: f32 = 40.0; // the recording timer
 pub(super) const SPACE_TIGHT: f32 = 4.0;
 /// Between distinct concepts/sections that aren't tightly related.
 pub(super) const SPACE_NORMAL: f32 = 8.0;
+/// Inside a card or box, between its edge and its content (Windows uses 12
+/// between content areas and 16 to a surface's edge; 12 suits these small
+/// cards).
+pub(super) const SPACE_GROUP: f32 = 12.0;
+/// Between the dashboard's sections.
+pub(super) const SPACE_SECTION: f32 = 16.0;
+
+/// Windows' text size setting (Settings -> Accessibility -> Text size,
+/// 1.0 to 2.25) as `f32` bits, applied by `apply_text_scale`.
+static TEXT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// `size` grown by Windows' text size setting `factor` the way its own
+/// controls do it: small text by the whole factor, text above 20 px by half
+/// as much, so a large timer doesn't crowd everything else out.
+fn scaled(size: f32, factor: f32) -> f32 {
+    let weight = if size <= 20.0 { 1.0 } else { 0.5 };
+    size * (1.0 + (factor - 1.0) * weight)
+}
+
+/// A text size (`TEXT_*`) as shown, at Windows' text size setting.
+pub(super) fn text_px(size: f32) -> f32 {
+    scaled(
+        size,
+        f32::from_bits(TEXT_SCALE.load(std::sync::atomic::Ordering::Relaxed)),
+    )
+}
+
+/// Sizes egui's own text -- buttons, checkboxes, plain labels -- on the
+/// Windows type ramp at text size setting `factor`, and makes `text_px` use
+/// `factor` too.
+pub(super) fn apply_text_scale(ctx: &egui::Context, factor: f32) {
+    TEXT_SCALE.store(factor.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    let mut style = (*ctx.global_style()).clone();
+    for (text_style, size) in [
+        (egui::TextStyle::Small, 12.0),
+        (egui::TextStyle::Body, 14.0),
+        (egui::TextStyle::Button, 14.0),
+        (egui::TextStyle::Monospace, 13.0),
+        (egui::TextStyle::Heading, 20.0),
+    ] {
+        if let Some(font) = style.text_styles.get_mut(&text_style) {
+            font.size = scaled(size, factor);
+        }
+    }
+    ctx.set_global_style(style);
+}
+
+/// Follows Windows' text size setting while PolyRec runs (`UISettings`
+/// tells when it changes).
+pub(super) struct TextScaleWatch {
+    settings: windows::UI::ViewManagement::UISettings,
+    changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TextScaleWatch {
+    /// `None` where Windows doesn't offer the setting; text then stays at
+    /// its own size.
+    pub(super) fn start(ctx: &egui::Context) -> Option<Self> {
+        let settings = windows::UI::ViewManagement::UISettings::new()
+            .inspect_err(|e| tracing::warn!("Windows' text size setting isn't followed: {e}"))
+            .ok()?;
+        // Set: the first `apply` reads the current setting.
+        let changed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (flag, wake) = (changed.clone(), ctx.clone());
+        settings
+            .TextScaleFactorChanged(&windows::Foundation::TypedEventHandler::new(move |_, _| {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                wake.request_repaint();
+                Ok(())
+            }))
+            .inspect_err(|e| tracing::warn!("text size changes won't be followed: {e}"))
+            .ok();
+        Some(Self { settings, changed })
+    }
+
+    /// Applies the setting, if it changed since the last call. Runs every
+    /// frame.
+    pub(super) fn apply(&self, ctx: &egui::Context) {
+        if self
+            .changed
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+            && let Ok(factor) = self.settings.TextScaleFactor()
+        {
+            apply_text_scale(ctx, factor as f32);
+        }
+    }
+}
 
 /// Fixed width shared by every modal popup (Quality, Hotkeys). One constant
 /// (not separate literals) is what guarantees they match; setting both
@@ -150,6 +237,57 @@ pub(super) fn setup_theme(ctx: &egui::Context) {
     s.spacing.window_margin = egui::Margin::same(16);
     s.spacing.indent = 16.0;
     ctx.set_global_style(s);
+    apply_text_scale(ctx, 1.0);
+}
+
+#[cfg(test)]
+mod type_tests {
+    use super::*;
+
+    #[test]
+    fn no_text_is_smaller_than_windows_smallest_legible_size() {
+        // 12 px regular is Windows 11's minimum ("Typography in Windows").
+        for size in [
+            TEXT_CAPTION,
+            TEXT_BODY,
+            TEXT_SUBTITLE,
+            TEXT_BUTTON,
+            TEXT_DISPLAY,
+        ] {
+            assert!(size >= 12.0, "{size}");
+        }
+    }
+
+    fn style_size(ctx: &egui::Context, style: egui::TextStyle) -> f32 {
+        ctx.global_style().text_styles[&style].size
+    }
+
+    #[test]
+    fn egui_s_own_text_follows_the_windows_type_ramp() {
+        // Buttons, checkboxes and plain labels use egui's styles, which
+        // were left at egui's defaults (12.5 px body, 9 px small).
+        let ctx = egui::Context::default();
+        apply_text_scale(&ctx, 1.0);
+        assert_eq!(style_size(&ctx, egui::TextStyle::Body), 14.0);
+        assert_eq!(style_size(&ctx, egui::TextStyle::Button), 14.0);
+        assert_eq!(style_size(&ctx, egui::TextStyle::Small), 12.0);
+        assert_eq!(style_size(&ctx, egui::TextStyle::Heading), 20.0);
+    }
+
+    #[test]
+    fn windows_text_size_setting_grows_small_text_fully_and_large_text_less() {
+        // Windows' own controls scale smaller text more than larger text.
+        assert_eq!(scaled(14.0, 1.0), 14.0);
+        assert_eq!(scaled(14.0, 1.5), 21.0);
+        assert_eq!(scaled(12.0, 2.25), 27.0);
+        assert_eq!(scaled(40.0, 1.5), 50.0, "half as much above 20 px");
+        let ctx = egui::Context::default();
+        apply_text_scale(&ctx, 1.5);
+        assert_eq!(style_size(&ctx, egui::TextStyle::Body), 21.0);
+        assert_eq!(text_px(TEXT_CAPTION), 18.0);
+        apply_text_scale(&ctx, 1.0);
+        assert_eq!(text_px(TEXT_CAPTION), TEXT_CAPTION);
+    }
 }
 
 #[cfg(test)]

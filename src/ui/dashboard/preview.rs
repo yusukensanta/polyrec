@@ -2,7 +2,7 @@
 //! or display REC is about to record before recording it.
 
 use super::App;
-use super::theme::TEXT_MUTED;
+use super::theme::{SPACE_NORMAL, TEXT_MUTED};
 use super::widgets::caption;
 use crate::capture::video::{CaptureTarget, capture_still};
 use crate::i18n::Strings;
@@ -188,7 +188,7 @@ impl App {
             Some(texture) => {
                 let [w, h] = texture.size().map(|v| v as f32);
                 let width = ui.available_width().min(PREVIEW_MAX_HEIGHT * w / h);
-                ui.add_space(6.0);
+                ui.add_space(SPACE_NORMAL);
                 ui.add(
                     egui::Image::new((texture.id(), egui::vec2(width, width * h / w)))
                         .corner_radius(4u8),

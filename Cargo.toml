@@ -64,6 +64,8 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
+    # Windows' text size setting (UISettings::TextScaleFactor).
+    "UI_ViewManagement",
     # The exe's own icon resource, for the tray's badged icons.
     "Win32_System_LibraryLoader",
     "Win32_Storage_FileSystem",

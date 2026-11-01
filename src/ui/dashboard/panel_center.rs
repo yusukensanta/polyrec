@@ -3,8 +3,9 @@ use super::actions::{TrackKind, TrackLabel};
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
-    BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_NORMAL, SPACE_TIGHT,
-    TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
+    BG_BTN_STOP, BG_FAINT, BORDER, CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL,
+    SPACE_SECTION, SPACE_TIGHT, TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
+    text_px,
 };
 use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_problem};
 use super::widgets::{
@@ -51,7 +52,7 @@ impl App {
             .fill(BG_FAINT)
             .stroke(egui::Stroke::new(1.0, ACCENT_PAUSE))
             .corner_radius(CORNER_CONTROL)
-            .inner_margin(8i8)
+            .inner_margin(SPACE_GROUP)
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     let dismiss_width = 24.0;
@@ -144,9 +145,12 @@ impl App {
             // however tall the content above gets (e.g. a finished
             // recording's export controls); that content scrolls instead.
             // Laid out in the same ui, the two used to overlap.
+            // The line marks where the content above scrolls under the
+            // row, so a cut-off box reads as "more below" rather than a
+            // glitch.
             egui::Panel::bottom("action_row")
                 .resizable(false)
-                .show_separator_line(false)
+                .show_separator_line(true)
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.render_action_row(ui, s, is_recording));
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -155,7 +159,7 @@ impl App {
 
                 self.render_status(ui, s, is_recording, frames);
 
-                ui.add_space(16.0);
+                ui.add_space(SPACE_SECTION);
                 section_header(ui, s.output_header);
 
                 self.render_output_settings(ui, s);
@@ -219,7 +223,7 @@ impl App {
                     (secs % 3600) / 60,
                     secs % 60,
                 ))
-                .font(egui::FontId::monospace(TEXT_DISPLAY))
+                .font(egui::FontId::monospace(text_px(TEXT_DISPLAY)))
                 .color(TEXT_PRIMARY),
             );
 
@@ -272,7 +276,7 @@ impl App {
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(s.saving_recording)
-                    .size(TEXT_BODY)
+                    .size(text_px(TEXT_BODY))
                     .color(TEXT_MUTED),
             );
         } else if let Some(path) = self.last_output_path.clone() {
@@ -281,7 +285,7 @@ impl App {
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(s.select_source_prompt)
-                    .size(TEXT_BODY)
+                    .size(text_px(TEXT_BODY))
                     .color(TEXT_MUTED),
             );
         }
@@ -379,7 +383,7 @@ impl App {
             ui.label(caption(output_dir_problem_text(problem, s), ACCENT_PAUSE));
         }
 
-        ui.add_space(6.0);
+        ui.add_space(SPACE_NORMAL);
         let checkbox_response = ui
             .checkbox(
                 &mut self.config.use_process_name_for_recording,
@@ -391,7 +395,8 @@ impl App {
         }
         if !self.config.use_process_name_for_recording {
             ui.horizontal(|ui| {
-                ui.add_space(20.0);
+                // Under the checkbox's label.
+                ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
                 let tf = ui.add(
                     egui::TextEdit::singleline(&mut self.config.custom_recording_prefix)
                         .hint_text(s.custom_recording_prefix_placeholder),
@@ -419,7 +424,7 @@ impl App {
                 .fill(BG_FAINT)
                 .stroke(egui::Stroke::new(1.0, BORDER))
                 .corner_radius(CORNER_CONTROL)
-                .inner_margin(8i8)
+                .inner_margin(SPACE_GROUP)
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     let mut first = true;
@@ -524,7 +529,7 @@ impl App {
                 egui::Button::new(
                     egui::RichText::new(s.stop_button)
                         .color(ACCENT_REC)
-                        .size(TEXT_BUTTON),
+                        .size(text_px(TEXT_BUTTON)),
                 )
                 .fill(BG_BTN_STOP)
                 .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -538,7 +543,7 @@ impl App {
                     let btn = egui::Button::new(
                         egui::RichText::new(s.resume_button)
                             .color(ACCENT_IDLE)
-                            .size(TEXT_BUTTON),
+                            .size(text_px(TEXT_BUTTON)),
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -558,7 +563,9 @@ impl App {
                     }
 
                     let pause_btn = egui::Button::new(
-                        egui::RichText::new("⏸").color(TEXT_MUTED).size(TEXT_BUTTON),
+                        egui::RichText::new("⏸")
+                            .color(TEXT_MUTED)
+                            .size(text_px(TEXT_BUTTON)),
                     )
                     .fill(BG_BTN_PAUSE)
                     .min_size(egui::Vec2::new(44.0, 52.0));
@@ -571,7 +578,7 @@ impl App {
                     let btn = egui::Button::new(
                         egui::RichText::new(s.rec_button)
                             .color(ACCENT_IDLE)
-                            .size(TEXT_BUTTON),
+                            .size(text_px(TEXT_BUTTON)),
                     )
                     .fill(BG_BTN_IDLE)
                     .corner_radius(ROUNDING_PRIMARY_BTN)
@@ -692,7 +699,7 @@ impl App {
         path: &std::path::Path,
     ) {
         ui.label(caption(s.recording_saved_label, TEXT_MUTED));
-        ui.add_space(2.0);
+        ui.add_space(SPACE_TIGHT);
         ui.label(caption(path.to_string_lossy().as_ref(), TEXT_PRIMARY));
         ui.add_space(8.0);
 

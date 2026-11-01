@@ -155,6 +155,12 @@ pub struct App {
     /// The notification-area icon; `None` if Windows wouldn't take one
     /// (logged), which leaves everything else working as before.
     tray: Option<tray::Tray>,
+    /// Windows' text size setting, followed while running.
+    text_scale: Option<theme::TextScaleWatch>,
+    /// The window's size and whether it's maximized, saved on exit (like
+    /// `last_window_pos`).
+    last_window_size: Option<egui::Vec2>,
+    last_window_maximized: bool,
     /// The selected source's picture, in its card.
     preview: preview::SourcePreview,
     /// The dot on the dashboard's taskbar button while recording; `None`
@@ -322,6 +328,9 @@ impl App {
             notice,
             toast: None,
             tray,
+            text_scale: theme::TextScaleWatch::start(&cc.egui_ctx),
+            last_window_size: None,
+            last_window_maximized: false,
             preview: preview::SourcePreview::default(),
             taskbar_badge,
             dashboard_hidden: false,
@@ -389,6 +398,9 @@ impl eframe::App for App {
             self.set_dashboard_shown(ctx, true);
         }
         self.poll_tray(ctx, s);
+        if let Some(text_scale) = &self.text_scale {
+            text_scale.apply(ctx);
+        }
         self.run_recording_checks(s);
         self.update_preview(ctx);
         self.request_repaints(ctx);
@@ -419,6 +431,18 @@ impl eframe::App for App {
         // isn't saved to config.toml here.
         if let Some(outer_rect) = ctx.input(|i| i.viewport().outer_rect) {
             self.last_window_pos = Some(outer_rect.min);
+        }
+        // The size to come back at: the normal one, not the maximized or
+        // minimized one -- maximized is remembered on its own.
+        let (inner, maximized, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.maximized, v.minimized)
+        });
+        if minimized != Some(true) {
+            self.last_window_maximized = maximized == Some(true);
+            if let Some(inner) = inner.filter(|_| maximized != Some(true)) {
+                self.last_window_size = Some(inner.size());
+            }
         }
 
         // The overlay HUD and the toast are windows of their own, drawn from
@@ -451,6 +475,10 @@ impl eframe::App for App {
         // self_update.rs itself.
         if let Some(pos) = self.last_window_pos {
             self.config.window_position = Some((pos.x, pos.y));
+            if let Some(size) = self.last_window_size {
+                self.config.window_size = Some((size.x, size.y));
+            }
+            self.config.window_maximized = self.last_window_maximized;
             if let Err(e) = self.config.save() {
                 tracing::error!("failed to save window position: {e}");
             }

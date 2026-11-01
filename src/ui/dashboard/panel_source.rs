@@ -1,7 +1,7 @@
 use super::App;
 use super::theme::{
-    BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, TEXT_BODY, TEXT_MUTED,
-    TEXT_PRIMARY,
+    BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, SPACE_GROUP, SPACE_NORMAL,
+    TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY, text_px,
 };
 use super::widgets::{RowIcon, caption, icon_slot, section_header};
 use crate::i18n::Strings;
@@ -107,7 +107,7 @@ impl App {
                                 .fill(fill)
                                 .stroke(egui::Stroke::new(1.0, border))
                                 .corner_radius(6u8)
-                                .inner_margin(8i8)
+                                .inner_margin(SPACE_GROUP)
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
@@ -133,7 +133,7 @@ impl App {
                                         ui.vertical(|ui| {
                                             ui.label(
                                                 egui::RichText::new(title)
-                                                    .size(TEXT_BODY)
+                                                    .size(text_px(TEXT_BODY))
                                                     .strong()
                                                     .color(TEXT_PRIMARY),
                                             );
@@ -170,7 +170,7 @@ impl App {
                             if response.clicked() {
                                 self.selected_source = Some(i);
                             }
-                            ui.add_space(4.0);
+                            ui.add_space(SPACE_NORMAL);
                         }
                     });
             });
