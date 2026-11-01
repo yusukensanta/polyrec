@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Moving around PolyRec with Tab (or the arrow keys) now shows a ring around the control in focus, as Windows' own apps do, until the next click. egui's own sign of focus looked like a pressed button and was easy to miss.
+
 ## [v0.5.130] - 2026-11-01
 
 ### Added

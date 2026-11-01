@@ -1,5 +1,6 @@
 mod hotkeys_popup;
 mod icons;
+mod keyboard;
 
 mod actions;
 mod audio_popup;
@@ -167,6 +168,8 @@ pub struct App {
     last_window_maximized: bool,
     /// The selected source's picture, in its card.
     preview: preview::SourcePreview,
+    /// Whether the keyboard is being used to move around (`keyboard`).
+    keyboard_navigating: bool,
     /// The dot on the dashboard's taskbar button while recording; `None`
     /// if Windows wouldn't give one.
     taskbar_badge: Option<status_badge::TaskbarBadge>,
@@ -337,6 +340,7 @@ impl App {
             last_window_size: None,
             last_window_maximized: false,
             preview: preview::SourcePreview::default(),
+            keyboard_navigating: false,
             taskbar_badge,
             dashboard_hidden: false,
             show_requested,
@@ -469,6 +473,7 @@ impl eframe::App for App {
         self.render_hotkeys_popup(ctx, s);
         self.render_error_banner(ctx, s);
         self.render_self_update_popup(ctx, s);
+        self.show_keyboard_focus(ctx);
     }
 
     fn on_exit(&mut self) {
