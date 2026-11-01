@@ -869,15 +869,12 @@ fn meter_color(fill: f32) -> egui::Color32 {
     }
 }
 
-/// The red of REC's record dot, on its indigo fill in every theme.
-const REC_DOT: egui::Color32 = egui::Color32::from_rgb(0xff, 0x8a, 0x8a);
-
 /// REC: solid indigo with its red dot, or flat grey when it can't be pressed
 /// (`enabled`; see `Palette::disabled_fill`).
 fn add_rec_button(ui: &mut egui::Ui, enabled: bool, s: &'static Strings) -> egui::Response {
     let p = pal();
     let (fill, text, dot) = if enabled {
-        (p.accent, p.on_accent, REC_DOT)
+        (p.accent, p.on_accent, p.rec_dot)
     } else {
         (p.disabled_fill, p.disabled_text, p.disabled_text)
     };

@@ -52,6 +52,14 @@ pub(super) fn remember_dashboard(hwnd: HWND) {
     DASHBOARD.store(hwnd.0 as isize, Ordering::Relaxed);
 }
 
+/// The monitor the dashboard is (mostly) on, once it's been recorded.
+pub(super) fn dashboard_monitor() -> Option<HMONITOR> {
+    match DASHBOARD.load(Ordering::Relaxed) {
+        0 => None,
+        hwnd => Some(unsafe { MonitorFromWindow(HWND(hwnd as *mut _), MONITOR_DEFAULTTONEAREST) }),
+    }
+}
+
 /// The monitor of the game in exclusive full-screen in front, if there is
 /// one -- the foreground window's. Asked of Windows at most every
 /// `CHECK_EVERY`: the overlay asks every frame.
@@ -91,12 +99,7 @@ fn monitors() -> Vec<MonitorId> {
 /// `preferred` goes on (see `hud_monitor`); `None` when it shouldn't be
 /// shown at all.
 pub(super) fn hud_monitor_rect(preferred: HMONITOR) -> Option<RECT> {
-    let dashboard = match DASHBOARD.load(Ordering::Relaxed) {
-        0 => None,
-        hwnd => Some(unsafe {
-            MonitorFromWindow(HWND(hwnd as *mut _), MONITOR_DEFAULTTONEAREST).0 as MonitorId
-        }),
-    };
+    let dashboard = dashboard_monitor().map(|m| m.0 as MonitorId);
     let monitor = hud_monitor(
         preferred.0 as MonitorId,
         exclusive_game_monitor(),

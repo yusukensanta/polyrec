@@ -78,6 +78,10 @@ features = [
     "Win32_System_Diagnostics_ToolHelp",
     # Named mutex and event for `single_instance`.
     "Win32_Security",
+    # The dashboard's monitor's colour profile, and converting the palette
+    # through it (`color_profile`).
+    "Win32_UI_ColorSystem",
+    "Win32_Devices_Display",
 ]
 
 [dev-dependencies]
