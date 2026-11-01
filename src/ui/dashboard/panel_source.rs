@@ -140,6 +140,12 @@ impl App {
                                             if !source.exe_name.is_empty() {
                                                 ui.label(caption(&source.exe_name, TEXT_MUTED));
                                             }
+                                            if selected
+                                                && !self.session.is_recording()
+                                                && !self.session.is_paused()
+                                            {
+                                                self.show_preview(ui, s);
+                                            }
                                         });
                                     });
                                 });
