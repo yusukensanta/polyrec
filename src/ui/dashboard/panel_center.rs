@@ -1,6 +1,6 @@
 use super::App;
 use super::actions::{TrackKind, TrackLabel};
-use super::icons::{Icon, add_named, icon_button, icon_button_two_tone};
+use super::icons::{Icon, add_named, icon_button};
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL, SPACE_SECTION, SPACE_TIGHT,
@@ -364,50 +364,33 @@ impl App {
         ));
         ui.add_space(8.0);
 
-        // Laid out right to left: the buttons take whatever width their
-        // labels need (which depends on the font and language), and the
-        // folder field gets the rest. A fixed width guess clipped Open. The
-        // row is one control tall; a bare `with_layout` would claim all the
-        // panel's remaining height.
-        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-        ui.allocate_ui_with_layout(
-            row,
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                // Opens the `polyrec` subfolder recordings actually land in once
-                // there is one, otherwise the chosen folder itself.
-                if ui
-                    .add_enabled(
-                        self.output_dir_problem.is_none(),
-                        accent_button(s.open_output_dir_button, pal().link),
-                    )
-                    .on_hover_text(s.open_output_dir_tooltip)
-                    .clicked()
-                {
-                    let recordings = self.config.output_dir.join("polyrec");
-                    open_directory(if recordings.is_dir() {
-                        &recordings
-                    } else {
-                        &self.config.output_dir
-                    });
-                }
-                if ui.add(accent_button(s.browse_button, pal().link)).clicked()
-                    && let Some(path) = FileDialog::new()
-                        .set_directory(&self.config.output_dir)
-                        .pick_folder()
-                {
-                    self.output_dir_input = path.to_string_lossy().into_owned();
-                    self.set_output_dir(path, s);
-                }
-                let tf = ui.add_sized(
-                    [ui.available_width().max(60.0), 22.0],
-                    egui::TextEdit::singleline(&mut self.output_dir_input),
-                );
-                if tf.lost_focus() && !self.output_dir_input.trim().is_empty() {
-                    self.set_output_dir(PathBuf::from(&self.output_dir_input), s);
-                }
-            },
+        let row = folder_row(
+            ui,
+            &mut self.output_dir_input,
+            self.output_dir_problem.is_none(),
+            s,
         );
+        // Opens the `polyrec` subfolder recordings actually land in once
+        // there is one, otherwise the chosen folder itself.
+        if row.open.on_hover_text(s.open_output_dir_tooltip).clicked() {
+            let recordings = self.config.output_dir.join("polyrec");
+            open_directory(if recordings.is_dir() {
+                &recordings
+            } else {
+                &self.config.output_dir
+            });
+        }
+        if row.browse.clicked()
+            && let Some(path) = FileDialog::new()
+                .set_directory(&self.config.output_dir)
+                .pick_folder()
+        {
+            self.output_dir_input = path.to_string_lossy().into_owned();
+            self.set_output_dir(path, s);
+        }
+        if row.field.lost_focus() && !self.output_dir_input.trim().is_empty() {
+            self.set_output_dir(PathBuf::from(&self.output_dir_input), s);
+        }
         if let Some(problem) = self.output_dir_problem {
             ui.label(caption(output_dir_problem_text(problem, s), pal().warn));
         }
@@ -869,21 +852,70 @@ fn meter_color(fill: f32) -> egui::Color32 {
     }
 }
 
-/// REC: solid indigo with its red dot, or flat grey when it can't be pressed
-/// (`enabled`; see `Palette::disabled_fill`).
+/// The output folder row's controls.
+struct FolderRow {
+    open: egui::Response,
+    browse: egui::Response,
+    field: egui::Response,
+}
+
+/// The output folder row, laid out right to left: the buttons take whatever
+/// width their labels need (which depends on the font and language), and
+/// the folder field gets the rest -- a fixed width guess clipped Open. The
+/// row is one control tall; a bare `with_layout` would claim all the
+/// panel's remaining height. Open is enabled with `can_open`.
+fn folder_row(
+    ui: &mut egui::Ui,
+    input: &mut String,
+    can_open: bool,
+    s: &'static Strings,
+) -> FolderRow {
+    let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(
+        row,
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let open = ui.add_enabled(
+                can_open,
+                accent_button(s.open_output_dir_button, pal().link),
+            );
+            let browse = ui.add(accent_button(s.browse_button, pal().link));
+            // As tall as the buttons and centred on the row like them, so
+            // their edges line up. It was given a fixed 22 px, centred, and
+            // grew down past that, sitting a few pixels low.
+            let field = ui.add(
+                egui::TextEdit::singleline(input)
+                    .desired_width(ui.available_width().max(60.0))
+                    .min_size(egui::vec2(0.0, browse.rect.height()))
+                    .align(egui::Align2::LEFT_CENTER),
+            );
+            FolderRow {
+                open,
+                browse,
+                field,
+            }
+        },
+    )
+    .inner
+}
+
+/// REC: solid red, like STOP, when it can be pressed (`enabled`); outlined
+/// in red on a button's fill when it can't be yet (no source picked), as
+/// vivid as the buttons around it.
 fn add_rec_button(ui: &mut egui::Ui, enabled: bool, s: &'static Strings) -> egui::Response {
     let p = pal();
-    let (fill, text, dot) = if enabled {
-        (p.accent, p.on_accent, p.rec_dot)
+    let (fill, text) = if enabled {
+        (p.danger_fill, p.on_danger)
     } else {
-        (p.disabled_fill, p.disabled_text, p.disabled_text)
+        (p.bg_button, p.danger)
     };
-    let button = icon_button_two_tone(Icon::Record, dot, s.rec_button, text, text_px(TEXT_BUTTON))
+    let button = icon_button(Icon::Record, s.rec_button, text, text_px(TEXT_BUTTON))
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, fill))
+        .stroke(egui::Stroke::new(1.0, p.danger_fill))
         .corner_radius(ROUNDING_PRIMARY_BTN)
         .min_size(egui::Vec2::new(130.0, 52.0));
-    // Already in its disabled colours: not faded on top of them.
+    // In its own colours when it can't be pressed: not faded on top of them
+    // as egui fades a disabled widget, which looked hazy.
     ui.scope(|ui| {
         ui.visuals_mut().disabled_alpha = 1.0;
         add_named(ui, enabled, button, s.rec_button)
@@ -1000,8 +1032,9 @@ mod rec_blocked_tests {
         assert_eq!(why_rec_is_blocked(false, true, None, s), None);
     }
 
-    /// The fills of every rectangle painted by a pass that adds REC.
-    fn rec_fills(enabled: bool) -> Vec<egui::Color32> {
+    /// The fill and outline of every rectangle painted by a pass that adds
+    /// REC.
+    fn rec_rects(enabled: bool) -> Vec<(egui::Color32, egui::Color32)> {
         let s = Lang::En.strings();
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1012,29 +1045,61 @@ mod rec_blocked_tests {
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Rect(rect) => Some(rect.fill),
+                egui::Shape::Rect(rect) => Some((rect.fill, rect.stroke.color)),
                 _ => None,
             })
             .collect()
     }
 
-    /// egui fades a disabled widget to half opacity, which on REC's solid
-    /// indigo looked hazy, washed over with white -- and REC is disabled
-    /// whenever no source is picked, as it stays for anyone who records
-    /// with the hotkey. Disabled, it's solid, in the disabled colours.
+    /// Ready to press, REC is solid red, like STOP.
     #[test]
-    fn a_disabled_rec_is_solid_not_faded() {
-        let fills = rec_fills(false);
-        assert!(fills.contains(&pal().disabled_fill), "{fills:?}");
-        assert!(
-            !fills.contains(&pal().accent.gamma_multiply(0.5)),
-            "{fills:?}"
-        );
+    fn a_rec_ready_to_press_is_solid_red() {
+        let p = pal();
+        let rects = rec_rects(true);
+        assert!(rects.contains(&(p.danger_fill, p.danger_fill)), "{rects:?}");
     }
 
+    /// Not ready -- no source picked, as it stays for anyone who records
+    /// with the hotkey -- REC is outlined in red on a button's fill, as
+    /// vivid as the buttons around it. It used to be faded to half opacity
+    /// as egui fades a disabled widget, which looked hazy, then flat grey.
     #[test]
-    fn an_enabled_rec_is_indigo() {
-        assert!(rec_fills(true).contains(&pal().accent));
+    fn a_rec_not_ready_is_outlined_in_red_not_faded() {
+        let p = pal();
+        let rects = rec_rects(false);
+        assert!(rects.contains(&(p.bg_button, p.danger_fill)), "{rects:?}");
+    }
+}
+
+#[cfg(test)]
+mod folder_row_tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    /// The folder field sat a few pixels below Browse... and Open: it was
+    /// given a fixed 22 px, centred in the row, and grew down past that.
+    #[test]
+    fn the_folder_field_lines_up_with_its_buttons() {
+        let _turn = super::super::theme::text_scale_turn();
+        let ctx = egui::Context::default();
+        super::super::theme::setup_theme(&ctx);
+        let s = Lang::En.strings();
+        let mut input = String::from(r"E:\recordings");
+        let mut row = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            row = Some(folder_row(ui, &mut input, true, s));
+        })
+        .textures_delta
+        .clear();
+        let row = row.unwrap();
+        for (name, button) in [("Open", &row.open), ("Browse", &row.browse)] {
+            let (field, button) = (row.field.rect, button.rect);
+            assert!(
+                (field.top() - button.top()).abs() < 0.5
+                    && (field.bottom() - button.bottom()).abs() < 0.5,
+                "field {field:?} vs {name} {button:?}"
+            );
+        }
     }
 }
 
