@@ -78,7 +78,7 @@ impl App {
                                 pal().bg_card
                             };
                             let border = if selected {
-                                pal().outline
+                                pal().outline_strong
                             } else if was_hovered {
                                 pal().border_hover
                             } else {

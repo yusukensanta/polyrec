@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Buttons are easier on the eye: a quieter outline, just above the 3:1 contrast a button needs to read as one (it was 6:1), on a fill of their own, turning PolyRec's indigo under the pointer.
+- REC, while it can't be pressed (no source picked yet, or the last recording still saving), is flat grey instead of a hazy, half-faded indigo.
+
 ## [v0.5.134] - 2026-11-01
 
 ### Changed

@@ -22,10 +22,17 @@ pub(super) struct Palette {
     /// Separators and cards' edges.
     pub(super) border: egui::Color32,
     pub(super) border_hover: egui::Color32,
-    /// Every button's (and the selected card's) outline: at least 3:1
-    /// against what it sits on, so a button reads as one -- the Close
-    /// buttons' shapes used to all but vanish (1.07:1).
+    /// Every button's outline at rest: at least 3:1 against what it sits
+    /// on, so a button reads as one -- the Close buttons' shapes used to all
+    /// but vanish (1.07:1) -- but not much more, or a dashboard full of
+    /// them is harsh on the eye (they were 6:1).
     pub(super) outline: egui::Color32,
+    /// The outline of the button under the pointer, and the selected
+    /// source card's.
+    pub(super) outline_strong: egui::Color32,
+    /// A button's fill at rest: a shade off what it sits on, so its shape
+    /// shows without a loud outline.
+    pub(super) bg_button: egui::Color32,
     /// A button's text, in the outline's indigo.
     pub(super) link: egui::Color32,
     /// A button's fill while hovered.
@@ -43,6 +50,10 @@ pub(super) struct Palette {
     /// STOP's fill, and its text.
     pub(super) danger_fill: egui::Color32,
     pub(super) on_danger: egui::Color32,
+    /// REC's fill and text while it can't be pressed: flat and grey, where
+    /// egui's half-transparent fade made its indigo look hazy.
+    pub(super) disabled_fill: egui::Color32,
+    pub(super) disabled_text: egui::Color32,
     /// Warnings: a notice's edge, and warning lines' text; a notice's fill.
     pub(super) warn: egui::Color32,
     pub(super) warn_bg: egui::Color32,
@@ -73,7 +84,9 @@ impl Palette {
         bg_selected: rgb(0x25, 0x28, 0x56),
         border: rgb(0x2d, 0x2f, 0x40),
         border_hover: rgb(0x4a, 0x4f, 0x8a),
-        outline: rgb(0x8b, 0x91, 0xff),
+        outline: rgb(0x61, 0x66, 0xb0),
+        outline_strong: rgb(0x8b, 0x91, 0xff),
+        bg_button: rgb(0x1e, 0x20, 0x30),
         link: rgb(0xc3, 0xc6, 0xff),
         hover_tint: rgb(0x25, 0x28, 0x56),
         text_primary: rgb(0xee, 0xee, 0xf6),
@@ -84,6 +97,8 @@ impl Palette {
         danger: rgb(0xff, 0x6b, 0x6b),
         danger_fill: rgb(0xc9, 0x34, 0x3a),
         on_danger: rgb(0xff, 0xff, 0xff),
+        disabled_fill: rgb(0x26, 0x28, 0x38),
+        disabled_text: rgb(0x8a, 0x8d, 0xa3),
         warn: rgb(0xe8, 0xa2, 0x3c),
         warn_bg: rgb(0x2a, 0x22, 0x19),
         success: rgb(0x5d, 0xd3, 0x9e),
@@ -103,7 +118,9 @@ impl Palette {
         bg_selected: rgb(0xec, 0xee, 0xff),
         border: rgb(0xdf, 0xe1, 0xec),
         border_hover: rgb(0xa9, 0xac, 0xd9),
-        outline: rgb(0x4b, 0x50, 0xd6),
+        outline: rgb(0x81, 0x84, 0xe2),
+        outline_strong: rgb(0x4b, 0x50, 0xd6),
+        bg_button: rgb(0xff, 0xff, 0xff),
         link: rgb(0x3d, 0x42, 0xc4),
         hover_tint: rgb(0xec, 0xee, 0xff),
         text_primary: rgb(0x1d, 0x1e, 0x2c),
@@ -114,6 +131,8 @@ impl Palette {
         danger: rgb(0xc6, 0x2f, 0x35),
         danger_fill: rgb(0xc9, 0x34, 0x3a),
         on_danger: rgb(0xff, 0xff, 0xff),
+        disabled_fill: rgb(0xe4, 0xe5, 0xee),
+        disabled_text: rgb(0x77, 0x7a, 0x8f),
         warn: rgb(0x9a, 0x5b, 0x00),
         warn_bg: rgb(0xff, 0xf4, 0xe0),
         success: rgb(0x1f, 0x7a, 0x45),
@@ -147,6 +166,8 @@ impl Palette {
             border: c.window_text,
             border_hover: c.hotlight,
             outline: c.window_text,
+            outline_strong: c.hotlight,
+            bg_button: c.window,
             link: c.hotlight,
             hover_tint: c.window,
             text_primary: c.window_text,
@@ -157,6 +178,8 @@ impl Palette {
             danger: c.window_text,
             danger_fill: c.highlight,
             on_danger: c.highlight_text,
+            disabled_fill: c.window,
+            disabled_text: c.window_text,
             warn: c.window_text,
             warn_bg: c.window,
             success: c.window_text,
@@ -513,9 +536,9 @@ pub(super) fn setup_theme(ctx: &egui::Context) {
 }
 
 /// egui's visuals in `p`'s colours. Every button and checkbox is outlined
-/// in `outline` with no fill until hovered; text takes each widget state's
-/// colour rather than one for everything, so a selected toggle can be
-/// `on_accent` on `accent`.
+/// quietly in `outline` at rest, on `bg_button`, and in `outline_strong`
+/// under the pointer; text takes each widget state's colour rather than one
+/// for everything, so a selected toggle can be `on_accent` on `accent`.
 fn visuals_for(p: &Palette) -> egui::Visuals {
     let mut v = if p.dark {
         egui::Visuals::dark()
@@ -542,14 +565,14 @@ fn visuals_for(p: &Palette) -> egui::Visuals {
     w.noninteractive.fg_stroke.color = p.text_primary;
     w.noninteractive.bg_stroke.color = p.border;
     // Buttons, checkboxes, sliders, text fields: resting, hovered, pressed.
-    for (state, fill) in [
-        (&mut w.inactive, egui::Color32::TRANSPARENT),
-        (&mut w.hovered, p.hover_tint),
-        (&mut w.active, p.bg_selected),
-        (&mut w.open, p.bg_selected),
+    for (state, fill, outline) in [
+        (&mut w.inactive, p.bg_button, p.outline),
+        (&mut w.hovered, p.hover_tint, p.outline_strong),
+        (&mut w.active, p.bg_selected, p.outline_strong),
+        (&mut w.open, p.bg_selected, p.outline_strong),
     ] {
         state.weak_bg_fill = fill;
-        state.bg_stroke = egui::Stroke::new(1.0, p.outline);
+        state.bg_stroke = egui::Stroke::new(1.0, outline);
         state.fg_stroke.color = p.text_primary;
     }
     // A checkbox's box and a slider's rail.
@@ -594,10 +617,20 @@ mod type_tests {
         ctx.global_style().text_styles[&style].size
     }
 
+    /// `TEXT_SCALE` is one for the whole process, and tests run in
+    /// parallel: those that set it take turns, or one's 1.5 lands in the
+    /// middle of another's 1.0.
+    fn text_scale_turn() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        TURN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn egui_s_own_text_follows_the_windows_type_ramp() {
         // Buttons, checkboxes and plain labels use egui's styles, which
         // were left at egui's defaults (12.5 px body, 9 px small).
+        let _turn = text_scale_turn();
         let ctx = egui::Context::default();
         apply_text_scale(&ctx, 1.0);
         assert_eq!(style_size(&ctx, egui::TextStyle::Body), 14.0);
@@ -613,6 +646,7 @@ mod type_tests {
         assert_eq!(scaled(14.0, 1.5), 21.0);
         assert_eq!(scaled(12.0, 2.25), 27.0);
         assert_eq!(scaled(40.0, 1.5), 50.0, "half as much above 20 px");
+        let _turn = text_scale_turn();
         let ctx = egui::Context::default();
         apply_text_scale(&ctx, 1.5);
         assert_eq!(style_size(&ctx, egui::TextStyle::Body), 21.0);
@@ -701,6 +735,7 @@ mod palette_tests {
             ("faint", p.bg_faint),
             ("selected", p.bg_selected),
             ("hover", p.hover_tint),
+            ("button", p.bg_button),
         ];
         for (text_name, text) in [
             ("primary", p.text_primary),
@@ -729,6 +764,7 @@ mod palette_tests {
         }
         for (shape_name, shape) in [
             ("outline", p.outline),
+            ("hovered outline", p.outline_strong),
             ("accent", p.accent),
             ("STOP", p.danger_fill),
         ] {
@@ -763,13 +799,32 @@ mod palette_tests {
             // fill within 1.07:1 of the pop-up behind them.
             assert_eq!(v.widgets.inactive.bg_stroke.color, p.outline);
             assert_eq!(v.widgets.inactive.bg_stroke.width, 1.0);
-            assert_eq!(v.widgets.hovered.bg_stroke.color, p.outline);
             // A single text colour for everything used to paint a selected
             // toggle's label in it, whatever its fill.
             assert_eq!(v.override_text_color, None);
             assert_eq!(v.selection.bg_fill, p.accent);
             assert_eq!(v.selection.stroke.color, p.on_accent);
             assert_eq!(v.widgets.noninteractive.fg_stroke.color, p.text_primary);
+        }
+    }
+
+    /// Outlined at 6:1, a dashboard of buttons was harsh on the eye: at
+    /// rest they're outlined just past the 3:1 a control needs to read as
+    /// one, on a fill of their own, and light up when the pointer is on one.
+    #[test]
+    fn buttons_rest_quietly_and_light_up_under_the_pointer() {
+        for (p, name) in [(Palette::DARK, "dark"), (Palette::LIGHT, "light")] {
+            for bg in [p.bg_base, p.bg_card, p.bg_window, p.bg_faint] {
+                let ratio = contrast(p.outline, bg);
+                assert!(ratio <= 4.0, "{name}: resting outline is {ratio:.2}:1");
+            }
+            let v = visuals_for(&p);
+            assert_eq!(v.widgets.inactive.weak_bg_fill, p.bg_button);
+            assert_ne!(p.bg_button, p.bg_base, "{name}: a button has a body");
+            for state in [&v.widgets.hovered, &v.widgets.active, &v.widgets.open] {
+                assert_eq!(state.bg_stroke.color, p.outline_strong);
+            }
+            assert!(contrast(p.outline_strong, p.bg_base) > contrast(p.outline, p.bg_base));
         }
     }
 
