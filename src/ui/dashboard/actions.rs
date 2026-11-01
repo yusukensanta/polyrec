@@ -1,6 +1,6 @@
 use super::App;
 use super::state::HighlightSaveState;
-use super::widgets::audio_device_icon;
+use super::widgets::{MICROPHONE_GLYPH, SPEAKERS_GLYPH};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -230,13 +230,35 @@ fn audio_device_ids_changed(old: &[AudioDevice], new: &[AudioDevice]) -> bool {
 /// up; in a sentence (`Display`) the glyph goes in front.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TrackLabel {
-    pub(super) glyph: Option<&'static str>,
+    pub(super) kind: TrackKind,
     pub(super) name: String,
+}
+
+/// Where an audio track's sound comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TrackKind {
+    /// A playback device's loopback: what the PC plays.
+    Speakers,
+    Microphone,
+    /// One app's own sound.
+    App,
+}
+
+impl TrackLabel {
+    /// The glyph lists draw in their icon column; apps have none (their
+    /// tracks are named after them).
+    pub(super) fn glyph(&self) -> Option<&'static str> {
+        match self.kind {
+            TrackKind::Speakers => Some(SPEAKERS_GLYPH),
+            TrackKind::Microphone => Some(MICROPHONE_GLYPH),
+            TrackKind::App => None,
+        }
+    }
 }
 
 impl std::fmt::Display for TrackLabel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.glyph {
+        match self.glyph() {
             Some(glyph) => write!(f, "{glyph} {}", self.name),
             None => f.write_str(&self.name),
         }
@@ -250,13 +272,17 @@ fn build_audio_labels<'a>(
     devices
         .into_iter()
         .map(|dev| TrackLabel {
-            glyph: Some(audio_device_icon(dev)),
+            kind: if dev.is_loopback {
+                TrackKind::Speakers
+            } else {
+                TrackKind::Microphone
+            },
             name: dev.name.clone(),
         })
         .chain(app_sources.into_iter().flat_map(|src| {
             std::iter::repeat_n(
                 TrackLabel {
-                    glyph: None,
+                    kind: TrackKind::App,
                     name: src.display_name.clone(),
                 },
                 src.process_ids.len(),
@@ -588,6 +614,7 @@ impl App {
                 );
                 self.recording_start = Some(Instant::now());
                 self.fps_shortfall_warned = false;
+                self.recording_checks = Default::default();
                 // Otherwise the previous recording's cached preview -- keyed
                 // on elapsed seconds, which this new recording also starts
                 // at 0 from -- would flash as this one's name until the
@@ -778,11 +805,11 @@ mod tests {
             labels,
             vec![
                 TrackLabel {
-                    glyph: Some("🎙"),
+                    kind: TrackKind::Microphone,
                     name: "Mic".into()
                 },
                 TrackLabel {
-                    glyph: None,
+                    kind: TrackKind::App,
                     name: "Game".into()
                 },
             ]

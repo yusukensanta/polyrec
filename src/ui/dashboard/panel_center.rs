@@ -1,5 +1,5 @@
 use super::App;
-use super::actions::TrackLabel;
+use super::actions::{TrackKind, TrackLabel};
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
@@ -101,7 +101,7 @@ impl App {
             ui.spacing_mut().item_spacing.y = 2.0;
             for (i, &fill) in meter_levels.iter().enumerate() {
                 let (glyph, name) = match labels.get(i) {
-                    Some(label) => (label.glyph, label.name.clone()),
+                    Some(label) => (label.glyph(), label.name.clone()),
                     None => (None, format!("#{}", i + 1)),
                 };
                 ui.horizontal(|ui| {
@@ -430,12 +430,18 @@ impl App {
                         // -- flagging it here too means the user sees it
                         // coming before pressing REC, not just as a
                         // refusal/mid-recording stop after the fact.
-                        let low = free < crate::disk_space::MIN_FREE_BYTES;
+                        let mut low = free < crate::disk_space::MIN_FREE_BYTES;
+                        let mut text = format!("{}{}", s.free_space_prefix, format_bytes(free));
+                        // How long that lasts at the current quality -- so a
+                        // nearly full drive shows before REC, not as a
+                        // recording cut short.
+                        if let Some((left, short)) = self.time_left_text(s) {
+                            text.push_str("  ·  ");
+                            text.push_str(&left);
+                            low |= short;
+                        }
                         let color = if low { ACCENT_PAUSE } else { TEXT_MUTED };
-                        ui.label(caption(
-                            format!("{}{}", s.free_space_prefix, format_bytes(free)),
-                            color,
-                        ));
+                        ui.label(caption(text, color));
                         first = false;
                     }
 
@@ -601,7 +607,7 @@ impl App {
             .map(|i| match self.last_recording_audio_labels.get(i) {
                 Some(label) => label.clone(),
                 None => TrackLabel {
-                    glyph: None,
+                    kind: TrackKind::App,
                     name: format!("{} {}", s.track_label_fallback, i + 1),
                 },
             })
@@ -611,7 +617,7 @@ impl App {
             let mut checked = indices.iter().all(|&i| self.export.track_selection[i]);
             let changed = ui
                 .horizontal(|ui| {
-                    icon_slot(ui, label.glyph.map_or(RowIcon::None, RowIcon::Glyph));
+                    icon_slot(ui, label.glyph().map_or(RowIcon::None, RowIcon::Glyph));
                     ui.checkbox(&mut checked, label.name.as_str()).changed()
                 })
                 .inner;

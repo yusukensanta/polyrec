@@ -3,6 +3,7 @@ mod hotkeys_popup;
 mod actions;
 mod audio_popup;
 mod background;
+mod checks;
 mod fps_support;
 mod graphics_device;
 mod overlay;
@@ -88,6 +89,10 @@ pub struct App {
     /// sustained shortfall to the user; it just silently degraded. One-shot
     /// per recording so it doesn't re-fire every frame once triggered.
     fps_shortfall_warned: bool,
+    /// The next recording's estimated rate, for the free-space line.
+    rate_estimate: checks::RateEstimate,
+    /// What the running recording's checks found (see `checks`).
+    recording_checks: checks::RecordingChecks,
     /// The active recording's saved-name preview and size so far -- see
     /// `RecordingStatusCache`.
     recording_status: Option<RecordingStatusCache>,
@@ -295,6 +300,8 @@ impl App {
             frame_count: Arc::new(AtomicU64::new(0)),
             recording_start: None,
             fps_shortfall_warned: false,
+            rate_estimate: checks::RateEstimate::default(),
+            recording_checks: checks::RecordingChecks::default(),
             recording_status: None,
             meter_levels: Vec::new(),
             last_output_path: None,
@@ -378,6 +385,7 @@ impl eframe::App for App {
             self.set_dashboard_shown(ctx, true);
         }
         self.poll_tray(ctx, s);
+        self.run_recording_checks(s);
         self.request_repaints(ctx);
         self.request_ui_for_new_windows_while_minimized(ctx);
     }

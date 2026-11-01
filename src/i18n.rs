@@ -197,6 +197,18 @@ pub struct Strings {
     pub output_dir_not_a_folder: &'static str,
     /// "{free_space_prefix}{formatted bytes}" -- see format_bytes in dashboard/widgets.rs.
     pub free_space_prefix: &'static str,
+    /// How long the free space lasts at the current quality, after the free
+    /// space: "{h}" hours and "{m}" minutes.
+    pub time_left_hours_template: &'static str,
+    pub time_left_hours_minutes_template: &'static str,
+    pub time_left_minutes_template: &'static str,
+    pub time_left_under_a_minute: &'static str,
+    /// Toast while recording when the drive is nearly full; "{left}" is one
+    /// of the time-left texts.
+    pub toast_low_space_template: &'static str,
+    /// Notice (and toast) when a microphone has given no sound at all 10 s
+    /// into a recording; "{mics}" lists them.
+    pub notice_silent_microphones_template: &'static str,
     pub resume_button: &'static str,
     pub stop_button: &'static str,
     pub rec_button: &'static str,
@@ -443,6 +455,12 @@ pub static EN: Strings = Strings {
     output_dir_unavailable: "This drive or network share isn't available, so recordings can't be saved here.",
     output_dir_not_a_folder: "Part of this path is a file, not a folder, so recordings can't be saved here.",
     free_space_prefix: "Free: ",
+    time_left_hours_template: "about {h} h of recording",
+    time_left_hours_minutes_template: "about {h} h {m} min of recording",
+    time_left_minutes_template: "about {m} min of recording",
+    time_left_under_a_minute: "under a minute of recording",
+    toast_low_space_template: "Recording drive almost full: {left} left",
+    notice_silent_microphones_template: "No sound from {mics} since recording started. Check it isn't muted.",
     resume_button: "▶ RESUME",
     stop_button: "⏹ STOP",
     rec_button: "⏺ REC",
@@ -629,6 +647,12 @@ pub static JA: Strings = Strings {
     output_dir_unavailable: "このドライブまたはネットワーク共有が見つからないため、ここには録画を保存できません。",
     output_dir_not_a_folder: "このパスの途中がフォルダーではなくファイルのため、ここには録画を保存できません。",
     free_space_prefix: "空き容量: ",
+    time_left_hours_template: "録画 約{h}時間分",
+    time_left_hours_minutes_template: "録画 約{h}時間{m}分",
+    time_left_minutes_template: "録画 約{m}分",
+    time_left_under_a_minute: "録画 1分未満",
+    toast_low_space_template: "録画先の空き容量が残りわずかです（{left}）",
+    notice_silent_microphones_template: "{mics} から録画開始後まったく音が入っていません。ミュートになっていないか確認してください。",
     resume_button: "▶ 再開",
     stop_button: "⏹ 停止",
     rec_button: "⏺ 録画",

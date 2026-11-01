@@ -2,7 +2,7 @@ pub mod clock;
 mod pipeline;
 pub mod state;
 
-pub use pipeline::{CaptureInputs, FpsSupport, probe_fps_support};
+pub use pipeline::{CaptureInputs, FpsSupport, estimated_bytes_per_sec, probe_fps_support};
 
 use crate::capture::frame_rate::LiveFps;
 use crate::config::{BitrateMode, Codec, EncoderMode, ResolutionMode};
