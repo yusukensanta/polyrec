@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.128] - 2026-11-01
+
 ### Changed
 
 - Text is easier to read: body text, buttons and checkboxes are 14 px (they were 12.5) and the small status lines 12 px (they were 11), Windows 11's own sizes. Spacing inside cards and boxes is a little roomier, on Windows' 4 px grid, and a line now marks where the dashboard's content scrolls under the REC row.
