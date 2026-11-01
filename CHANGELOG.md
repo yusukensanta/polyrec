@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A blank white box no longer flashes up for a moment before the message a hotkey brings up ("● Recording", "Stopped" and so on), or before the recording overlay. Their windows appeared before anything was drawn in them, which showed as white, for longer while a game kept the graphics card busy; they now stay hidden until drawn.
 
+## [v0.5.135] - 2026-11-02
+
+### Changed
+
+- Recordings now run at exactly their frame rate from the first instant to the last: a 60 fps recording is 60.000 fps, where players used to show 59.94 or so. Every frame sits on an exact 1/60 s grid from the start of the recording; where Windows gave no new frame for a slot (a still window, or a frame the game dropped), the frame before it fills the slot. The Highlight buffer's 10-second pieces are constant-rate too, though a saved clip can still have one uneven frame where two of them join. A still window now costs the encoder as much as a moving one, since its video runs at the full rate.
+- The low frame rate notice now says how many frames a second were new pictures, since the recording itself always has the full rate.
+
 ## [v0.5.134] - 2026-11-01
 
 ### Changed
