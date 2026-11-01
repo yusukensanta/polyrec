@@ -104,20 +104,29 @@ pub struct AudioSamples {
     pub channels: u16,
 }
 
-/// The peak of an audio track's most recent chunk, as linear amplitude
-/// (0.0 to 1.0): written by the track's pump, read by the dashboard's level
-/// meters. Clones share one value.
+/// The loudest an audio track has been since the dashboard last looked, as
+/// linear amplitude (0.0 to 1.0): raised chunk by chunk by the track's pump,
+/// read and reset by the dashboard's level meter once a frame. Clones share
+/// one value.
+///
+/// Held rather than overwritten: a chunk is ~10 ms and a frame 33 ms or more,
+/// so showing only the latest chunk skipped most of the sound and made the
+/// meter flicker.
 #[derive(Debug, Clone, Default)]
 pub struct AudioLevel(Arc<AtomicU32>);
 
 impl AudioLevel {
     pub fn record(&self, samples: &[f32]) {
         let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
-        self.0.store(peak.min(1.0).to_bits(), Ordering::Relaxed);
+        // Non-negative floats order the same way as their bits, so an
+        // integer max keeps the louder of two peaks.
+        self.0.fetch_max(peak.min(1.0).to_bits(), Ordering::Relaxed);
     }
 
-    pub fn peak(&self) -> f32 {
-        f32::from_bits(self.0.load(Ordering::Relaxed))
+    /// The loudest since the last call, starting the next interval from
+    /// silence.
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.0.swap(0, Ordering::Relaxed))
     }
 }
 
@@ -175,16 +184,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audio_level_keeps_the_latest_chunks_peak() {
+    fn audio_level_holds_the_loudest_chunk_until_it_is_read() {
         let level = AudioLevel::default();
-        assert_eq!(level.peak(), 0.0);
+        assert_eq!(level.take_peak(), 0.0);
+        // Several chunks arrive between two dashboard frames: the meter
+        // shows the loudest, not whichever came last.
         level.record(&[0.1, -0.5, 0.25]);
-        assert_eq!(level.peak(), 0.5);
-        // Shared between clones, and replaced (not maxed) by the next chunk.
         level.clone().record(&[0.05]);
-        assert_eq!(level.peak(), 0.05);
+        assert_eq!(level.take_peak(), 0.5);
+        // Reading starts the next interval from silence.
+        assert_eq!(level.take_peak(), 0.0);
         level.record(&[-3.0]);
-        assert_eq!(level.peak(), 1.0, "clamped to full scale");
+        assert_eq!(level.take_peak(), 1.0, "clamped to full scale");
     }
 
     #[test]

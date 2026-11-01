@@ -1,4 +1,5 @@
 use super::App;
+use super::actions::TrackLabel;
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     ACCENT_IDLE, ACCENT_PAUSE, ACCENT_REC, ACCENT_SECONDARY, BG_BTN_IDLE, BG_BTN_PAUSE,
@@ -6,7 +7,9 @@ use super::theme::{
     TEXT_BODY, TEXT_BUTTON, TEXT_DISPLAY, TEXT_MUTED, TEXT_PRIMARY,
 };
 use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_problem};
-use super::widgets::{accent_button, caption, centered_action_row, format_bytes, section_header};
+use super::widgets::{
+    RowIcon, accent_button, caption, centered_action_row, format_bytes, icon_slot, section_header,
+};
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
 use crate::types::{AudioLevel, SessionState};
@@ -75,16 +78,19 @@ impl App {
         let peaks: Vec<f32> = self
             .session
             .active()
-            .map(|a| a.audio_levels().iter().map(AudioLevel::peak).collect())
+            .map(|a| a.audio_levels().iter().map(AudioLevel::take_peak).collect())
             .unwrap_or_default();
         if peaks.is_empty() {
             return;
         }
         self.meter_levels.resize(peaks.len(), 0.0);
         ui.add_space(SPACE_TIGHT);
+        // Time since the last frame: about 33 ms while the dashboard has
+        // focus, a second while a game does (see `request_repaints`).
+        let dt = ui.input(|i| i.unstable_dt);
         for (i, peak) in peaks.into_iter().enumerate() {
-            self.meter_levels[i] =
-                meter_decay(self.meter_levels[i], if is_paused { 0.0 } else { peak });
+            let fill = if is_paused { 0.0 } else { meter_fill(peak) };
+            self.meter_levels[i] = meter_decay(self.meter_levels[i], fill, dt);
         }
         let labels = &self.last_recording_audio_labels;
         let meter_levels = &self.meter_levels;
@@ -93,21 +99,21 @@ impl App {
             // make each meter line as tall as a button.
             ui.spacing_mut().interact_size.y = 16.0;
             ui.spacing_mut().item_spacing.y = 2.0;
-            for (i, &shown) in meter_levels.iter().enumerate() {
-                let label = labels
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| format!("#{}", i + 1));
+            for (i, &fill) in meter_levels.iter().enumerate() {
+                let (glyph, name) = match labels.get(i) {
+                    Some(label) => (label.glyph, label.name.clone()),
+                    None => (None, format!("#{}", i + 1)),
+                };
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(90.0, 6.0), egui::Sense::hover());
                     let painter = ui.painter();
                     painter.rect_filled(rect, 2.0, BG_FAINT);
-                    let fill = meter_fill(shown);
                     let mut lit = rect;
                     lit.set_width(rect.width() * fill);
                     painter.rect_filled(lit, 2.0, meter_color(fill));
-                    ui.label(caption(label, TEXT_MUTED));
+                    icon_slot(ui, glyph.map_or(RowIcon::None, RowIcon::Glyph));
+                    ui.label(caption(name, TEXT_MUTED));
                 });
             }
         });
@@ -582,7 +588,7 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         s: &'static Strings,
-    ) -> Vec<(String, Vec<usize>)> {
+    ) -> Vec<(TrackLabel, Vec<usize>)> {
         section_header(ui, s.audio_tracks_header);
         // Grouped by resolved label, not one checkbox per raw track -- a
         // multi-process app (e.g. Discord with more than one live audio
@@ -591,16 +597,25 @@ impl App {
         // thinks of "Discord" as multiple audio sources. Toggling a group
         // checkbox sets every track in that group together, so they can
         // never end up selected inconsistently.
-        let resolved_labels: Vec<String> = (0..self.export.track_selection.len())
+        let resolved_labels: Vec<TrackLabel> = (0..self.export.track_selection.len())
             .map(|i| match self.last_recording_audio_labels.get(i) {
-                Some(name) => name.clone(),
-                None => format!("{} {}", s.track_label_fallback, i + 1),
+                Some(label) => label.clone(),
+                None => TrackLabel {
+                    glyph: None,
+                    name: format!("{} {}", s.track_label_fallback, i + 1),
+                },
             })
             .collect();
         let track_groups = group_tracks_by_label(&resolved_labels);
         for (label, indices) in &track_groups {
             let mut checked = indices.iter().all(|&i| self.export.track_selection[i]);
-            if ui.checkbox(&mut checked, label.clone()).changed() {
+            let changed = ui
+                .horizontal(|ui| {
+                    icon_slot(ui, label.glyph.map_or(RowIcon::None, RowIcon::Glyph));
+                    ui.checkbox(&mut checked, label.name.as_str()).changed()
+                })
+                .inner;
+            if changed {
                 for &i in indices {
                     self.export.track_selection[i] = checked;
                 }
@@ -613,7 +628,7 @@ impl App {
 
     /// Export clicked: asks where to save, then runs the selected
     /// export (mix, or per-group passthrough/merge) on a worker thread.
-    fn start_export(&mut self, path: &std::path::Path, track_groups: &[(String, Vec<usize>)]) {
+    fn start_export(&mut self, path: &std::path::Path, track_groups: &[(TrackLabel, Vec<usize>)]) {
         let default_dir = default_export_dir(&self.config.output_dir);
         let _ = std::fs::create_dir_all(&default_dir);
         let default_name =
@@ -787,10 +802,16 @@ fn meter_fill(peak: f32) -> f32 {
     ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
 }
 
-/// The level a meter shows: up to a new peak at once, back down slowly, so a
-/// brief peak stays readable at the dashboard's frame rate.
-fn meter_decay(shown: f32, peak: f32) -> f32 {
-    peak.max(shown * 0.85)
+/// How fast a meter falls back, in meter fills (`meter_fill`) a second:
+/// 24 dB/s on its 60 dB scale, about what audio software's peak meters do.
+const METER_FALL_PER_SEC: f32 = 0.4;
+
+/// The fill a meter shows (`meter_fill`), `dt` seconds after it showed
+/// `shown`: up to a new peak at once, back down steadily, so a brief peak
+/// stays readable. By time rather than by frame, so the bar falls at the
+/// same speed however often the dashboard redraws.
+fn meter_decay(shown: f32, fill: f32, dt: f32) -> f32 {
+    fill.max(shown - METER_FALL_PER_SEC * dt).max(0.0)
 }
 
 /// Green normally, amber above -12 dBFS, red above -3 dBFS (close to
@@ -849,8 +870,8 @@ pub(super) fn hotkey_hint(
 /// instead of exposing the process-level split as two separate checkboxes.
 /// Matches by label text, not adjacency, so it stays correct even if track
 /// order in the file doesn't match selection order.
-fn group_tracks_by_label(labels: &[String]) -> Vec<(String, Vec<usize>)> {
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+fn group_tracks_by_label<L: PartialEq + Clone>(labels: &[L]) -> Vec<(L, Vec<usize>)> {
+    let mut groups: Vec<(L, Vec<usize>)> = Vec::new();
     for (i, label) in labels.iter().enumerate() {
         match groups.iter_mut().find(|(l, _)| l == label) {
             Some((_, indices)) => indices.push(i),
@@ -966,9 +987,23 @@ mod meter_tests {
 
     #[test]
     fn meter_rises_at_once_and_falls_slowly() {
-        assert_eq!(meter_decay(0.1, 0.8), 0.8);
-        let after_one_frame = meter_decay(0.8, 0.0);
-        assert!(after_one_frame > 0.6 && after_one_frame < 0.8);
+        assert_eq!(meter_decay(0.1, 0.8, 0.033), 0.8);
+        let after_one_frame = meter_decay(0.8, 0.0, 0.033);
+        assert!(after_one_frame > 0.75 && after_one_frame < 0.8);
+        assert_eq!(meter_decay(0.8, 0.0, 10.0), 0.0, "never below empty");
+    }
+
+    #[test]
+    fn meter_falls_at_the_same_speed_however_often_the_window_redraws() {
+        // 30 frames a second while focused, once a second otherwise: after
+        // the same time, the bar has fallen the same amount.
+        let mut fast = 1.0;
+        for _ in 0..30 {
+            fast = meter_decay(fast, 0.0, 1.0 / 30.0);
+        }
+        let slow = meter_decay(1.0, 0.0, 1.0);
+        assert!((fast - slow).abs() < 1e-4, "{fast} vs {slow}");
+        assert!(slow > 0.0 && slow < 1.0);
     }
 
     #[test]
@@ -1079,6 +1114,6 @@ mod group_tracks_by_label_tests {
 
     #[test]
     fn empty_input_produces_no_groups() {
-        assert!(group_tracks_by_label(&[]).is_empty());
+        assert!(group_tracks_by_label::<String>(&[]).is_empty());
     }
 }

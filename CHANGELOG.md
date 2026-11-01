@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The audio level meters move smoothly while recording. They used to show only the sound of the last hundredth of a second before each redraw, so they flickered and missed louder moments, and fell at whatever speed the window happened to redraw. They now show the loudest sound since the last redraw and fall back at a steady pace.
+- Icons and names line up in the 🔊 Audio list, the level meters, the export track list and the capture source list. 🔊 and 🎙 are different widths, so Speakers and Microphone started at different places, and apps and displays were laid out differently again.
+
 ## [v0.5.123] - 2026-11-01
 
 ### Fixed

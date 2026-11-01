@@ -119,7 +119,7 @@ pub struct App {
     /// device disconnected mid-recording, producing fewer tracks than were
     /// selected) falls back to a generic "Track N" label for the unlabeled
     /// tail rather than panicking or misattributing a name.
-    last_recording_audio_labels: Vec<String>,
+    last_recording_audio_labels: Vec<actions::TrackLabel>,
     /// App name for the last finished manual recording (same derivation as
     /// the recording's own filename, via `session::app_name_from_exe`) --
     /// used to pre-fill the export Save dialog's default filename. Stored at
