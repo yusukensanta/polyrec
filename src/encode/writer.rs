@@ -2,7 +2,7 @@ use crate::capture::frame_pool::FrameBuf;
 use crate::capture::frame_rate::highest_encodable_fps;
 use crate::capture::video::scale_bgra;
 use crate::config::Codec;
-use crate::encode::cfr::CfrTimeline;
+use crate::encode::cfr::{CfrStats, CfrTimeline};
 use crate::encode::gpu::{GpuInput, TextureReadback};
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
@@ -568,6 +568,11 @@ impl RecordingWriter {
                 .WriteSample(stream_idx, &sample)
                 .encode_ctx(format_args!("WriteSample audio[{track_idx}]"))
         }
+    }
+
+    /// How steady the video has been so far -- see `CfrStats`.
+    pub(crate) fn video_stats(&self) -> CfrStats {
+        self.timeline.borrow().stats()
     }
 
     pub fn finalize(self) -> Result<PathBuf, AppError> {

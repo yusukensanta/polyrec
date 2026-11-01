@@ -69,6 +69,7 @@ pub fn spawn_recording_actor(
             }
         }
 
+        tracing::info!("recorded video: {}", writer.video_stats());
         let finished_temp_path = writer.finalize()?;
         let final_path =
             reserve_finished_recording_path(&naming, &app_name, &output_dir).encode_ctx(

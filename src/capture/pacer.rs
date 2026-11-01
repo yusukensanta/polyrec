@@ -41,6 +41,22 @@ pub(crate) struct FramePacer<F> {
     held: Option<F>,
     /// When a frame was last recorded or repeated, or capture started.
     idle_since: Duration,
+    stats: PacerStats,
+}
+
+/// What a `FramePacer` has done with the frames Windows handed out.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PacerStats {
+    /// Frames Windows handed out.
+    pub delivered: u64,
+    /// Frames recorded.
+    pub recorded: u64,
+    /// Held frames a newer one replaced before their slot came -- on a
+    /// display faster than the fps, most of its frames.
+    pub replaced: u64,
+    /// The newest frame sent again, nothing new having come for
+    /// `STILL_FRAME_REPEAT`.
+    pub repeats: u64,
 }
 
 impl<F> FramePacer<F> {
@@ -54,7 +70,12 @@ impl<F> FramePacer<F> {
             fps,
             held: None,
             idle_since: started,
+            stats: PacerStats::default(),
         }
+    }
+
+    pub(crate) fn stats(&self) -> PacerStats {
+        self.stats
     }
 
     /// Follows a changed fps (see `LiveFps`).
@@ -67,12 +88,18 @@ impl<F> FramePacer<F> {
 
     /// A new frame was captured at `now`.
     pub(crate) fn on_frame(&mut self, frame: F, now: Duration, paused: bool) -> Step<F> {
+        self.stats.delivered += 1;
         if paused || !self.limiter.admit(now) {
-            self.held = Some(frame);
+            if self.held.replace(frame).is_some() {
+                self.stats.replaced += 1;
+            }
             return Step::Wait;
         }
-        self.held = None;
+        if self.held.take().is_some() {
+            self.stats.replaced += 1;
+        }
         self.idle_since = now;
+        self.stats.recorded += 1;
         Step::Record(frame, now)
     }
 
@@ -86,6 +113,7 @@ impl<F> FramePacer<F> {
                 return Step::Wait;
             }
             self.idle_since = now;
+            self.stats.recorded += 1;
             return self
                 .held
                 .take()
@@ -93,6 +121,7 @@ impl<F> FramePacer<F> {
         }
         if now.saturating_sub(self.idle_since) >= STILL_FRAME_REPEAT && self.limiter.admit(now) {
             self.idle_since = now;
+            self.stats.repeats += 1;
             return Step::Repeat(now);
         }
         Step::Wait
@@ -208,6 +237,25 @@ mod tests {
         assert_eq!(pacer.on_frame("c", ms(10), false), Step::Wait);
         assert_eq!(pacer.on_idle(ms(16), false), Step::Wait);
         assert_eq!(pacer.on_idle(ms(17), false), Step::Record("c", ms(17)));
+    }
+
+    #[test]
+    fn stats_count_what_became_of_each_frame() {
+        let mut pacer = FramePacer::new(60, ms(0));
+        pacer.on_frame("a", ms(0), false);
+        pacer.on_frame("b", ms(3), false); // held
+        pacer.on_frame("c", ms(6), false); // replaces b
+        pacer.on_idle(ms(9), false); // records c
+        pacer.on_idle(ms(259), false); // repeats c
+        assert_eq!(
+            pacer.stats(),
+            PacerStats {
+                delivered: 3,
+                recorded: 2,
+                replaced: 1,
+                repeats: 1,
+            }
+        );
     }
 
     #[test]

@@ -19,6 +19,37 @@ pub(crate) struct CfrTimeline {
     grid: FrameGrid,
     /// The first slot no frame has taken yet.
     next: u64,
+    stats: CfrStats,
+}
+
+/// What a `CfrTimeline` has placed so far: how steady the video's source
+/// was. Repeats are slots the source gave no new picture for -- a still
+/// window, or a frame the game (or the capture) missed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CfrStats {
+    /// Slots in the video so far.
+    pub slots: u64,
+    /// Slots before the first frame, filled with it.
+    pub lead_in: u64,
+    /// Slots after the first frame no frame took, repeating the one before.
+    pub repeats: u64,
+    /// Frames dropped as too late for any slot (see `CfrTimeline::place`).
+    pub dropped: u64,
+}
+
+impl std::fmt::Display for CfrStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pct = |n: u64| 100.0 * n as f64 / self.slots.max(1) as f64;
+        write!(
+            f,
+            "{} frames, {} ({:.2}%) repeating the one before, {} lead-in, {} dropped",
+            self.slots,
+            self.repeats,
+            pct(self.repeats),
+            self.lead_in,
+            self.dropped
+        )
+    }
 }
 
 /// Where `CfrTimeline::place` puts a frame.
@@ -36,7 +67,12 @@ impl CfrTimeline {
         Self {
             grid: FrameGrid::new(fps),
             next: 0,
+            stats: CfrStats::default(),
         }
+    }
+
+    pub(crate) fn stats(&self) -> CfrStats {
+        self.stats
     }
 
     pub(crate) fn grid(&self) -> FrameGrid {
@@ -52,11 +88,18 @@ impl CfrTimeline {
     pub(crate) fn place(&mut self, pts: Duration) -> Option<Placement> {
         let nearest = self.grid.slot(pts);
         if nearest + 1 < self.next {
+            self.stats.dropped += 1;
             return None;
         }
         let slot = nearest.max(self.next);
         let fill = self.next..slot;
+        if self.next == 0 {
+            self.stats.lead_in = slot;
+        } else {
+            self.stats.repeats += slot - self.next;
+        }
         self.next = slot + 1;
+        self.stats.slots = self.next;
         Some(Placement { fill, slot })
     }
 }
@@ -116,6 +159,24 @@ mod tests {
         assert_eq!(timeline.place(ms(1)), at(1..1, 1));
         assert_eq!(timeline.place(ms(2)), None);
         assert_eq!(timeline.place(ms(33)), at(2..2, 2));
+    }
+
+    #[test]
+    fn stats_count_the_slots_no_frame_took() {
+        let mut timeline = CfrTimeline::new(60);
+        timeline.place(ms(400)); // slots 0-23 lead in, the frame in 24
+        timeline.place(ms(450)); // 25 and 26 repeat, the frame in 27
+        timeline.place(ms(451)); // a slot late, in 28
+        timeline.place(ms(452)); // dropped
+        assert_eq!(
+            timeline.stats(),
+            CfrStats {
+                slots: 29,
+                lead_in: 24,
+                repeats: 2,
+                dropped: 1,
+            }
+        );
     }
 
     #[test]
