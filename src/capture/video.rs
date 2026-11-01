@@ -704,6 +704,14 @@ pub async fn run_video_capture(
         }
     }
 
+    let stats = pacer.stats();
+    tracing::info!(
+        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats",
+        stats.delivered,
+        stats.recorded,
+        stats.replaced,
+        stats.repeats
+    );
     if gone != Some(SourceGone::Failed) {
         output.flush(&res, &tx, sizes).await?;
     }
