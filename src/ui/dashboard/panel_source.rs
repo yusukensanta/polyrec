@@ -3,8 +3,9 @@ use super::theme::{
     BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, TEXT_BODY, TEXT_MUTED,
     TEXT_PRIMARY,
 };
-use super::widgets::{caption, section_header};
+use super::widgets::{RowIcon, caption, icon_slot, section_header};
 use crate::i18n::Strings;
+use crate::sources::MONITOR_GLYPH;
 use eframe::egui;
 
 impl App {
@@ -110,12 +111,28 @@ impl App {
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
-                                        if let Some(tex) = self.source_icon_textures.get(&i) {
-                                            ui.image((tex.id(), egui::vec2(16.0, 16.0)));
-                                        }
+                                        // A display's title starts with its
+                                        // glyph; it goes in the icon column
+                                        // instead, lined up with windows'.
+                                        let (icon, title) =
+                                            match source.window_title.strip_prefix(MONITOR_GLYPH) {
+                                                Some(title) => (
+                                                    RowIcon::Glyph(MONITOR_GLYPH),
+                                                    title.trim_start(),
+                                                ),
+                                                None => (
+                                                    self.source_icon_textures
+                                                        .get(&i)
+                                                        .map_or(RowIcon::None, |tex| {
+                                                            RowIcon::Image(tex.id())
+                                                        }),
+                                                    source.window_title.as_str(),
+                                                ),
+                                            };
+                                        icon_slot(ui, icon);
                                         ui.vertical(|ui| {
                                             ui.label(
-                                                egui::RichText::new(&source.window_title)
+                                                egui::RichText::new(title)
                                                     .size(TEXT_BODY)
                                                     .strong()
                                                     .color(TEXT_PRIMARY),

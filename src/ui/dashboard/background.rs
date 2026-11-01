@@ -296,7 +296,7 @@ fn needs_ui_while_minimized(minimized: bool, wanted: [bool; 2], up: [bool; 2]) -
 fn lost_sources_message(
     s: &Strings,
     lost: &crate::capture::LostSources,
-    labels: &[String],
+    labels: &[impl std::fmt::Display],
 ) -> Option<String> {
     let mut parts = Vec::new();
     if lost.video {
@@ -309,8 +309,7 @@ fn lost_sources_message(
             .map(|track| {
                 labels
                     .get(track.0 as usize)
-                    .cloned()
-                    .unwrap_or_else(|| format!("#{}", track.0 + 1))
+                    .map_or_else(|| format!("#{}", track.0 + 1), ToString::to_string)
             })
             .collect();
         parts.push(

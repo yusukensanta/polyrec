@@ -166,7 +166,6 @@ pub fn spawn_audio_pump(
         }
         tracing::warn!("audio track {track:?} lost its source; the rest of it is silence");
         ctrl.audio_source_lost(track);
-        level.record(&[]);
         while !ctrl.is_stopped() {
             if !ctrl.is_paused()
                 && let Some(silence) = coverage.silence_due(ctrl.clock.elapsed())

@@ -224,18 +224,44 @@ fn audio_device_ids_changed(old: &[AudioDevice], new: &[AudioDevice]) -> bool {
 /// exactly; emitting one label per source regardless of process count would
 /// desync every label after the first multi-process source from its actual
 /// track.
+/// What an audio track of a recording is called on screen: its source's
+/// name and, for a device, its 🔊/🎙 glyph -- kept apart so lists can draw
+/// the glyph in their icon column (`widgets::icon_slot`) and line the names
+/// up; in a sentence (`Display`) the glyph goes in front.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TrackLabel {
+    pub(super) glyph: Option<&'static str>,
+    pub(super) name: String,
+}
+
+impl std::fmt::Display for TrackLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.glyph {
+            Some(glyph) => write!(f, "{glyph} {}", self.name),
+            None => f.write_str(&self.name),
+        }
+    }
+}
+
 fn build_audio_labels<'a>(
     devices: impl IntoIterator<Item = &'a AudioDevice>,
     app_sources: impl IntoIterator<Item = &'a AppAudioSource>,
-) -> Vec<String> {
+) -> Vec<TrackLabel> {
     devices
         .into_iter()
-        .map(|dev| format!("{} {}", audio_device_icon(dev), dev.name))
-        .chain(
-            app_sources.into_iter().flat_map(|src| {
-                std::iter::repeat_n(src.display_name.clone(), src.process_ids.len())
-            }),
-        )
+        .map(|dev| TrackLabel {
+            glyph: Some(audio_device_icon(dev)),
+            name: dev.name.clone(),
+        })
+        .chain(app_sources.into_iter().flat_map(|src| {
+            std::iter::repeat_n(
+                TrackLabel {
+                    glyph: None,
+                    name: src.display_name.clone(),
+                },
+                src.process_ids.len(),
+            )
+        }))
         .collect()
 }
 
@@ -748,7 +774,23 @@ mod tests {
     #[test]
     fn build_audio_labels_orders_devices_before_app_sources() {
         let labels = build_audio_labels(&[mic()], &[app_source("Game")]);
-        assert_eq!(labels, vec!["🎙 Mic".to_string(), "Game".to_string()]);
+        assert_eq!(
+            labels,
+            vec![
+                TrackLabel {
+                    glyph: Some("🎙"),
+                    name: "Mic".into()
+                },
+                TrackLabel {
+                    glyph: None,
+                    name: "Game".into()
+                },
+            ]
+        );
+        // The glyph is drawn in the icon column, not as part of the name;
+        // in a sentence (a notice) it goes in front.
+        assert_eq!(labels[0].to_string(), "🎙 Mic");
+        assert_eq!(labels[1].to_string(), "Game");
     }
 
     #[test]
@@ -766,13 +808,8 @@ mod tests {
             &[app_source_with_pids("Discord", vec![111, 222, 333])],
         );
         assert_eq!(
-            labels,
-            vec![
-                "🎙 Mic".to_string(),
-                "Discord".to_string(),
-                "Discord".to_string(),
-                "Discord".to_string(),
-            ]
+            labels.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["🎙 Mic", "Discord", "Discord", "Discord"]
         );
     }
 
@@ -789,7 +826,10 @@ mod tests {
                 app_source_with_pids("Live App", vec![42]),
             ],
         );
-        assert_eq!(labels, vec!["🎙 Mic".to_string(), "Live App".to_string()]);
+        assert_eq!(
+            labels.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["🎙 Mic", "Live App"]
+        );
     }
 
     fn window(hwnd: usize, title: &str) -> CaptureSource {

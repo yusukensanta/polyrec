@@ -17,6 +17,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, Owned};
 use windows::core::{PCWSTR, PWSTR};
 
+/// What a display's title starts with, standing in for the icon a window's
+/// exe gives it.
+pub const MONITOR_GLYPH: &str = "🖥";
+
 /// Displays first, then windows -- a monitor is the "record everything"
 /// fallback a user reaches for before narrowing down to a specific window,
 /// so it reads better leading the list than buried after however many

@@ -1,7 +1,7 @@
 use super::App;
 use super::theme::{ACCENT_IDLE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_MUTED};
 use super::widgets::{
-    accent_button, audio_device_icon, caption, checkbox_with_volume_slider, section_header,
+    RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, section_header,
 };
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -95,21 +95,16 @@ impl App {
         // borrow of `self.audio_devices` here would conflict
         // with (same reasoning as the Applications loop's
         // `app_audio_sources.clone()` below).
-        let device_rows: Vec<(String, String)> = self
+        let device_rows: Vec<(&'static str, String, String)> = self
             .audio_devices
             .iter()
-            .map(|dev| {
-                (
-                    format!("{} {}", audio_device_icon(dev), dev.name),
-                    dev.id.clone(),
-                )
-            })
+            .map(|dev| (audio_device_icon(dev), dev.name.clone(), dev.id.clone()))
             .collect();
-        for (i, (label, dev_id)) in device_rows.into_iter().enumerate() {
+        for (i, (glyph, label, dev_id)) in device_rows.into_iter().enumerate() {
             let was_checked = self.selected_audio[i];
             checkbox_with_volume_slider(
                 ui,
-                None,
+                RowIcon::Glyph(glyph),
                 &mut self.config,
                 &mut self.error_message,
                 s.config_save_failed_prefix,
@@ -157,7 +152,9 @@ impl App {
             let was_checked = self.selected_app_audio[i];
             checkbox_with_volume_slider(
                 ui,
-                self.app_audio_icon_textures.get(&i).map(|tex| tex.id()),
+                self.app_audio_icon_textures
+                    .get(&i)
+                    .map_or(RowIcon::None, |tex| RowIcon::Image(tex.id())),
                 &mut self.config,
                 &mut self.error_message,
                 s.config_save_failed_prefix,

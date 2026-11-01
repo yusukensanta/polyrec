@@ -79,10 +79,47 @@ pub(super) fn audio_device_icon(dev: &AudioDevice) -> &'static str {
     if dev.is_loopback { "🔊" } else { "🎙" }
 }
 
-/// Renders an (optional icon +) checkbox row, then -- if checked -- an
-/// indented 0-100% volume slider on the row underneath, reading/writing
+/// Size of the icon column at the start of a source, device or track row.
+const ICON_SLOT: egui::Vec2 = egui::vec2(16.0, 16.0);
+
+/// What goes in a row's icon column (`icon_slot`).
+#[derive(Clone, Copy)]
+pub(super) enum RowIcon<'a> {
+    /// Nothing; the column stays, so the name still lines up.
+    None,
+    /// A picture, e.g. an app's own icon.
+    Image(egui::TextureId),
+    /// A symbol, e.g. 🔊 for speakers.
+    Glyph(&'a str),
+}
+
+/// The icon column at the start of a row: the same width whatever `icon` is,
+/// or with none, so the names after it line up. A glyph written in front of
+/// the name instead started each name wherever that glyph ended -- 🔊 and 🎙
+/// aren't the same width.
+pub(super) fn icon_slot(ui: &mut egui::Ui, icon: RowIcon<'_>) {
+    let (rect, _) = ui.allocate_exact_size(ICON_SLOT, egui::Sense::hover());
+    match icon {
+        RowIcon::None => {}
+        RowIcon::Image(texture) => {
+            egui::Image::new((texture, ICON_SLOT)).paint_at(ui, rect);
+        }
+        RowIcon::Glyph(glyph) => {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(TEXT_BODY),
+                ui.visuals().text_color(),
+            );
+        }
+    }
+}
+
+/// Renders an icon + checkbox row, then -- if checked -- a 0-100% volume
+/// slider under the checkbox, reading/writing
 /// `Config::audio_device_gain` via `gain_key`. Shared by the AUDIO/SYSTEM
-/// device list (no icon) and the APPLICATIONS list (app icon) -- same
+/// device list (🔊/🎙 glyph) and the APPLICATIONS list (app icon) -- same
 /// interaction and persistence pattern, different backing data (a WASAPI
 /// endpoint's stable id vs. `Config::app_audio_gain_key`'s `"app:"`-prefixed
 /// exe name).
@@ -98,7 +135,7 @@ pub(super) fn audio_device_icon(dev: &AudioDevice) -> &'static str {
 #[allow(clippy::too_many_arguments)] // icon + the config-save trio + the per-row identity trio are each independent, not a natural single struct
 pub(super) fn checkbox_with_volume_slider(
     ui: &mut egui::Ui,
-    icon: Option<egui::TextureId>,
+    icon: RowIcon<'_>,
     config: &mut Config,
     error_message: &mut Option<String>,
     config_save_failed_prefix: &str,
@@ -108,9 +145,7 @@ pub(super) fn checkbox_with_volume_slider(
     checkbox_tooltip: Option<&str>,
 ) {
     ui.horizontal(|ui| {
-        if let Some(tex_id) = icon {
-            ui.image((tex_id, egui::vec2(16.0, 16.0)));
-        }
+        icon_slot(ui, icon);
         let response = ui.checkbox(checked, label);
         if let Some(tooltip) = checkbox_tooltip {
             response.on_hover_text(tooltip);
@@ -121,7 +156,8 @@ pub(super) fn checkbox_with_volume_slider(
     if *checked {
         let mut gain_percent = (config.audio_gain(gain_key) * 100.0).round() as i32;
         ui.horizontal(|ui| {
-            ui.add_space(20.0);
+            // Under the checkbox, past the icon column.
+            ui.add_space(ICON_SLOT.x + ui.spacing().item_spacing.x);
             let response = ui.add(
                 egui::Slider::new(
                     &mut gain_percent,
@@ -183,5 +219,33 @@ mod free_space_display_tests {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
         // 2.5 GB exactly: 2.5 * 1024^3 = 2684354560, an exact integer.
         assert_eq!(format_bytes(2_684_354_560), "2.5 GB");
+    }
+}
+
+#[cfg(test)]
+mod icon_column_tests {
+    use super::*;
+
+    #[test]
+    fn names_line_up_whatever_icon_a_row_has() {
+        // 🔊 and 🎙 are different widths: written in front of the name, they
+        // started Speakers and Microphone at different places.
+        let ctx = egui::Context::default();
+        let mut starts = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for icon in [
+                RowIcon::Glyph("🔊"),
+                RowIcon::Glyph("🎙"),
+                RowIcon::Image(egui::TextureId::User(1)),
+                RowIcon::None,
+            ] {
+                ui.horizontal(|ui| {
+                    icon_slot(ui, icon);
+                    starts.push(ui.label("name").rect.min.x);
+                });
+            }
+        });
+        output.textures_delta.clear();
+        assert!(starts.windows(2).all(|w| w[0] == w[1]), "{starts:?}");
     }
 }
