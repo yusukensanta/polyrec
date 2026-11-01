@@ -28,7 +28,7 @@ use windows::core::HSTRING;
 use windows::core::implement;
 use windows::core::{GUID, Interface};
 
-const AUDIO_BITRATE_BPS: u32 = 192_000;
+pub(crate) const AUDIO_BITRATE_BPS: u32 = 192_000;
 
 /// The longest stretch of recording time between keyframes -- see
 /// `KeyframeSchedule`.

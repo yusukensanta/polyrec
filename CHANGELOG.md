@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The free-space line also says about how long that space lasts at the current quality, before and during a recording. It turns amber below 10 minutes, and while recording a message says so once, so a recording isn't cut short by a full drive without warning.
+- Ten seconds into a recording, PolyRec says on screen if a microphone has given no sound at all since the recording started — usually a muted mic — while there's still time to fix it.
+
 ## [v0.5.125] - 2026-11-01
 
 ### Added

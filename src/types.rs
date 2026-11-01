@@ -104,29 +104,43 @@ pub struct AudioSamples {
     pub channels: u16,
 }
 
-/// The loudest an audio track has been since the dashboard last looked, as
-/// linear amplitude (0.0 to 1.0): raised chunk by chunk by the track's pump,
-/// read and reset by the dashboard's level meter once a frame. Clones share
-/// one value.
-///
-/// Held rather than overwritten: a chunk is ~10 ms and a frame 33 ms or more,
-/// so showing only the latest chunk skipped most of the sound and made the
-/// meter flicker.
+/// How loud an audio track has been, as linear amplitude (0.0 to 1.0):
+/// raised chunk by chunk by the track's pump, read by the dashboard. Clones
+/// share one value.
 #[derive(Debug, Clone, Default)]
-pub struct AudioLevel(Arc<AtomicU32>);
+pub struct AudioLevel(Arc<Levels>);
+
+#[derive(Debug, Default)]
+pub struct Levels {
+    /// The loudest since the level meter last looked (`take_peak`). Held
+    /// rather than overwritten: a chunk is ~10 ms and a frame 33 ms or more,
+    /// so showing only the latest chunk skipped most of the sound and made
+    /// the meter flicker.
+    recent: AtomicU32,
+    /// The loudest since the track started (`loudest`).
+    loudest: AtomicU32,
+}
 
 impl AudioLevel {
     pub fn record(&self, samples: &[f32]) {
         let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
         // Non-negative floats order the same way as their bits, so an
         // integer max keeps the louder of two peaks.
-        self.0.fetch_max(peak.min(1.0).to_bits(), Ordering::Relaxed);
+        let bits = peak.min(1.0).to_bits();
+        self.0.recent.fetch_max(bits, Ordering::Relaxed);
+        self.0.loudest.fetch_max(bits, Ordering::Relaxed);
     }
 
     /// The loudest since the last call, starting the next interval from
     /// silence.
     pub fn take_peak(&self) -> f32 {
-        f32::from_bits(self.0.swap(0, Ordering::Relaxed))
+        f32::from_bits(self.0.recent.swap(0, Ordering::Relaxed))
+    }
+
+    /// The loudest since the track started -- 0.0 for a track that has had
+    /// nothing but digital silence, like a muted microphone.
+    pub fn loudest(&self) -> f32 {
+        f32::from_bits(self.0.loudest.load(Ordering::Relaxed))
     }
 }
 
@@ -196,6 +210,18 @@ mod tests {
         assert_eq!(level.take_peak(), 0.0);
         level.record(&[-3.0]);
         assert_eq!(level.take_peak(), 1.0, "clamped to full scale");
+    }
+
+    #[test]
+    fn audio_level_remembers_the_loudest_since_the_start_whatever_the_meter_reads() {
+        let level = AudioLevel::default();
+        assert_eq!(level.loudest(), 0.0);
+        level.record(&[0.0, 0.0]);
+        assert_eq!(level.loudest(), 0.0, "digital silence stays silent");
+        level.record(&[0.2]);
+        level.take_peak();
+        level.record(&[0.05]);
+        assert_eq!(level.loudest(), 0.2);
     }
 
     #[test]

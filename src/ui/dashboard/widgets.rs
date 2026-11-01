@@ -76,8 +76,15 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
 /// device list, and by `actions::start_recording_with_source` to build the
 /// export dialog's per-track labels at record-start time.
 pub(super) fn audio_device_icon(dev: &AudioDevice) -> &'static str {
-    if dev.is_loopback { "🔊" } else { "🎙" }
+    if dev.is_loopback {
+        SPEAKERS_GLYPH
+    } else {
+        MICROPHONE_GLYPH
+    }
 }
+
+pub(super) const SPEAKERS_GLYPH: &str = "🔊";
+pub(super) const MICROPHONE_GLYPH: &str = "🎙";
 
 /// Size of the icon column at the start of a source, device or track row.
 const ICON_SLOT: egui::Vec2 = egui::vec2(16.0, 16.0);

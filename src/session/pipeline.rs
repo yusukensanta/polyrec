@@ -20,7 +20,7 @@ use crate::capture::video::{
 use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_video_pump};
 use crate::encode::gpu::{GpuFrames, GpuInput};
-use crate::encode::writer::{video_bitrate_bps, video_encoder_accepts};
+use crate::encode::writer::{AUDIO_BITRATE_BPS, video_bitrate_bps, video_encoder_accepts};
 use crate::encode::{EncoderParams, RecordingCommand};
 use crate::error::AppError;
 use crate::types::{AppAudioSource, AudioDevice, AudioLevel, CaptureKind, CaptureSource, TrackId};
@@ -209,6 +209,31 @@ pub fn probe_fps_support(source: &CaptureSource, encode: &EncodeSettings) -> Fps
         output,
         encodable,
     }
+}
+
+/// About how many bytes a second a recording of `source` with `encode` and
+/// `audio_tracks` audio tracks writes: the bitrates it'll be encoded at. An
+/// upper bound more than a guess -- a still picture compresses below its
+/// bitrate. Asks Windows for the source's size, so run it off the UI thread.
+pub fn estimated_bytes_per_sec(
+    source: &CaptureSource,
+    encode: &EncodeSettings,
+    audio_tracks: usize,
+) -> u64 {
+    let target = CaptureTarget::from_raw(source.kind, source.hwnd);
+    let (_, output) = resolve_sizes(source, target, encode);
+    let fps = effective_fps(encode.fps, display_refresh_hz(target));
+    recording_bytes_per_sec(encode, output, fps, audio_tracks)
+}
+
+fn recording_bytes_per_sec(
+    encode: &EncodeSettings,
+    output: (u32, u32),
+    fps: u32,
+    audio_tracks: usize,
+) -> u64 {
+    let audio_bps = audio_tracks as u64 * u64::from(AUDIO_BITRATE_BPS);
+    (u64::from(bitrate_bps(encode, output, fps)) + audio_bps) / 8
 }
 
 fn bitrate_bps(encode: &EncodeSettings, (width, height): (u32, u32), fps: u32) -> u32 {
@@ -598,6 +623,28 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_recording_writes_its_video_bitrate_plus_each_audio_tracks() {
+        let auto = EncodeSettings {
+            bitrate_mode: BitrateMode::Auto,
+            ..EncodeSettings::default()
+        };
+        // 1920x1080 at 60 fps, 0.1 bits a pixel: 12,441,600 bit/s, plus
+        // two 192 kbit/s audio tracks.
+        assert_eq!(
+            recording_bytes_per_sec(&auto, (1920, 1080), 60, 2),
+            (12_441_600 + 2 * 192_000) / 8
+        );
+        let manual = EncodeSettings {
+            bitrate_mode: BitrateMode::Manual(20_000_000),
+            ..EncodeSettings::default()
+        };
+        assert_eq!(
+            recording_bytes_per_sec(&manual, (3840, 2160), 120, 0),
+            20_000_000 / 8
+        );
+    }
+
     use super::*;
 
     fn app_source(process_ids: Vec<u32>) -> AppAudioSource {
