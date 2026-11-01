@@ -39,23 +39,18 @@ pub(super) struct Palette {
     pub(super) hover_tint: egui::Color32,
     pub(super) text_primary: egui::Color32,
     pub(super) text_muted: egui::Color32,
-    /// The main actions' fill (REC, RESUME, Export) and a selected toggle's;
+    /// The main actions' fill (RESUME, Export) and a selected toggle's;
     /// `on_accent` is their text.
     pub(super) accent: egui::Color32,
     pub(super) on_accent: egui::Color32,
     /// Indigo as text, e.g. PAUSED.
     pub(super) accent_text: egui::Color32,
-    /// REC's record dot, on its indigo fill.
-    pub(super) rec_dot: egui::Color32,
     /// Recording live -- the dot, RECORDING -- and errors.
     pub(super) danger: egui::Color32,
-    /// STOP's fill, and its text.
+    /// REC's and STOP's fill (REC's outline while it can't be pressed),
+    /// and their text.
     pub(super) danger_fill: egui::Color32,
     pub(super) on_danger: egui::Color32,
-    /// REC's fill and text while it can't be pressed: flat and grey, where
-    /// egui's half-transparent fade made its indigo look hazy.
-    pub(super) disabled_fill: egui::Color32,
-    pub(super) disabled_text: egui::Color32,
     /// Warnings: a notice's edge, and warning lines' text; a notice's fill.
     pub(super) warn: egui::Color32,
     pub(super) warn_bg: egui::Color32,
@@ -96,12 +91,9 @@ impl Palette {
         accent: rgb(0x5b, 0x61, 0xe6),
         on_accent: rgb(0xff, 0xff, 0xff),
         accent_text: rgb(0x9e, 0xa3, 0xff),
-        rec_dot: rgb(0xff, 0x8a, 0x8a),
         danger: rgb(0xff, 0x6b, 0x6b),
         danger_fill: rgb(0xc9, 0x34, 0x3a),
         on_danger: rgb(0xff, 0xff, 0xff),
-        disabled_fill: rgb(0x26, 0x28, 0x38),
-        disabled_text: rgb(0x8a, 0x8d, 0xa3),
         warn: rgb(0xe8, 0xa2, 0x3c),
         warn_bg: rgb(0x2a, 0x22, 0x19),
         success: rgb(0x5d, 0xd3, 0x9e),
@@ -131,12 +123,9 @@ impl Palette {
         accent: rgb(0x4b, 0x50, 0xd6),
         on_accent: rgb(0xff, 0xff, 0xff),
         accent_text: rgb(0x3d, 0x42, 0xc4),
-        rec_dot: rgb(0xff, 0x8a, 0x8a),
         danger: rgb(0xc6, 0x2f, 0x35),
         danger_fill: rgb(0xc9, 0x34, 0x3a),
         on_danger: rgb(0xff, 0xff, 0xff),
-        disabled_fill: rgb(0xe4, 0xe5, 0xee),
-        disabled_text: rgb(0x77, 0x7a, 0x8f),
         warn: rgb(0x9a, 0x5b, 0x00),
         warn_bg: rgb(0xff, 0xf4, 0xe0),
         success: rgb(0x1f, 0x7a, 0x45),
@@ -168,12 +157,9 @@ impl Palette {
             accent,
             on_accent,
             accent_text,
-            rec_dot,
             danger,
             danger_fill,
             on_danger,
-            disabled_fill,
-            disabled_text,
             warn,
             warn_bg,
             success,
@@ -201,12 +187,9 @@ impl Palette {
             accent: f(accent),
             on_accent: f(on_accent),
             accent_text: f(accent_text),
-            rec_dot: f(rec_dot),
             danger: f(danger),
             danger_fill: f(danger_fill),
             on_danger: f(on_danger),
-            disabled_fill: f(disabled_fill),
-            disabled_text: f(disabled_text),
             warn: f(warn),
             warn_bg: f(warn_bg),
             success: f(success),
@@ -261,12 +244,9 @@ impl Palette {
             accent: c.highlight,
             on_accent: c.highlight_text,
             accent_text: c.hotlight,
-            rec_dot: Self::DARK.rec_dot,
             danger: c.window_text,
             danger_fill: c.highlight,
             on_danger: c.highlight_text,
-            disabled_fill: c.window,
-            disabled_text: c.window_text,
             warn: c.window_text,
             warn_bg: c.window,
             success: c.window_text,
@@ -631,6 +611,16 @@ pub(super) fn setup_theme(ctx: &egui::Context) {
     apply_text_scale(ctx, 1.0);
 }
 
+/// `TEXT_SCALE` is one for the whole process, and tests run in parallel:
+/// those that set it (`apply_text_scale`, `setup_theme`) take turns, or
+/// one's 1.5 lands in the middle of another's 1.0.
+#[cfg(test)]
+pub(super) fn text_scale_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// egui's visuals in `p`'s colours. Every button and checkbox is outlined
 /// quietly in `outline` at rest, on `bg_button`, and in `outline_strong`
 /// under the pointer; text takes each widget state's colour rather than one
@@ -711,15 +701,6 @@ mod type_tests {
 
     fn style_size(ctx: &egui::Context, style: egui::TextStyle) -> f32 {
         ctx.global_style().text_styles[&style].size
-    }
-
-    /// `TEXT_SCALE` is one for the whole process, and tests run in
-    /// parallel: those that set it take turns, or one's 1.5 lands in the
-    /// middle of another's 1.0.
-    fn text_scale_turn() -> std::sync::MutexGuard<'static, ()> {
-        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        TURN.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -882,7 +863,7 @@ mod palette_tests {
     }
 
     /// A conversion for the monitor (`color_profile`) has to reach every
-    /// colour, REC's dot included, or that one shows unconverted.
+    /// colour, or that one shows unconverted.
     #[test]
     fn a_conversion_reaches_every_colour() {
         let magenta = egui::Color32::from_rgb(255, 0, 255);
@@ -890,7 +871,6 @@ mod palette_tests {
             let converted = p.through(|_| magenta);
             assert!(converted.colours().iter().all(|&c| c == magenta));
             assert_eq!(converted.dark, p.dark);
-            assert_eq!(converted.rec_dot, magenta);
         }
     }
 
