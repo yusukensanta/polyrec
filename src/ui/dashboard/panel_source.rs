@@ -1,9 +1,6 @@
 use super::App;
 use super::icons::Icon;
-use super::theme::{
-    BG_CARD, BG_HOVER, BG_SELECTED, BORDER, BORDER_HOVER, BORDER_SEL, SPACE_GROUP, SPACE_NORMAL,
-    TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY, text_px,
-};
+use super::theme::{SPACE_GROUP, SPACE_NORMAL, TEXT_BODY, pal, text_px};
 use super::widgets::{RowIcon, caption, icon_slot, section_header};
 use crate::i18n::Strings;
 use crate::sources::MONITOR_GLYPH;
@@ -44,7 +41,7 @@ impl App {
                 ui.add_space(4.0);
 
                 if self.sources.is_empty() {
-                    ui.label(caption(s.no_windows_found, TEXT_MUTED));
+                    ui.label(caption(s.no_windows_found, pal().text_muted));
                 }
 
                 // Filters by index rather than cloning matches -- source_icon_textures
@@ -52,7 +49,7 @@ impl App {
                 // the real (unfiltered) indices need to survive filtering.
                 let filtered_indices = self.filtered_source_indices();
                 if !self.sources.is_empty() && filtered_indices.is_empty() {
-                    ui.label(caption(s.no_matching_windows, TEXT_MUTED));
+                    ui.label(caption(s.no_matching_windows, pal().text_muted));
                 }
 
                 egui::ScrollArea::vertical()
@@ -74,18 +71,18 @@ impl App {
                             let was_hovered =
                                 ui.data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
                             let fill = if selected {
-                                BG_SELECTED
+                                pal().bg_selected
                             } else if was_hovered {
-                                BG_HOVER
+                                pal().bg_hover
                             } else {
-                                BG_CARD
+                                pal().bg_card
                             };
                             let border = if selected {
-                                BORDER_SEL
+                                pal().border_sel
                             } else if was_hovered {
-                                BORDER_HOVER
+                                pal().border_hover
                             } else {
-                                BORDER
+                                pal().border
                             };
 
                             if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -136,10 +133,13 @@ impl App {
                                                 egui::RichText::new(title)
                                                     .size(text_px(TEXT_BODY))
                                                     .strong()
-                                                    .color(TEXT_PRIMARY),
+                                                    .color(pal().text_primary),
                                             );
                                             if !source.exe_name.is_empty() {
-                                                ui.label(caption(&source.exe_name, TEXT_MUTED));
+                                                ui.label(caption(
+                                                    &source.exe_name,
+                                                    pal().text_muted,
+                                                ));
                                             }
                                             if selected
                                                 && !self.session.is_recording()

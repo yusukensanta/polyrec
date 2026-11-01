@@ -2,7 +2,7 @@
 //! view: a red dot (amber while paused) on its taskbar button and on its
 //! tray icon. While a game has focus, those are what's left on screen.
 
-use super::theme::{ACCENT_PAUSE, ACCENT_REC};
+use super::theme::Palette;
 use crate::i18n::Strings;
 use crate::types::SessionState;
 use eframe::egui;
@@ -39,8 +39,8 @@ impl Badge {
     fn color(self) -> Option<egui::Color32> {
         match self {
             Self::None => None,
-            Self::Recording => Some(ACCENT_REC),
-            Self::Paused => Some(ACCENT_PAUSE),
+            Self::Recording => Some(Palette::DARK.accent_rec),
+            Self::Paused => Some(Palette::DARK.accent_pause),
         }
     }
 
@@ -335,7 +335,11 @@ mod tests {
             let badged = tray_icon_with(&icon, Badge::Recording);
             // The dot's middle, a quarter of the way in from the corner.
             let mid = size - size / 4;
-            assert_eq!(at(&badged, mid, mid), rgba(ACCENT_REC), "size {size}");
+            assert_eq!(
+                at(&badged, mid, mid),
+                rgba(Palette::DARK.accent_rec),
+                "size {size}"
+            );
             // The rest of the icon is untouched.
             assert_eq!(at(&badged, 0, 0), BLUE, "size {size}");
             assert_eq!(at(&badged, size - 1, 0), BLUE, "size {size}");
@@ -352,7 +356,7 @@ mod tests {
         assert_eq!(tray_icon_with(&icon, Badge::None), icon);
         assert_eq!(
             at(&tray_icon_with(&icon, Badge::Paused), 12, 12),
-            rgba(ACCENT_PAUSE)
+            rgba(Palette::DARK.accent_pause)
         );
     }
 
@@ -360,7 +364,7 @@ mod tests {
     fn the_overlay_is_just_the_dot_and_idle_has_none() {
         assert_eq!(overlay_icon(Badge::None, 16), None);
         let dot = overlay_icon(Badge::Recording, 16).unwrap();
-        assert_eq!(at(&dot, 8, 8), rgba(ACCENT_REC));
+        assert_eq!(at(&dot, 8, 8), rgba(Palette::DARK.accent_rec));
         assert_eq!(at(&dot, 0, 0)[3], 0, "transparent around it");
     }
 
@@ -380,7 +384,7 @@ mod tests {
     fn an_icon_made_from_pixels_is_that_size() {
         let icon = OwnedIcon::new(&overlay_icon(Badge::Recording, 24).unwrap()).unwrap();
         let back = unsafe { icon_pixels(icon.0, 24) }.unwrap();
-        assert_eq!(at(&back, 12, 12), rgba(ACCENT_REC));
+        assert_eq!(at(&back, 12, 12), rgba(Palette::DARK.accent_rec));
         assert_eq!(at(&back, 0, 0)[3], 0);
     }
 

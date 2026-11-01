@@ -4,7 +4,7 @@
 
 use super::App;
 use super::overlay::{hud_window, keep_on_top_and_out_of_captures, show_viewport_immediate};
-use super::theme::{BG_OVERLAY, TEXT_BODY};
+use super::theme::{Palette, TEXT_BODY};
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
 use crate::types::SessionState;
@@ -124,7 +124,7 @@ impl App {
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::NONE
-                            .fill(BG_OVERLAY)
+                            .fill(Palette::DARK.bg_overlay)
                             .corner_radius(6u8)
                             .inner_margin(egui::Margin::symmetric(12, 7)),
                     )

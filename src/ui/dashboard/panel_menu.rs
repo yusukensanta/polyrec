@@ -4,7 +4,7 @@ use super::widgets::{accent_button, caption};
 use crate::i18n::Strings;
 use eframe::egui;
 
-use super::theme::{ACCENT_PAUSE, ACCENT_SECONDARY, TEXT_MUTED};
+use super::theme::pal;
 
 impl App {
     pub(super) fn render_menu_bar(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
@@ -16,7 +16,10 @@ impl App {
                 // elsewhere — the release CI also checks the git tag against this
                 // same field before publishing, so this label always matches what
                 // update_check compares against.
-                ui.label(caption(concat!("v", env!("CARGO_PKG_VERSION")), TEXT_MUTED));
+                ui.label(caption(
+                    concat!("v", env!("CARGO_PKG_VERSION")),
+                    pal().text_muted,
+                ));
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.overlay_enabled {
@@ -25,7 +28,7 @@ impl App {
                         s.overlay_off
                     };
                     if ui
-                        .add(accent_button(label, ACCENT_SECONDARY))
+                        .add(accent_button(label, pal().accent_secondary))
                         .on_hover_text(s.overlay_toggle_tooltip)
                         .clicked()
                     {
@@ -40,7 +43,7 @@ impl App {
                         s.border_off
                     };
                     if ui
-                        .add(accent_button(border_label, ACCENT_SECONDARY))
+                        .add(accent_button(border_label, pal().accent_secondary))
                         .on_hover_text(s.border_toggle_tooltip)
                         .clicked()
                     {
@@ -55,7 +58,7 @@ impl App {
                         s.close_quits
                     };
                     if ui
-                        .add(accent_button(close_label, ACCENT_SECONDARY))
+                        .add(accent_button(close_label, pal().accent_secondary))
                         .on_hover_text(s.close_toggle_tooltip)
                         .clicked()
                     {
@@ -64,7 +67,10 @@ impl App {
                     }
                     let lang = self.config.lang();
                     if ui
-                        .add(accent_button(lang.toggle_button_label(), ACCENT_SECONDARY))
+                        .add(accent_button(
+                            lang.toggle_button_label(),
+                            pal().accent_secondary,
+                        ))
                         .on_hover_text(s.language_toggle_tooltip)
                         .clicked()
                     {
@@ -80,7 +86,7 @@ impl App {
                             super::icons::icon_button(
                                 super::icons::Icon::Update,
                                 &label,
-                                ACCENT_PAUSE,
+                                pal().accent_pause,
                                 body,
                             ),
                             &label,

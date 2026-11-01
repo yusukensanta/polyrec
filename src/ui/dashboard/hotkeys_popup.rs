@@ -1,5 +1,5 @@
 use super::App;
-use super::theme::{ACCENT_PAUSE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_MUTED, TEXT_PRIMARY};
+use super::theme::{POPUP_WIDTH, pal};
 use super::widgets::{accent_button, caption, section_header};
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
@@ -153,17 +153,20 @@ impl App {
                             .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
                         if has_collision {
                             ui.add_space(8.0);
-                            ui.label(caption(s.hotkey_collision_warning, ACCENT_PAUSE));
+                            ui.label(caption(s.hotkey_collision_warning, pal().accent_pause));
                         }
 
                         if let Some(warning) = &self.hotkey_capture_warning {
                             ui.add_space(8.0);
-                            ui.label(caption(warning, ACCENT_PAUSE));
+                            ui.label(caption(warning, pal().accent_pause));
                         }
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
-                if ui.add(accent_button(s.close_button, TEXT_MUTED)).clicked() {
+                if ui
+                    .add(accent_button(s.close_button, pal().text_muted))
+                    .clicked()
+                {
                     close = true;
                 }
             });
@@ -219,15 +222,22 @@ impl App {
             ui.vertical(|ui| {
                 ui.label(
                     egui::RichText::new(s.hotkey_press_any_key_prompt)
-                        .color(ACCENT_SECONDARY)
+                        .color(pal().accent_secondary)
                         .strong(),
                 );
-                ui.label(caption(s.hotkey_press_esc_to_cancel, TEXT_MUTED));
+                ui.label(caption(s.hotkey_press_esc_to_cancel, pal().text_muted));
             });
         } else {
-            ui.label(egui::RichText::new(&current).strong().color(TEXT_PRIMARY));
+            ui.label(
+                egui::RichText::new(&current)
+                    .strong()
+                    .color(pal().text_primary),
+            );
             if ui
-                .add(accent_button(s.hotkey_change_button, ACCENT_SECONDARY))
+                .add(accent_button(
+                    s.hotkey_change_button,
+                    pal().accent_secondary,
+                ))
                 .on_hover_text(s.hotkey_change_tooltip)
                 .clicked()
             {

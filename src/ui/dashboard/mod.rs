@@ -158,6 +158,9 @@ pub struct App {
     tray: Option<tray::Tray>,
     /// Windows' text size setting, followed while running.
     text_scale: Option<theme::TextScaleWatch>,
+    /// Windows' theme (light, dark, high contrast), accent colour and
+    /// animation setting, followed while running.
+    theme_watch: theme::ThemeWatch,
     /// The window's size and whether it's maximized, saved on exit (like
     /// `last_window_pos`).
     last_window_size: Option<egui::Vec2>,
@@ -330,6 +333,7 @@ impl App {
             toast: None,
             tray,
             text_scale: theme::TextScaleWatch::start(&cc.egui_ctx),
+            theme_watch: theme::ThemeWatch::new(),
             last_window_size: None,
             last_window_maximized: false,
             preview: preview::SourcePreview::default(),
@@ -402,6 +406,7 @@ impl eframe::App for App {
         if let Some(text_scale) = &self.text_scale {
             text_scale.apply(ctx);
         }
+        self.theme_watch.apply(ctx);
         self.run_recording_checks(s);
         self.update_preview(ctx);
         self.request_repaints(ctx);
