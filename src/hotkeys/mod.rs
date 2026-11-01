@@ -6,7 +6,8 @@ use windows::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey,
+    GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS,
+    KEYBDINPUT, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, SendInput,
     UnregisterHotKey, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9,
     VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_D, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_F, VK_F1,
     VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14,
@@ -317,6 +318,36 @@ fn live_modifiers() -> HOT_KEY_MODIFIERS {
     m
 }
 
+/// A key no keyboard has (unassigned), pressed and released right after a
+/// hotkey with modifiers is consumed. AutoHotkey's default "menu mask key",
+/// for the same reason: no app acts on it.
+const MASK_KEY: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+
+/// Whether consuming a hotkey's key, held with `mods`, needs `MASK_KEY`
+/// pressed after it. The modifiers still reach Windows and the focused app;
+/// with the key between them gone, they look pressed alone -- Alt+Shift is
+/// Windows' input-language switch (which pulled a full-screen game out of
+/// focus), a lone Alt opens the window's menu, and Ctrl+Shift can switch the
+/// keyboard layout. Any key pressed in between stops all of that.
+fn needs_mask_key(mods: HOT_KEY_MODIFIERS) -> bool {
+    mods.0 & (MOD_ALT.0 | MOD_CONTROL.0 | MOD_SHIFT.0) != 0
+}
+
+/// `MASK_KEY` pressed, then released.
+fn mask_key_inputs() -> [INPUT; 2] {
+    let key = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: MASK_KEY,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    };
+    [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)]
+}
+
 /// `WH_KEYBOARD_LL` callback -- sees every keystroke system-wide before it
 /// reaches whatever window/app has focus (including exclusive-fullscreen
 /// games), unlike `RegisterHotKey`'s `WM_HOTKEY`, which some games'
@@ -355,6 +386,13 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                         hc.tx.send(binding.event).ok();
                         (hc.wake)();
                         consumed = true;
+                        if needs_mask_key(binding.mods) {
+                            // Queued behind the key being consumed, so it
+                            // comes before the modifiers' release. It passes
+                            // back through this hook, matching nothing.
+                            let inputs = mask_key_inputs();
+                            unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+                        }
                     }
                 }
             });
@@ -449,6 +487,32 @@ fn run_hook_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_consumed_hotkey_with_modifiers_presses_the_mask_key() {
+        // Swallowing the A of Alt+Shift+A left Windows seeing Alt+Shift
+        // pressed alone: its input-language switch, which pulled a
+        // full-screen game out of focus. A lone Alt opens the window menu.
+        assert!(needs_mask_key(MOD_ALT | MOD_SHIFT));
+        assert!(needs_mask_key(MOD_ALT));
+        assert!(needs_mask_key(MOD_CONTROL | MOD_ALT));
+        assert!(needs_mask_key(MOD_CONTROL | MOD_SHIFT));
+        // A bare key (F8) leaves no modifier to be read as pressed alone.
+        assert!(!needs_mask_key(HOT_KEY_MODIFIERS(0)));
+    }
+
+    #[test]
+    fn the_mask_key_is_an_unassigned_key_pressed_then_released() {
+        let [down, up] = mask_key_inputs();
+        for (input, flags) in [(down, KEYBD_EVENT_FLAGS(0)), (up, KEYEVENTF_KEYUP)] {
+            assert_eq!(input.r#type, INPUT_KEYBOARD);
+            let key = unsafe { input.Anonymous.ki };
+            // VK 0xE8 is unassigned: no app acts on it (AutoHotkey's
+            // default "menu mask key" for the same reason).
+            assert_eq!(key.wVk, VIRTUAL_KEY(0xE8));
+            assert_eq!(key.dwFlags, flags);
+        }
+    }
 
     #[test]
     fn parse_base_key_known_keys() {
