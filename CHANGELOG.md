@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.133] - 2026-11-01
+
 ### Fixed
 
 - Starting or stopping a recording by hotkey no longer takes a game in exclusive full-screen (like Fortnite in "Fullscreen" mode) out of focus. The message confirming the hotkey appeared over the game, and any window over a game in exclusive full-screen knocks it out of full-screen, even one that never takes focus, so you had to click back into the game. Over such a game the message, and the overlay if it's on, now show on another monitor, or not at all with only one. Borderless full-screen games are unaffected.
