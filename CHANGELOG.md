@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.132] - 2026-11-01
+
 ### Fixed
 
 - A hotkey with Alt+Shift (like Alt+Shift+A) no longer switches Windows' input language when pressed, which could pull a full-screen game out of focus. PolyRec keeps the hotkey's key from reaching the game, which left Windows seeing Alt+Shift pressed alone, its own language-switch shortcut; a lone Alt likewise opened the game window's menu. PolyRec now presses an unused key in between, as AutoHotkey does.
