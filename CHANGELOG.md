@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.138] - 2026-11-02
+
 ### Changed
 
 - The dashboard's colours now look the same as in a browser on a wide-gamut monitor. PolyRec's colours are sRGB, like the web's; a browser converts them through the monitor's colour profile, but PolyRec sent them to the monitor as they were, so on a monitor with a wider gamut than sRGB (like the Alienware AW2726DM) they came out more saturated. PolyRec now converts them through the profile Windows has for the monitor the dashboard is on, with Windows' own colour engine, and again when the dashboard moves to another monitor. With HDR or "Automatically manage color for apps" on, Windows already does this, and PolyRec leaves the colours to it.
