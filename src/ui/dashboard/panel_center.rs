@@ -607,19 +607,8 @@ impl App {
                 });
             } else {
                 centered_action_row(ui, 130.0, 52.0, |ui| {
-                    let btn = icon_button_two_tone(
-                        Icon::Record,
-                        REC_DOT,
-                        s.rec_button,
-                        pal().on_accent,
-                        text_px(TEXT_BUTTON),
-                    )
-                    .fill(pal().accent)
-                    .stroke(egui::Stroke::new(1.0, pal().accent))
-                    .corner_radius(ROUNDING_PRIMARY_BTN)
-                    .min_size(egui::Vec2::new(130.0, 52.0));
                     let blocked = self.rec_blocked_reason(s);
-                    let rec = add_named(ui, blocked.is_none(), btn, s.rec_button);
+                    let rec = add_rec_button(ui, blocked.is_none(), s);
                     if let Some(reason) = blocked {
                         rec.on_disabled_hover_text(reason);
                     } else if rec.clicked() {
@@ -883,6 +872,28 @@ fn meter_color(fill: f32) -> egui::Color32 {
 /// The red of REC's record dot, on its indigo fill in every theme.
 const REC_DOT: egui::Color32 = egui::Color32::from_rgb(0xff, 0x8a, 0x8a);
 
+/// REC: solid indigo with its red dot, or flat grey when it can't be pressed
+/// (`enabled`; see `Palette::disabled_fill`).
+fn add_rec_button(ui: &mut egui::Ui, enabled: bool, s: &'static Strings) -> egui::Response {
+    let p = pal();
+    let (fill, text, dot) = if enabled {
+        (p.accent, p.on_accent, REC_DOT)
+    } else {
+        (p.disabled_fill, p.disabled_text, p.disabled_text)
+    };
+    let button = icon_button_two_tone(Icon::Record, dot, s.rec_button, text, text_px(TEXT_BUTTON))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, fill))
+        .corner_radius(ROUNDING_PRIMARY_BTN)
+        .min_size(egui::Vec2::new(130.0, 52.0));
+    // Already in its disabled colours: not faded on top of them.
+    ui.scope(|ui| {
+        ui.visuals_mut().disabled_alpha = 1.0;
+        add_named(ui, enabled, button, s.rec_button)
+    })
+    .inner
+}
+
 /// Frames per second the recording has achieved so far, averaged over its
 /// recorded (pause-excluded) time. `None` for the first second, when a
 /// handful of frames over a fraction of a second says little.
@@ -990,6 +1001,43 @@ mod rec_blocked_tests {
             Some(s.output_dir_not_a_folder)
         );
         assert_eq!(why_rec_is_blocked(false, true, None, s), None);
+    }
+
+    /// The fills of every rectangle painted by a pass that adds REC.
+    fn rec_fills(enabled: bool) -> Vec<egui::Color32> {
+        let s = Lang::En.strings();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            add_rec_button(ui, enabled, s);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) => Some(rect.fill),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// egui fades a disabled widget to half opacity, which on REC's solid
+    /// indigo looked hazy, washed over with white -- and REC is disabled
+    /// whenever no source is picked, as it stays for anyone who records
+    /// with the hotkey. Disabled, it's solid, in the disabled colours.
+    #[test]
+    fn a_disabled_rec_is_solid_not_faded() {
+        let fills = rec_fills(false);
+        assert!(fills.contains(&pal().disabled_fill), "{fills:?}");
+        assert!(
+            !fills.contains(&pal().accent.gamma_multiply(0.5)),
+            "{fills:?}"
+        );
+    }
+
+    #[test]
+    fn an_enabled_rec_is_indigo() {
+        assert!(rec_fills(true).contains(&pal().accent));
     }
 }
 
