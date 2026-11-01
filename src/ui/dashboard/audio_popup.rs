@@ -74,10 +74,7 @@ impl App {
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
-                if ui
-                    .add(accent_button(s.close_button, pal().text_muted))
-                    .clicked()
-                {
+                if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
             });
@@ -190,7 +187,7 @@ impl App {
         // A fresh install shows nothing here but this button.
         if !self.add_app.open {
             if ui
-                .add(accent_button(s.add_app_button, pal().accent_secondary))
+                .add(accent_button(s.add_app_button, pal().link))
                 .clicked()
             {
                 self.add_app.open = true;
@@ -232,7 +229,7 @@ impl App {
             let response = ui
                 .checkbox(
                     &mut self.app_audio_only,
-                    egui::RichText::new(s.app_audio_only_label).color(pal().accent_secondary),
+                    egui::RichText::new(s.app_audio_only_label).color(pal().link),
                 )
                 .on_hover_text(if !has_loopback_device {
                     s.tooltip_no_loopback_device
@@ -303,7 +300,9 @@ impl App {
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button(s.add_app_browse_button).clicked()
+            if ui
+                .add(accent_button(s.add_app_browse_button, pal().link))
+                .clicked()
                 && let Some(path) = FileDialog::new()
                     .add_filter("Executable", &["exe"])
                     .pick_file()
@@ -318,7 +317,7 @@ impl App {
                     s,
                 );
             }
-            if ui.button(s.close_button).clicked() {
+            if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                 self.add_app.open = false;
             }
         });
@@ -440,7 +439,7 @@ impl App {
                             picked = Some((candidate.exe_name.clone(), candidate.source.clone()));
                         }
                         if candidate.is_running() {
-                            ui.label(caption(s.add_app_running_tag, pal().accent_idle));
+                            ui.label(caption(s.add_app_running_tag, pal().success));
                         }
                     });
                 }

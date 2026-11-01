@@ -28,7 +28,7 @@ impl App {
                         s.overlay_off
                     };
                     if ui
-                        .add(accent_button(label, pal().accent_secondary))
+                        .add(accent_button(label, pal().link))
                         .on_hover_text(s.overlay_toggle_tooltip)
                         .clicked()
                     {
@@ -43,7 +43,7 @@ impl App {
                         s.border_off
                     };
                     if ui
-                        .add(accent_button(border_label, pal().accent_secondary))
+                        .add(accent_button(border_label, pal().link))
                         .on_hover_text(s.border_toggle_tooltip)
                         .clicked()
                     {
@@ -58,7 +58,7 @@ impl App {
                         s.close_quits
                     };
                     if ui
-                        .add(accent_button(close_label, pal().accent_secondary))
+                        .add(accent_button(close_label, pal().link))
                         .on_hover_text(s.close_toggle_tooltip)
                         .clicked()
                     {
@@ -67,10 +67,7 @@ impl App {
                     }
                     let lang = self.config.lang();
                     if ui
-                        .add(accent_button(
-                            lang.toggle_button_label(),
-                            pal().accent_secondary,
-                        ))
+                        .add(accent_button(lang.toggle_button_label(), pal().link))
                         .on_hover_text(s.language_toggle_tooltip)
                         .clicked()
                     {
@@ -86,9 +83,11 @@ impl App {
                             super::icons::icon_button(
                                 super::icons::Icon::Update,
                                 &label,
-                                pal().accent_pause,
+                                pal().on_accent,
                                 body,
-                            ),
+                            )
+                            .fill(pal().accent)
+                            .stroke(egui::Stroke::new(1.0, pal().accent)),
                             &label,
                         )
                         .on_hover_text(s.update_tooltip)

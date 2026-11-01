@@ -39,8 +39,8 @@ impl Badge {
     fn color(self) -> Option<egui::Color32> {
         match self {
             Self::None => None,
-            Self::Recording => Some(Palette::DARK.accent_rec),
-            Self::Paused => Some(Palette::DARK.accent_pause),
+            Self::Recording => Some(Palette::DARK.danger),
+            Self::Paused => Some(Palette::DARK.warn),
         }
     }
 
@@ -337,7 +337,7 @@ mod tests {
             let mid = size - size / 4;
             assert_eq!(
                 at(&badged, mid, mid),
-                rgba(Palette::DARK.accent_rec),
+                rgba(Palette::DARK.danger),
                 "size {size}"
             );
             // The rest of the icon is untouched.
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(tray_icon_with(&icon, Badge::None), icon);
         assert_eq!(
             at(&tray_icon_with(&icon, Badge::Paused), 12, 12),
-            rgba(Palette::DARK.accent_pause)
+            rgba(Palette::DARK.warn)
         );
     }
 
@@ -364,7 +364,7 @@ mod tests {
     fn the_overlay_is_just_the_dot_and_idle_has_none() {
         assert_eq!(overlay_icon(Badge::None, 16), None);
         let dot = overlay_icon(Badge::Recording, 16).unwrap();
-        assert_eq!(at(&dot, 8, 8), rgba(Palette::DARK.accent_rec));
+        assert_eq!(at(&dot, 8, 8), rgba(Palette::DARK.danger));
         assert_eq!(at(&dot, 0, 0)[3], 0, "transparent around it");
     }
 
@@ -384,7 +384,7 @@ mod tests {
     fn an_icon_made_from_pixels_is_that_size() {
         let icon = OwnedIcon::new(&overlay_icon(Badge::Recording, 24).unwrap()).unwrap();
         let back = unsafe { icon_pixels(icon.0, 24) }.unwrap();
-        assert_eq!(at(&back, 12, 12), rgba(Palette::DARK.accent_rec));
+        assert_eq!(at(&back, 12, 12), rgba(Palette::DARK.danger));
         assert_eq!(at(&back, 0, 0)[3], 0);
     }
 
