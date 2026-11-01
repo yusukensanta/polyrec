@@ -153,20 +153,17 @@ impl App {
                             .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
                         if has_collision {
                             ui.add_space(8.0);
-                            ui.label(caption(s.hotkey_collision_warning, pal().accent_pause));
+                            ui.label(caption(s.hotkey_collision_warning, pal().warn));
                         }
 
                         if let Some(warning) = &self.hotkey_capture_warning {
                             ui.add_space(8.0);
-                            ui.label(caption(warning, pal().accent_pause));
+                            ui.label(caption(warning, pal().warn));
                         }
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
-                if ui
-                    .add(accent_button(s.close_button, pal().text_muted))
-                    .clicked()
-                {
+                if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
             });
@@ -222,7 +219,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.label(
                     egui::RichText::new(s.hotkey_press_any_key_prompt)
-                        .color(pal().accent_secondary)
+                        .color(pal().link)
                         .strong(),
                 );
                 ui.label(caption(s.hotkey_press_esc_to_cancel, pal().text_muted));
@@ -234,10 +231,7 @@ impl App {
                     .color(pal().text_primary),
             );
             if ui
-                .add(accent_button(
-                    s.hotkey_change_button,
-                    pal().accent_secondary,
-                ))
+                .add(accent_button(s.hotkey_change_button, pal().link))
                 .on_hover_text(s.hotkey_change_tooltip)
                 .clicked()
             {

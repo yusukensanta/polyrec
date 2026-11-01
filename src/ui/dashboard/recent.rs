@@ -86,12 +86,7 @@ impl App {
             if add_named(
                 ui,
                 true,
-                egui::Button::new(
-                    Icon::Play
-                        .rich(text_px(TEXT_BODY))
-                        .color(pal().accent_secondary),
-                )
-                .small(),
+                egui::Button::new(Icon::Play.rich(text_px(TEXT_BODY)).color(pal().link)).small(),
                 s.recent_play_tooltip,
             )
             .on_hover_text(s.recent_play_tooltip)
@@ -102,12 +97,7 @@ impl App {
             if add_named(
                 ui,
                 true,
-                egui::Button::new(
-                    Icon::Folder
-                        .rich(text_px(TEXT_BODY))
-                        .color(pal().accent_secondary),
-                )
-                .small(),
+                egui::Button::new(Icon::Folder.rich(text_px(TEXT_BODY)).color(pal().link)).small(),
                 s.recent_show_tooltip,
             )
             .on_hover_text(s.recent_show_tooltip)

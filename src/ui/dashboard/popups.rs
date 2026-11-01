@@ -2,7 +2,7 @@ use super::App;
 use super::state::SelfUpdateState;
 use super::theme::{POPUP_WIDTH, TEXT_BODY, pal, text_px};
 use super::util::{open_url, take_if_finished};
-use super::widgets::{accent_button, caption, section_header};
+use super::widgets::{accent_button, caption, primary_button, section_header};
 use crate::capture::frame_rate::{FPS_PRESETS, fps_fits_display};
 use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
@@ -164,7 +164,7 @@ impl App {
             ui.label(caption(
                 s.fps_recorded_template
                     .replace("{fps}", &recorded.to_string()),
-                pal().accent_pause,
+                pal().warn,
             ));
         }
     }
@@ -208,10 +208,7 @@ impl App {
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
                 ui.add_space(8.0);
-                if ui
-                    .add(accent_button(s.close_button, pal().text_muted))
-                    .clicked()
-                {
+                if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
             });
@@ -235,13 +232,10 @@ impl App {
                 ui.label(
                     egui::RichText::new(&msg)
                         .size(text_px(TEXT_BODY))
-                        .color(pal().accent_rec),
+                        .color(pal().danger),
                 );
                 ui.add_space(8.0);
-                if ui
-                    .add(accent_button(s.close_button, pal().text_muted))
-                    .clicked()
-                {
+                if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
             });
@@ -281,14 +275,11 @@ impl App {
                         ui.label(caption(s.update_confirm_uac_note, pal().text_muted));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui
-                                .add(accent_button(s.update_now_button, pal().accent_pause))
-                                .clicked()
-                            {
+                            if ui.add(primary_button(s.update_now_button)).clicked() {
                                 action = Some("now");
                             }
                             if ui
-                                .add(accent_button(s.update_not_now_button, pal().text_muted))
+                                .add(accent_button(s.update_not_now_button, pal().link))
                                 .clicked()
                             {
                                 action = Some("not_now");
@@ -341,13 +332,10 @@ impl App {
                         ui.label(
                             egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
                                 .size(text_px(TEXT_BODY))
-                                .color(pal().accent_rec),
+                                .color(pal().danger),
                         );
                         ui.add_space(8.0);
-                        if ui
-                            .add(accent_button(s.close_button, pal().text_muted))
-                            .clicked()
-                        {
+                        if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                             close = true;
                         }
                     });

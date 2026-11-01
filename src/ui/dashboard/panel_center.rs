@@ -1,6 +1,6 @@
 use super::App;
 use super::actions::{TrackKind, TrackLabel};
-use super::icons::{Icon, add_named, icon_button};
+use super::icons::{Icon, add_named, icon_button, icon_button_two_tone};
 use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
 use super::theme::{
     CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL, SPACE_SECTION, SPACE_TIGHT,
@@ -8,7 +8,8 @@ use super::theme::{
 };
 use super::util::{OutputDirProblem, open_directory, open_folder, output_dir_problem};
 use super::widgets::{
-    RowIcon, accent_button, caption, centered_action_row, format_bytes, icon_slot, section_header,
+    RowIcon, accent_button, caption, centered_action_row, format_bytes, icon_slot, primary_button,
+    section_header,
 };
 use crate::encode::remux::{export_grouped, mix_tracks};
 use crate::i18n::Strings;
@@ -48,8 +49,8 @@ impl App {
         };
         let mut dismissed = false;
         egui::Frame::NONE
-            .fill(pal().bg_faint)
-            .stroke(egui::Stroke::new(1.0, pal().accent_pause))
+            .fill(pal().warn_bg)
+            .stroke(egui::Stroke::new(1.0, pal().warn))
             .corner_radius(CORNER_CONTROL)
             .inner_margin(SPACE_GROUP)
             .show(ui, |ui| {
@@ -59,7 +60,7 @@ impl App {
                         egui::vec2(ui.available_width() - dismiss_width, 0.0),
                         |ui| {
                             ui.add(
-                                egui::Label::new(caption(text.as_str(), pal().accent_pause)).wrap(),
+                                egui::Label::new(caption(text.as_str(), pal().text_primary)).wrap(),
                             );
                         },
                     );
@@ -205,9 +206,9 @@ impl App {
                 1.0
             };
             let dot_col = egui::Color32::from_rgba_unmultiplied(
-                pal().accent_rec.r(),
-                pal().accent_rec.g(),
-                pal().accent_rec.b(),
+                pal().danger.r(),
+                pal().danger.g(),
+                pal().danger.b(),
                 (alpha * 255.0) as u8,
             );
             ui.horizontal(|ui| {
@@ -221,11 +222,11 @@ impl App {
                 };
                 // Named tokens, not ad-hoc hex — also fixes RECORDING's label color,
                 // which previously computed to 4.18:1 contrast on pal().bg_base (fails
-                // WCAG AA's 4.5:1 minimum for normal text). pal().accent_rec is 5.54:1.
+                // WCAG AA's 4.5:1 minimum for normal text). pal().danger is 5.54:1.
                 let state_color = if is_paused {
-                    pal().accent_pause
+                    pal().accent_text
                 } else {
-                    pal().accent_rec
+                    pal().danger
                 };
                 ui.label(caption(state_label, state_color).strong());
             });
@@ -316,12 +317,7 @@ impl App {
             if add_named(
                 ui,
                 true,
-                icon_button(
-                    Icon::Settings,
-                    s.quality_button,
-                    pal().accent_secondary,
-                    body,
-                ),
+                icon_button(Icon::Settings, s.quality_button, pal().link, body),
                 s.quality_button,
             )
             .on_hover_text(s.quality_tooltip)
@@ -332,12 +328,7 @@ impl App {
             if add_named(
                 ui,
                 true,
-                icon_button(
-                    Icon::Keyboard,
-                    s.hotkeys_button,
-                    pal().accent_secondary,
-                    body,
-                ),
+                icon_button(Icon::Keyboard, s.hotkeys_button, pal().link, body),
                 s.hotkeys_button,
             )
             .on_hover_text(s.hotkeys_tooltip)
@@ -348,7 +339,7 @@ impl App {
             if add_named(
                 ui,
                 true,
-                icon_button(Icon::Speaker, s.audio_button, pal().accent_secondary, body),
+                icon_button(Icon::Speaker, s.audio_button, pal().link, body),
                 s.audio_button,
             )
             .on_hover_text(s.audio_tooltip)
@@ -388,7 +379,7 @@ impl App {
                 if ui
                     .add_enabled(
                         self.output_dir_problem.is_none(),
-                        accent_button(s.open_output_dir_button, pal().accent_secondary),
+                        accent_button(s.open_output_dir_button, pal().link),
                     )
                     .on_hover_text(s.open_output_dir_tooltip)
                     .clicked()
@@ -400,9 +391,7 @@ impl App {
                         &self.config.output_dir
                     });
                 }
-                if ui
-                    .add(accent_button(s.browse_button, pal().accent_secondary))
-                    .clicked()
+                if ui.add(accent_button(s.browse_button, pal().link)).clicked()
                     && let Some(path) = FileDialog::new()
                         .set_directory(&self.config.output_dir)
                         .pick_folder()
@@ -420,10 +409,7 @@ impl App {
             },
         );
         if let Some(problem) = self.output_dir_problem {
-            ui.label(caption(
-                output_dir_problem_text(problem, s),
-                pal().accent_pause,
-            ));
+            ui.label(caption(output_dir_problem_text(problem, s), pal().warn));
         }
 
         ui.add_space(SPACE_NORMAL);
@@ -488,11 +474,7 @@ impl App {
                             text.push_str(&left);
                             low |= short;
                         }
-                        let color = if low {
-                            pal().accent_pause
-                        } else {
-                            pal().text_muted
-                        };
+                        let color = if low { pal().warn } else { pal().text_muted };
                         ui.label(caption(text, color));
                         first = false;
                     }
@@ -522,13 +504,13 @@ impl App {
                                         .and_then(|n| n.to_str())
                                         .unwrap_or("highlight.mp4")
                                 ),
-                                pal().accent_idle,
+                                pal().success,
                             ));
                         }
                         HighlightSaveState::Failed(msg) => {
                             ui.label(caption(
                                 format!("{}{msg}", s.highlight_save_failed_prefix),
-                                pal().accent_rec,
+                                pal().danger,
                             ));
                         }
                     }
@@ -576,10 +558,11 @@ impl App {
                 icon_button(
                     Icon::Stop,
                     s.stop_button,
-                    pal().accent_rec,
+                    pal().on_danger,
                     text_px(TEXT_BUTTON),
                 )
-                .fill(pal().bg_btn_stop)
+                .fill(pal().danger_fill)
+                .stroke(egui::Stroke::new(1.0, pal().danger_fill))
                 .corner_radius(ROUNDING_PRIMARY_BTN)
                 .min_size(egui::Vec2::new(STOP_WIDTH, 52.0))
             };
@@ -591,10 +574,11 @@ impl App {
                     let btn = icon_button(
                         Icon::Play,
                         s.resume_button,
-                        pal().accent_idle,
+                        pal().on_accent,
                         text_px(TEXT_BUTTON),
                     )
-                    .fill(pal().bg_btn_idle)
+                    .fill(pal().accent)
+                    .stroke(egui::Stroke::new(1.0, pal().accent))
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(RESUME_WIDTH, 52.0));
                     if add_named(ui, true, btn, s.resume_button).clicked() {
@@ -611,13 +595,9 @@ impl App {
                         self.handle_rec_button(is_recording);
                     }
 
-                    let pause_btn = egui::Button::new(
-                        Icon::Pause
-                            .rich(text_px(TEXT_BUTTON))
-                            .color(pal().text_muted),
-                    )
-                    .fill(pal().bg_btn_pause)
-                    .min_size(egui::Vec2::new(44.0, 52.0));
+                    let pause_btn =
+                        egui::Button::new(Icon::Pause.rich(text_px(TEXT_BUTTON)).color(pal().link))
+                            .min_size(egui::Vec2::new(44.0, 52.0));
                     if add_named(ui, true, pause_btn, s.pause_tooltip)
                         .on_hover_text(s.pause_tooltip)
                         .clicked()
@@ -627,13 +607,15 @@ impl App {
                 });
             } else {
                 centered_action_row(ui, 130.0, 52.0, |ui| {
-                    let btn = icon_button(
+                    let btn = icon_button_two_tone(
                         Icon::Record,
+                        REC_DOT,
                         s.rec_button,
-                        pal().accent_idle,
+                        pal().on_accent,
                         text_px(TEXT_BUTTON),
                     )
-                    .fill(pal().bg_btn_idle)
+                    .fill(pal().accent)
+                    .stroke(egui::Stroke::new(1.0, pal().accent))
                     .corner_radius(ROUNDING_PRIMARY_BTN)
                     .min_size(egui::Vec2::new(130.0, 52.0));
                     let blocked = self.rec_blocked_reason(s);
@@ -762,7 +744,7 @@ impl App {
         // be a confusing no-op. Still offer Open Folder either way.
         if self.export.available_tracks < 2 {
             if ui
-                .add(accent_button(s.open_folder_button, pal().accent_secondary))
+                .add(accent_button(s.open_folder_button, pal().link))
                 .on_hover_text(s.open_folder_tooltip)
                 .clicked()
             {
@@ -791,14 +773,14 @@ impl App {
         if is_idle {
             ui.horizontal(|ui| {
                 if ui
-                    .add(accent_button(s.export_button, pal().accent_idle))
+                    .add(primary_button(s.export_button))
                     .on_hover_text(s.export_tooltip)
                     .clicked()
                 {
                     self.start_export(path, &track_groups);
                 }
                 if ui
-                    .add(accent_button(s.open_folder_button, pal().accent_secondary))
+                    .add(accent_button(s.open_folder_button, pal().link))
                     .on_hover_text(s.open_folder_tooltip)
                     .clicked()
                 {
@@ -816,7 +798,7 @@ impl App {
             ));
             ui.add_space(4.0);
             if ui
-                .add(accent_button(s.open_folder_button, pal().accent_secondary))
+                .add(accent_button(s.open_folder_button, pal().link))
                 .on_hover_text(s.open_folder_tooltip)
                 .clicked()
             {
@@ -824,7 +806,7 @@ impl App {
             }
         } else if let Some(msg) = failed_msg {
             section_header(ui, s.export_failed_header);
-            ui.label(caption(&msg, pal().accent_rec));
+            ui.label(caption(&msg, pal().danger));
         }
     }
 }
@@ -886,17 +868,20 @@ fn meter_decay(shown: f32, fill: f32, dt: f32) -> f32 {
     fill.max(shown - METER_FALL_PER_SEC * dt).max(0.0)
 }
 
-/// Green normally, amber above -12 dBFS, red above -3 dBFS (close to
+/// Indigo normally, amber above -12 dBFS, red above -3 dBFS (close to
 /// clipping), by meter fill (see `meter_fill`).
 fn meter_color(fill: f32) -> egui::Color32 {
     if fill >= 0.95 {
-        pal().accent_rec
+        pal().danger
     } else if fill >= 0.8 {
-        pal().accent_pause
+        pal().warn
     } else {
-        pal().accent_idle
+        pal().meter
     }
 }
+
+/// The red of REC's record dot, on its indigo fill in every theme.
+const REC_DOT: egui::Color32 = egui::Color32::from_rgb(0xff, 0x8a, 0x8a);
 
 /// Frames per second the recording has achieved so far, averaged over its
 /// recorded (pause-excluded) time. `None` for the first second, when a
@@ -1080,9 +1065,9 @@ mod meter_tests {
 
     #[test]
     fn meter_turns_amber_then_red_near_full_scale() {
-        assert_eq!(meter_color(meter_fill(0.1)), pal().accent_idle); // -20 dBFS
-        assert_eq!(meter_color(meter_fill(0.5)), pal().accent_pause); // -6 dBFS
-        assert_eq!(meter_color(meter_fill(0.9)), pal().accent_rec); // -0.9 dBFS
+        assert_eq!(meter_color(meter_fill(0.1)), pal().meter); // -20 dBFS
+        assert_eq!(meter_color(meter_fill(0.5)), pal().warn); // -6 dBFS
+        assert_eq!(meter_color(meter_fill(0.9)), pal().danger); // -0.9 dBFS
     }
 }
 

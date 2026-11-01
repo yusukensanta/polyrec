@@ -4,8 +4,18 @@ use crate::config::Config;
 use crate::types::AudioDevice;
 use eframe::egui;
 
+/// A button to press: `color` text (normally `Palette::link`), outlined like
+/// every button (see `theme::visuals_for`).
 pub(super) fn accent_button(text: &str, color: egui::Color32) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.to_string()).color(color))
+}
+
+/// The main action where it appears (Export, Update now): solid indigo.
+pub(super) fn primary_button(text: &str) -> egui::Button<'static> {
+    let p = pal();
+    egui::Button::new(egui::RichText::new(text.to_string()).color(p.on_accent))
+        .fill(p.accent)
+        .stroke(egui::Stroke::new(1.0, p.accent))
 }
 
 /// Caption-size text in `color` -- the dashboard's small status/hint line

@@ -132,10 +132,22 @@ pub(super) fn icon_button(
     color: egui::Color32,
     size: f32,
 ) -> egui::Button<'static> {
+    icon_button_two_tone(icon, color, text, color, size)
+}
+
+/// `icon_button` with the icon in a colour of its own -- REC's red record
+/// dot on its indigo button.
+pub(super) fn icon_button_two_tone(
+    icon: Icon,
+    icon_color: egui::Color32,
+    text: &str,
+    color: egui::Color32,
+    size: f32,
+) -> egui::Button<'static> {
     // A touch larger than the text, as Windows pairs 16 px icons with 14 px
     // text.
     egui::Button::new((
-        icon.rich(size + 2.0).color(color),
+        icon.rich(size + 2.0).color(icon_color),
         egui::RichText::new(text.to_owned()).size(size).color(color),
     ))
 }

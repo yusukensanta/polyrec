@@ -56,7 +56,7 @@ Releases are also immutable once published — assets can't be silently replaced
 - **Update check** — compares your version against the latest GitHub release on launch and offers an in-app, checksum-verified self-update.
 - **English / 日本語** — UI language toggle, persisted in config.
 - **Keyboard** — Tab moves between PolyRec's controls, Space or Enter presses the one in focus, and Esc closes a pop-up. Once you move with the keyboard, a ring shows where focus is, as in Windows' own apps; a click hides it again.
-- **Theme** — PolyRec follows Windows' light or dark mode (**Settings → Personalization → Colors**), uses your accent colour for what's selected, and switches to Windows' own colours under a high-contrast theme. With **Animation effects** off (**Settings → Accessibility → Visual effects**), nothing in it animates. The recording overlay stays dark in every theme, since it sits over games.
+- **Theme** — PolyRec follows Windows' light or dark mode (**Settings → Personalization → Colors**) in its own indigo palette — indigo for what's selected and what you can press, red for recording — and switches to Windows' own colours under a high-contrast theme. With **Animation effects** off (**Settings → Accessibility → Visual effects**), nothing in it animates. The recording overlay stays dark in every theme, since it sits over games.
 - **Text size** — PolyRec's text follows Windows' **Settings → Accessibility → Text size**, as Windows' own apps do, and changes as soon as that setting does. The window also opens at the size (and maximized or not) it was left at.
 
 ## Usage
