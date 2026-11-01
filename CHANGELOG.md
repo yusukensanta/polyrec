@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.137] - 2026-11-02
+
 ### Changed
 
 - Buttons are easier on the eye: a quieter outline, just above the 3:1 contrast a button needs to read as one (it was 6:1), on a fill of their own, turning PolyRec's indigo under the pointer.
