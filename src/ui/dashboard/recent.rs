@@ -2,7 +2,8 @@
 //! Highlight saves, with buttons to play one or show it in Explorer.
 
 use super::App;
-use super::theme::{ACCENT_SECONDARY, SPACE_TIGHT, TEXT_MUTED};
+use super::icons::{Icon, add_named};
+use super::theme::{ACCENT_SECONDARY, SPACE_TIGHT, TEXT_BODY, TEXT_MUTED, text_px};
 use super::util::{open_file, show_in_folder};
 use super::widgets::{caption, format_bytes, section_header};
 use crate::i18n::Strings;
@@ -82,17 +83,31 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         ui.horizontal(|ui| {
-            if ui
-                .small_button(egui::RichText::new("▶").color(ACCENT_SECONDARY))
-                .on_hover_text(s.recent_play_tooltip)
-                .clicked()
+            if add_named(
+                ui,
+                true,
+                egui::Button::new(Icon::Play.rich(text_px(TEXT_BODY)).color(ACCENT_SECONDARY))
+                    .small(),
+                s.recent_play_tooltip,
+            )
+            .on_hover_text(s.recent_play_tooltip)
+            .clicked()
             {
                 open_file(&recording.path);
             }
-            if ui
-                .small_button(egui::RichText::new("📁").color(ACCENT_SECONDARY))
-                .on_hover_text(s.recent_show_tooltip)
-                .clicked()
+            if add_named(
+                ui,
+                true,
+                egui::Button::new(
+                    Icon::Folder
+                        .rich(text_px(TEXT_BODY))
+                        .color(ACCENT_SECONDARY),
+                )
+                .small(),
+                s.recent_show_tooltip,
+            )
+            .on_hover_text(s.recent_show_tooltip)
+            .clicked()
             {
                 show_in_folder(&recording.path);
             }

@@ -1,3 +1,4 @@
+use super::icons::Icon;
 use super::theme::*;
 use crate::config::Config;
 use crate::types::AudioDevice;
@@ -77,48 +78,46 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
 /// Icon for an audio-device checkbox label — used in the source panel's
 /// device list, and by `actions::start_recording_with_source` to build the
 /// export dialog's per-track labels at record-start time.
-pub(super) fn audio_device_icon(dev: &AudioDevice) -> &'static str {
+pub(super) fn audio_device_icon(dev: &AudioDevice) -> Icon {
     if dev.is_loopback {
-        SPEAKERS_GLYPH
+        Icon::Speaker
     } else {
-        MICROPHONE_GLYPH
+        Icon::Microphone
     }
 }
-
-pub(super) const SPEAKERS_GLYPH: &str = "🔊";
-pub(super) const MICROPHONE_GLYPH: &str = "🎙";
 
 /// Size of the icon column at the start of a source, device or track row.
 const ICON_SLOT: egui::Vec2 = egui::vec2(16.0, 16.0);
 
 /// What goes in a row's icon column (`icon_slot`).
 #[derive(Clone, Copy)]
-pub(super) enum RowIcon<'a> {
+pub(super) enum RowIcon {
     /// Nothing; the column stays, so the name still lines up.
     None,
     /// A picture, e.g. an app's own icon.
     Image(egui::TextureId),
-    /// A symbol, e.g. 🔊 for speakers.
-    Glyph(&'a str),
+    /// One of the dashboard's icons, e.g. a speaker.
+    Icon(Icon),
 }
 
 /// The icon column at the start of a row: the same width whatever `icon` is,
 /// or with none, so the names after it line up. A glyph written in front of
 /// the name instead started each name wherever that glyph ended -- 🔊 and 🎙
 /// aren't the same width.
-pub(super) fn icon_slot(ui: &mut egui::Ui, icon: RowIcon<'_>) {
+pub(super) fn icon_slot(ui: &mut egui::Ui, icon: RowIcon) {
     let (rect, _) = ui.allocate_exact_size(ICON_SLOT, egui::Sense::hover());
     match icon {
         RowIcon::None => {}
         RowIcon::Image(texture) => {
             egui::Image::new((texture, ICON_SLOT)).paint_at(ui, rect);
         }
-        RowIcon::Glyph(glyph) => {
+        RowIcon::Icon(icon) => {
+            let (font, text) = icon.font_and_text(ICON_SLOT.y);
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                glyph,
-                egui::FontId::proportional(text_px(TEXT_BODY)),
+                text,
+                font,
                 ui.visuals().text_color(),
             );
         }
@@ -144,7 +143,7 @@ pub(super) fn icon_slot(ui: &mut egui::Ui, icon: RowIcon<'_>) {
 #[allow(clippy::too_many_arguments)] // icon + the config-save trio + the per-row identity trio are each independent, not a natural single struct
 pub(super) fn checkbox_with_volume_slider(
     ui: &mut egui::Ui,
-    icon: RowIcon<'_>,
+    icon: RowIcon,
     config: &mut Config,
     error_message: &mut Option<String>,
     config_save_failed_prefix: &str,
@@ -243,8 +242,8 @@ mod icon_column_tests {
         let mut starts = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             for icon in [
-                RowIcon::Glyph("🔊"),
-                RowIcon::Glyph("🎙"),
+                RowIcon::Icon(Icon::Speaker),
+                RowIcon::Icon(Icon::Microphone),
                 RowIcon::Image(egui::TextureId::User(1)),
                 RowIcon::None,
             ] {

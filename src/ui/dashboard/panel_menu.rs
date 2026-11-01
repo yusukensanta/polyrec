@@ -72,13 +72,21 @@ impl App {
                         self.save_config_or_report(s);
                     }
                     if let Some(update) = self.update_available.clone() {
-                        let clicked = ui
-                            .add(accent_button(
-                                &format!("⬆ {} {}", update.version, s.update_available_suffix),
+                        let label = format!("{} {}", update.version, s.update_available_suffix);
+                        let body = super::theme::text_px(super::theme::TEXT_BODY);
+                        let clicked = super::icons::add_named(
+                            ui,
+                            true,
+                            super::icons::icon_button(
+                                super::icons::Icon::Update,
+                                &label,
                                 ACCENT_PAUSE,
-                            ))
-                            .on_hover_text(s.update_tooltip)
-                            .clicked();
+                                body,
+                            ),
+                            &label,
+                        )
+                        .on_hover_text(s.update_tooltip)
+                        .clicked();
                         if clicked {
                             // Closing/restarting mid-recording would corrupt or
                             // lose it -- block the confirm dialog from even

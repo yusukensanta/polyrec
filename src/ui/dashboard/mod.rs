@@ -1,4 +1,5 @@
 mod hotkeys_popup;
+mod icons;
 
 mod actions;
 mod audio_popup;

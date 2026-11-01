@@ -1,4 +1,5 @@
 use super::App;
+use super::icons::Icon;
 use super::theme::{ACCENT_IDLE, ACCENT_SECONDARY, POPUP_WIDTH, TEXT_MUTED};
 use super::widgets::{
     RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, section_header,
@@ -95,16 +96,16 @@ impl App {
         // borrow of `self.audio_devices` here would conflict
         // with (same reasoning as the Applications loop's
         // `app_audio_sources.clone()` below).
-        let device_rows: Vec<(&'static str, String, String)> = self
+        let device_rows: Vec<(Icon, String, String)> = self
             .audio_devices
             .iter()
             .map(|dev| (audio_device_icon(dev), dev.name.clone(), dev.id.clone()))
             .collect();
-        for (i, (glyph, label, dev_id)) in device_rows.into_iter().enumerate() {
+        for (i, (icon, label, dev_id)) in device_rows.into_iter().enumerate() {
             let was_checked = self.selected_audio[i];
             checkbox_with_volume_slider(
                 ui,
-                RowIcon::Glyph(glyph),
+                RowIcon::Icon(icon),
                 &mut self.config,
                 &mut self.error_message,
                 s.config_save_failed_prefix,
