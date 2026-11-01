@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.134] - 2026-11-01
+
 ### Changed
 
 - A new colour palette, one PolyRec indigo throughout, in both the dark and the light theme. Indigo marks what's selected and what you can press; red means recording (the live dot, RECORDING, STOP); amber warns; green only says something went well. Every button, Close included, now has an indigo outline and indigo text — the Close buttons' shapes were all but invisible against their pop-ups. REC, RESUME and Export are solid indigo (REC with a red record dot), STOP is solid red. Warnings get an amber edge with normal text instead of yellow text. Every text colour meets WCAG AA contrast, and every button's outline 3:1, in both themes.
