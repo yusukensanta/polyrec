@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.127] - 2026-11-01
+
 ### Added
 
 - The selected source's card shows a picture of the window or display, so it's plain what REC will record before recording it. The picture is taken when you pick the source and again when you come back to PolyRec, not continually, so a PolyRec left open costs nothing.
