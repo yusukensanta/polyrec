@@ -102,6 +102,7 @@ impl<F> FramePacer<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::frame_rate::FrameGrid;
 
     fn ms(ms: u64) -> Duration {
         Duration::from_millis(ms)
@@ -203,8 +204,44 @@ mod tests {
         pacer.set_fps(30);
         // A fresh limiter admits the next frame whenever it comes.
         assert_eq!(pacer.on_frame("b", ms(5), false), Step::Record("b", ms(5)));
-        assert_eq!(pacer.on_frame("c", ms(20), false), Step::Wait);
-        assert_eq!(pacer.on_idle(ms(21), false), Step::Wait);
-        assert_eq!(pacer.on_idle(ms(22), false), Step::Record("c", ms(22)));
+        // 30 fps slots start at 0, 33.3 and 66.7 ms.
+        assert_eq!(pacer.on_frame("c", ms(10), false), Step::Wait);
+        assert_eq!(pacer.on_idle(ms(16), false), Step::Wait);
+        assert_eq!(pacer.on_idle(ms(17), false), Step::Record("c", ms(17)));
+    }
+
+    #[test]
+    fn a_source_on_the_slot_edges_loses_no_frames() {
+        // A 60 Hz source whose frames land on the 60 fps slots' edges,
+        // jittering either side of them, between the capture loop's turns
+        // a millisecond apart. A frame that shares its nearest slot with
+        // the one before goes in the next slot instead of being lost.
+        let grid = FrameGrid::new(60);
+        let interval = Duration::from_secs(1) / 60;
+        let frame_time = |i: u32| {
+            interval * i + interval / 2 - Duration::from_micros(300)
+                + Duration::from_micros([0, 300, 600][i as usize % 3])
+        };
+        let mut pacer = FramePacer::new(60, ms(0));
+        let mut recorded = Vec::new();
+        let mut next = 0;
+        for tick in 0..10_000 {
+            let now = ms(tick);
+            let step = if next < 600 && frame_time(next) <= now {
+                next += 1;
+                pacer.on_frame(next - 1, frame_time(next - 1), false)
+            } else {
+                pacer.on_idle(now, false)
+            };
+            if let Step::Record(frame, t) = step {
+                recorded.push((frame, grid.slot(t)));
+            }
+        }
+        let frames: Vec<u32> = recorded.iter().map(|&(frame, _)| frame).collect();
+        assert_eq!(frames, (0..600).collect::<Vec<_>>());
+        assert!(
+            recorded.windows(2).all(|pair| pair[0].1 < pair[1].1),
+            "{recorded:?}"
+        );
     }
 }

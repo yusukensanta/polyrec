@@ -44,6 +44,49 @@ pub(crate) fn fps_fits_display(fps: u32, display_hz: Option<u32>) -> bool {
     display_hz.is_none_or(|hz| fps <= hz + 1)
 }
 
+/// A recording's frame slots: slot `n` starts exactly `n / fps` seconds into
+/// the recording. Every frame of a file sits in a slot of its own (see
+/// `encode::cfr`), so its video runs at exactly `fps` from start to end --
+/// players took the frames' capture times, which wander around the slots
+/// with the display's timing, for a 59.94 fps video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameGrid {
+    fps: u32,
+}
+
+impl FrameGrid {
+    /// `fps` of 0 is treated as 1.
+    pub(crate) fn new(fps: u32) -> Self {
+        Self { fps: fps.max(1) }
+    }
+
+    /// The slot a frame captured `t` into the recording belongs to: the one
+    /// whose start is nearest.
+    pub(crate) fn slot(self, t: Duration) -> u64 {
+        let ns = t.as_nanos() * u128::from(self.fps);
+        ((ns + 500_000_000) / 1_000_000_000) as u64
+    }
+
+    /// When slot `slot` starts, in Media Foundation's 100 ns units, rounded
+    /// up: the file keeps times in units of `1 / (1000 * fps)` s, and a time
+    /// up to 100 ns past a slot's start lands on the slot's exact unit
+    /// whether Media Foundation rounds or truncates it, where one just short
+    /// of it would truncate to the unit before.
+    pub(crate) fn start_hns(self, slot: u64) -> i64 {
+        (u128::from(slot) * 10_000_000).div_ceil(u128::from(self.fps)) as i64
+    }
+
+    /// How long slot `slot` lasts, in 100 ns units.
+    pub(crate) fn duration_hns(self, slot: u64) -> i64 {
+        self.start_hns(slot + 1) - self.start_hns(slot)
+    }
+
+    /// When slot `slot` starts.
+    pub(crate) fn time(self, slot: u64) -> Duration {
+        Duration::from_nanos(self.start_hns(slot) as u64 * 100)
+    }
+}
+
 /// The fps a recording actually runs at: `requested`, unless the display
 /// can't refresh that fast, in which case its refresh rate. Recording 144 fps
 /// from a 60 Hz display would only repeat frames (and trip the fps-shortfall
@@ -83,29 +126,29 @@ pub(crate) fn highest_encodable_fps(
         .unwrap_or(ALWAYS_ENCODABLE_FPS)
 }
 
-/// Admits frames at (on average, exactly) `fps` per second, judged by each
-/// frame's timestamp.
-///
-/// Admitted frames sit on a fixed grid of `1/fps` slots anchored at the first
-/// frame, so the average rate is exact whatever the source rate is: a 240 Hz
-/// source keeps every 4th frame at 60 fps, a 144 Hz one alternates every 2nd
-/// and 3rd. A frame up to half a slot early still counts for its slot, so a
-/// source that already runs at or below `fps` (with the usual timing jitter)
-/// keeps every frame. After a gap longer than a slot (static content, where
-/// WGC delivers nothing), the grid re-anchors at the next frame instead of
-/// admitting a burst of catch-up frames.
+/// Admits at most one frame per slot of the recording's `FrameGrid`, judged
+/// by each frame's timestamp, so the frames admitted are the ones the file
+/// needs: a 240 Hz source keeps every 4th frame at 60 fps, a 144 Hz one
+/// alternates every 2nd and 3rd. A frame up to half a slot early counts for
+/// its slot, so a source that already runs at or below `fps` (with the usual
+/// timing jitter) keeps every frame. After a gap (static content, where WGC
+/// delivers nothing), the next frame takes the slot it's nearest, with no
+/// burst of catch-up frames.
 #[derive(Debug)]
 pub(crate) struct FrameRateLimiter {
+    grid: FrameGrid,
     interval: Duration,
-    next_due: Option<Duration>,
+    /// The slot of the frame admitted last.
+    last_slot: Option<u64>,
 }
 
 impl FrameRateLimiter {
     /// `fps` of 0 is treated as 1.
     pub(crate) fn new(fps: u32) -> Self {
         Self {
+            grid: FrameGrid::new(fps),
             interval: Duration::from_secs(1) / fps.max(1),
-            next_due: None,
+            last_slot: None,
         }
     }
 
@@ -114,21 +157,15 @@ impl FrameRateLimiter {
         self.interval
     }
 
-    /// Whether the frame captured at `t` should be recorded. `t` must not go
-    /// backwards between calls.
+    /// Whether the frame captured at `t` should be recorded: whether its slot
+    /// comes after the last admitted frame's. `t` must not go backwards
+    /// between calls.
     pub(crate) fn admit(&mut self, t: Duration) -> bool {
-        let Some(due) = self.next_due else {
-            self.next_due = Some(t + self.interval);
-            return true;
-        };
-        if t + self.interval / 2 < due {
+        let slot = self.grid.slot(t);
+        if self.last_slot.is_some_and(|last| slot <= last) {
             return false;
         }
-        self.next_due = Some(if t >= due + self.interval {
-            t + self.interval
-        } else {
-            due + self.interval
-        });
+        self.last_slot = Some(slot);
         true
     }
 }
@@ -207,6 +244,71 @@ mod tests {
             .collect();
         assert_eq!(*resumed[0], Duration::from_secs(6));
         assert!(*resumed[1] - *resumed[0] >= hz(60) / 2);
+    }
+
+    fn ms(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn the_grid_is_anchored_at_the_recording_start_not_the_first_frame() {
+        // 30 fps slots start at 0, 33.3 and 66.7 ms: frames at 20 and 40 ms
+        // are both nearest the 33.3 ms one.
+        let mut limiter = FrameRateLimiter::new(30);
+        assert!(limiter.admit(ms(20)));
+        assert!(!limiter.admit(ms(40)));
+        assert!(limiter.admit(ms(55)));
+    }
+
+    #[test]
+    fn admitted_frames_each_take_a_slot_of_their_own() {
+        // A 60 Hz source whose frames land on the slots' edges, jittering
+        // either side of them.
+        let grid = FrameGrid::new(60);
+        let jitter = |i: u32| Duration::from_micros([0, 300, 600][i as usize % 3]);
+        let kept = admitted(60, hz(60), 600, |i| {
+            hz(120) - Duration::from_micros(300) + jitter(i)
+        });
+        let slots: Vec<u64> = kept.iter().map(|&t| grid.slot(t)).collect();
+        // The rest aren't lost: the capture loop holds them for the next
+        // slot (see `FramePacer`).
+        assert!(slots.windows(2).all(|pair| pair[0] < pair[1]), "{slots:?}");
+    }
+
+    #[test]
+    fn a_frame_belongs_to_the_slot_whose_start_is_nearest() {
+        let grid = FrameGrid::new(60);
+        assert_eq!(grid.slot(Duration::ZERO), 0);
+        assert_eq!(grid.slot(Duration::from_micros(8_333)), 0);
+        assert_eq!(grid.slot(Duration::from_micros(8_334)), 1);
+        assert_eq!(grid.slot(Duration::from_secs(1)), 60);
+        assert_eq!(grid.slot(Duration::from_secs(10 * 3600)), 2_160_000);
+    }
+
+    #[test]
+    fn slot_starts_convert_exactly_to_the_files_timescale() {
+        // Media Foundation keeps a 60 fps video's times in 1/60000 s units:
+        // every slot has to start on a whole 1000 of them, whether it rounds
+        // or truncates the 100 ns units it's given -- one unit off either
+        // way, and the file's frames are no longer all the same length.
+        for fps in FPS_PRESETS.into_iter().chain([25, 50, 75, 165]) {
+            let grid = FrameGrid::new(fps);
+            let units_per_s = u128::from(fps) * 1000;
+            for slot in (0..20_000).chain([1_000_000, 10_000_000]) {
+                let hns = grid.start_hns(slot) as u128;
+                let units = u128::from(slot) * 1000;
+                assert_eq!(
+                    hns * units_per_s / 10_000_000,
+                    units,
+                    "{fps} fps, slot {slot}"
+                );
+                assert_eq!(
+                    (hns * units_per_s + 5_000_000) / 10_000_000,
+                    units,
+                    "{fps} fps, slot {slot}, rounded"
+                );
+            }
+        }
     }
 
     #[test]
