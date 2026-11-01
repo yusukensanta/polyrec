@@ -35,18 +35,28 @@ impl App {
         // back to the primary display (matching query_capture_size's existing
         // graceful-degradation convention) if the handle is gone, the monitor
         // query fails, or (for a `Window` source) the window closed.
+        //
+        // Not over a game in exclusive full-screen, though: there it goes on
+        // another monitor, or isn't shown (see `hud_place`).
         let active_target = self.session.active().map(|a| (a.hwnd, a.kind));
-        let monitor_rect = active_target.and_then(|(hwnd_val, kind)| match kind {
-            CaptureKind::Window => {
-                let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
-                crate::capture::video::query_monitor_rect(hwnd).ok()
-            }
+        let target_monitor = active_target.map(|(hwnd_val, kind)| match kind {
+            CaptureKind::Window => unsafe {
+                windows::Win32::Graphics::Gdi::MonitorFromWindow(
+                    windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void),
+                    windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
+                )
+            },
             CaptureKind::Monitor => {
-                let hmonitor =
-                    windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void);
-                crate::capture::video::monitor_rect(hmonitor).ok()
+                windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void)
             }
         });
+        let monitor_rect = match target_monitor {
+            Some(monitor) => match super::hud_place::hud_monitor_rect(monitor) {
+                Some(rect) => Some(rect),
+                None => return,
+            },
+            None => None,
+        };
         let (screen_right, screen_top) = match monitor_rect {
             Some(rect) => (rect.right as f32, rect.top as f32),
             None => {

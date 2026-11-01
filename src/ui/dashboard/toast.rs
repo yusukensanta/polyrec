@@ -23,8 +23,9 @@ pub(super) struct Toast {
     until: Instant,
     /// Where to show it, in screen coordinates: the horizontal centre and
     /// the top of the monitor the user was working on when they pressed the
-    /// hotkey.
-    anchor: (f32, f32),
+    /// hotkey -- or another, or nowhere (`None`), when that's a game in
+    /// exclusive full-screen (see `hud_place`).
+    anchor: Option<(f32, f32)>,
 }
 
 impl Toast {
@@ -71,18 +72,15 @@ pub(super) fn hotkey_toast(
     Some(text.to_owned())
 }
 
-/// Top-centre of the monitor the foreground window is on, falling back to
-/// the primary display's.
-fn foreground_monitor_anchor() -> (f32, f32) {
+/// Top-centre of the monitor the foreground window is on (the primary
+/// display's if that can't be told) -- or of the one `hud_place` moves it
+/// to; `None` when it shouldn't be shown.
+fn foreground_monitor_anchor() -> Option<(f32, f32)> {
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow};
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-    let rect = unsafe {
-        let monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
-        crate::capture::video::monitor_rect(monitor).ok()
-    };
-    rect.map_or((960.0, 0.0), |r| {
-        ((r.left + r.right) as f32 / 2.0, r.top as f32)
-    })
+    let monitor = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY) };
+    let r = super::hud_place::hud_monitor_rect(monitor)?;
+    Some(((r.left + r.right) as f32 / 2.0, r.top as f32))
 }
 
 impl App {
@@ -109,7 +107,9 @@ impl App {
                 .size()
         });
         let size = text_size + egui::vec2(24.0, 14.0);
-        let (center_x, top) = toast.anchor;
+        let Some((center_x, top)) = toast.anchor else {
+            return;
+        };
         let text = toast.text.clone();
         show_viewport_immediate(
             ctx,
