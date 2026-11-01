@@ -1,4 +1,5 @@
 mod hotkeys_popup;
+mod hud_place;
 mod icons;
 mod keyboard;
 
@@ -279,6 +280,9 @@ impl App {
         let tray = tray::Tray::new(move || wake_ctx.request_repaint())
             .inspect_err(|e| tracing::warn!("no tray icon: {e}"))
             .ok();
+        if let Some(hwnd) = status_badge::dashboard_hwnd(cc) {
+            hud_place::remember_dashboard(hwnd);
+        }
         let taskbar_badge = status_badge::dashboard_hwnd(cc).and_then(|hwnd| {
             status_badge::TaskbarBadge::new(hwnd)
                 .inspect_err(|e| tracing::warn!("no taskbar badge: {e}"))
