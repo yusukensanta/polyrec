@@ -155,6 +155,9 @@ pub struct App {
     /// The acknowledgement for the last global hotkey, shown briefly while
     /// the dashboard isn't focused -- see `toast`.
     toast: Option<toast::Toast>,
+    /// The overlay HUD's and the toast's windows -- see `overlay::HudWindow`.
+    overlay_window: overlay::HudWindow,
+    toast_window: overlay::HudWindow,
     /// The notification-area icon; `None` if Windows wouldn't take one
     /// (logged), which leaves everything else working as before.
     tray: Option<tray::Tray>,
@@ -338,6 +341,8 @@ impl App {
             error_message: None,
             notice,
             toast: None,
+            overlay_window: Default::default(),
+            toast_window: Default::default(),
             tray,
             text_scale: theme::TextScaleWatch::start(&cc.egui_ctx),
             theme_watch: theme::ThemeWatch::new(),

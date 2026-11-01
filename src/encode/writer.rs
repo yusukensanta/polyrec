@@ -2,6 +2,7 @@ use crate::capture::frame_pool::FrameBuf;
 use crate::capture::frame_rate::highest_encodable_fps;
 use crate::capture::video::scale_bgra;
 use crate::config::Codec;
+use crate::encode::cfr::{CfrStats, CfrTimeline};
 use crate::encode::gpu::{GpuInput, TextureReadback};
 use crate::encode::mf::MfSession;
 use crate::error::{AppError, ResultExt};
@@ -212,7 +213,12 @@ pub struct RecordingWriter {
     video_stream: u32,
     audio_streams: Vec<u32>,
     output_path: PathBuf,
-    fps: u32,
+    /// Where each frame goes in the file's constant-rate video -- see
+    /// `CfrTimeline`.
+    timeline: std::cell::RefCell<CfrTimeline>,
+    /// The newest frame's picture, which every slot after it repeats until
+    /// the next frame comes.
+    held: std::cell::RefCell<Option<Picture>>,
     /// The video encoder's `ICodecAPI`, if it exposes one (hardware and
     /// Microsoft's own encoders do) -- see `video_codec_api`.
     codec_api: Option<ICodecAPI>,
@@ -420,7 +426,8 @@ impl RecordingWriter {
                 video_stream,
                 audio_streams,
                 output_path: output_path.to_path_buf(),
-                fps,
+                timeline: std::cell::RefCell::new(CfrTimeline::new(fps)),
+                held: std::cell::RefCell::new(None),
                 codec_api,
                 keyframes: std::cell::RefCell::new(KeyframeSchedule::new(gop_set.then_some(fps))),
                 input_size: (in_width, in_height),
@@ -449,19 +456,46 @@ impl RecordingWriter {
         unsafe { self.writer.BeginWriting().encode_ctx("BeginWriting") }
     }
 
-    /// Writes a frame. One that comes as a texture goes to the encoder as
+    /// Writes a frame, in the slot of the file's constant-rate video that
+    /// `CfrTimeline` gives it, after the picture before it in every slot
+    /// left empty since. One that comes as a texture goes to the encoder as
     /// such while it takes them (`takes_textures`); if it turns one down,
     /// that frame and every later one are read back into memory instead
-    /// (see `write_read_back`), rather than the video stopping there.
+    /// (see `read_back`), rather than the video stopping there.
     pub fn write_video(&self, frame: VideoFrame) -> Result<(), AppError> {
-        self.force_keyframe_if_due(frame.pts);
-        let pts_hns = frame.pts.as_nanos() as i64 / 100;
-        let duration_hns = 10_000_000i64 / self.fps as i64;
-        let timing = (pts_hns, duration_hns);
-        match frame.data {
-            FrameData::Cpu(pixels) => self.write_memory_frame(pixels, timing),
-            FrameData::Gpu(texture) if self.takes_textures() => {
-                let written = unsafe { make_texture_sample(&texture, pts_hns, duration_hns) }
+        let Some(place) = self.timeline.borrow_mut().place(frame.pts) else {
+            tracing::debug!("dropped a frame of {:?}, its slot taken", frame.pts);
+            return Ok(());
+        };
+        let picture = match frame.data {
+            FrameData::Cpu(pixels) => Picture::Memory(frame_buffer(pixels)?),
+            FrameData::Gpu(texture) if self.takes_textures() => Picture::Texture(texture),
+            FrameData::Gpu(texture) => Picture::Memory(self.read_back(&texture)?),
+        };
+        // The picture before this one -- or, at the start, this one.
+        let before = self
+            .held
+            .replace(Some(picture.clone()))
+            .unwrap_or_else(|| picture.clone());
+        for slot in place.fill {
+            self.write_picture(&before, slot)?;
+        }
+        self.write_picture(&picture, place.slot)
+    }
+
+    /// Writes `picture` as the frame in slot `slot`.
+    fn write_picture(&self, picture: &Picture, slot: u64) -> Result<(), AppError> {
+        let grid = self.timeline.borrow().grid();
+        self.force_keyframe_if_due(grid.time(slot));
+        let (pts_hns, duration_hns) = (grid.start_hns(slot), grid.duration_hns(slot));
+        let write_buffer = |buffer: &IMFMediaBuffer| {
+            let sample = unsafe { make_buffer_sample(buffer, pts_hns, duration_hns)? };
+            self.write_video_sample(&sample)
+        };
+        match picture {
+            Picture::Memory(buffer) => write_buffer(buffer),
+            Picture::Texture(texture) if self.takes_textures() => {
+                let written = unsafe { make_texture_sample(texture, pts_hns, duration_hns) }
                     .and_then(|sample| self.write_video_sample(&sample));
                 match written {
                     Err(e) if self.readback.is_some() => {
@@ -469,39 +503,26 @@ impl RecordingWriter {
                             "the encoder turned a texture frame down ({e}); reading frames back from now on"
                         );
                         self.takes_textures.set(false);
-                        self.write_read_back(&texture, timing)
+                        write_buffer(&self.read_back(texture)?)
                     }
                     written => written,
                 }
             }
-            FrameData::Gpu(texture) => self.write_read_back(&texture, timing),
+            Picture::Texture(texture) => write_buffer(&self.read_back(texture)?),
         }
     }
 
-    /// Writes a frame that came as a texture through memory. A stream set
-    /// up for textures takes memory frames at their size just the same, and
-    /// scales them itself; otherwise it's scaled to the output size here, as
-    /// the capture loop would.
-    fn write_read_back(
-        &self,
-        texture: &ID3D11Texture2D,
-        timing: (i64, i64),
-    ) -> Result<(), AppError> {
+    /// A frame that came as a texture, in memory. A stream set up for
+    /// textures takes memory frames at their size just the same, and scales
+    /// them itself; otherwise it's scaled to the output size here, as the
+    /// capture loop would.
+    fn read_back(&self, texture: &ID3D11Texture2D) -> Result<IMFMediaBuffer, AppError> {
         let readback = self.readback.as_ref().ok_or_else(|| {
             AppError::Encode("a frame came as a texture, with no way to read it back".into())
         })?;
         let pixels = readback.read(texture)?;
         let ((src_w, src_h), (dst_w, dst_h)) = (readback.size, self.input_size);
-        self.write_memory_frame(scale_bgra(pixels, src_w, src_h, dst_w, dst_h), timing)
-    }
-
-    fn write_memory_frame(
-        &self,
-        pixels: FrameBuf,
-        (pts_hns, duration_hns): (i64, i64),
-    ) -> Result<(), AppError> {
-        let sample = unsafe { make_frame_sample(pixels, pts_hns, duration_hns)? };
-        self.write_video_sample(&sample)
+        frame_buffer(scale_bgra(pixels, src_w, src_h, dst_w, dst_h))
     }
 
     fn write_video_sample(
@@ -547,6 +568,11 @@ impl RecordingWriter {
                 .WriteSample(stream_idx, &sample)
                 .encode_ctx(format_args!("WriteSample audio[{track_idx}]"))
         }
+    }
+
+    /// How steady the video has been so far -- see `CfrStats`.
+    pub(crate) fn video_stats(&self) -> CfrStats {
+        self.timeline.borrow().stats()
     }
 
     pub fn finalize(self) -> Result<PathBuf, AppError> {
@@ -726,17 +752,33 @@ pub(crate) unsafe fn make_sample(
     }
 }
 
-/// `make_sample` for a captured video frame, without its copy: the frame's
-/// own bytes become the sample's buffer (see `FrameMediaBuffer`).
-unsafe fn make_frame_sample(
-    data: FrameBuf,
+/// A frame's picture as it goes to the encoder, kept to fill the slots after
+/// it (see `CfrTimeline`). Nothing writes to it once it's made, so one
+/// picture goes in as many samples as it fills slots, without a copy.
+#[derive(Clone)]
+enum Picture {
+    /// In memory (see `frame_buffer`).
+    Memory(IMFMediaBuffer),
+    /// On the GPU, for an encoder that takes textures.
+    Texture(ID3D11Texture2D),
+}
+
+/// A captured video frame's bytes as a buffer for the encoder, without a
+/// copy (see `FrameMediaBuffer`).
+fn frame_buffer(data: FrameBuf) -> Result<IMFMediaBuffer, AppError> {
+    Ok(FrameMediaBuffer::new(data)?.into())
+}
+
+/// `make_sample` for a frame already in a buffer of its own (see
+/// `frame_buffer`), without a copy.
+unsafe fn make_buffer_sample(
+    buffer: &IMFMediaBuffer,
     pts_hns: i64,
     duration_hns: i64,
 ) -> Result<windows::Win32::Media::MediaFoundation::IMFSample, AppError> {
     unsafe {
-        let buffer: IMFMediaBuffer = FrameMediaBuffer::new(data)?.into();
         let sample = MFCreateSample().encode_ctx("MFCreateSample")?;
-        sample.AddBuffer(&buffer).encode_ctx("AddBuffer")?;
+        sample.AddBuffer(buffer).encode_ctx("AddBuffer")?;
         sample.SetSampleTime(pts_hns).encode_ctx("SetSampleTime")?;
         sample
             .SetSampleDuration(duration_hns)
@@ -900,6 +942,74 @@ mod tests {
         assert!(path.metadata().unwrap().len() > 0, "output file is empty");
     }
 
+    #[test]
+    fn frames_go_on_the_constant_rate_grid() {
+        assert_frames_go_on_the_grid(&EncoderParams::tiny_test(Codec::H264, &[]));
+    }
+
+    /// `frames_go_on_the_constant_rate_grid` through this PC's hardware
+    /// encoders. Those kept whatever times frames came with (60 fps
+    /// recordings came out at 59.94), where the software path already
+    /// resampled them onto a grid of its own.
+    #[test]
+    #[ignore]
+    fn frames_go_on_the_constant_rate_grid_through_the_hardware_encoder() {
+        for codec in [Codec::H264, Codec::H265] {
+            assert_frames_go_on_the_grid(&EncoderParams {
+                width: 1920,
+                height: 1080,
+                bitrate_bps: video_bitrate_bps(1920, 1080, 30),
+                allow_hardware_encode: true,
+                ..EncoderParams::tiny_test(codec, &[])
+            });
+        }
+    }
+
+    /// Writes frames as Windows hands them out (at 30 fps, slots start every
+    /// 33.3 ms): the first one 40 ms into the recording, a dropped one after
+    /// 100 ms, a still picture sent again after 250 ms, and two nearest the
+    /// same slot -- and checks the file has a frame in every slot from the
+    /// start to the last frame's, at its exact time.
+    fn assert_frames_go_on_the_grid(params: &EncoderParams) {
+        use crate::types::VideoFrame;
+        use std::time::Duration;
+
+        assert_eq!(params.fps, 30);
+        let _mf = MfSession::start_mta().expect("MFStartup");
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("cfr.mp4");
+        let writer = RecordingWriter::new(&output, params).expect("RecordingWriter::new");
+        writer.begin_writing().expect("begin_writing");
+        let frame_len = params.width as usize * params.height as usize * 4;
+        for ms in [40, 70, 100, 170, 420, 430] {
+            writer
+                .write_video(VideoFrame {
+                    pts: Duration::from_millis(ms),
+                    data: vec![0u8; frame_len].into(),
+                })
+                .expect("write_video");
+        }
+        let samples = read_video_samples(&writer.finalize().expect("finalize"));
+
+        let slot = 10_000_000.0 / 30.0;
+        let times: Vec<i64> = samples.iter().map(|(timestamp, _)| *timestamp).collect();
+        assert_eq!(samples.len(), 15, "{:?}: {times:?}", params.codec);
+        for (n, (timestamp, sample)) in samples.iter().enumerate() {
+            let expected = n as f64 * slot;
+            assert!(
+                (*timestamp as f64 - expected).abs() <= 1.0,
+                "{:?} slot {n}: {times:?}",
+                params.codec
+            );
+            let duration = unsafe { sample.GetSampleDuration() }.expect("duration");
+            assert!(
+                (duration as f64 - slot).abs() <= 1.0,
+                "{:?} slot {n} lasts {duration}",
+                params.codec
+            );
+        }
+    }
+
     /// HEVC MFT availability varies by Windows version/install — this exercises the
     /// real encoder (or its automatic H264 fallback) rather than asserting a specific
     /// codec landed in the file, since either outcome is a pass for this codebase.
@@ -1028,76 +1138,68 @@ mod tests {
     /// The video stream's `MF_MT_FRAME_RATE` (as whole fps) and its sample
     /// count, read back through a source reader.
     fn read_video_rate_and_sample_count(path: &std::path::Path) -> (u32, u32) {
+        use windows::Win32::Media::MediaFoundation::MFCreateSourceReaderFromURL;
+        let url = windows::core::HSTRING::from(path.to_str().unwrap());
+        let reader = unsafe { MFCreateSourceReaderFromURL(&url, None) }.expect("source reader");
+        let native = unsafe { reader.GetNativeMediaType(FIRST_VIDEO_STREAM, 0) }.expect("type");
+        assert_eq!(
+            unsafe { native.GetGUID(&MF_MT_MAJOR_TYPE) }.unwrap(),
+            MFMediaType_Video
+        );
+        let packed = unsafe { native.GetUINT64(&MF_MT_FRAME_RATE) }.expect("frame rate");
+        let fps = ((packed >> 32) as f64 / (packed & 0xFFFF_FFFF) as f64).round() as u32;
+        (fps, read_video_samples(path).len() as u32)
+    }
+
+    const FIRST_VIDEO_STREAM: u32 =
+        windows::Win32::Media::MediaFoundation::MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+
+    /// The video stream's samples with their timestamps (in 100 ns units),
+    /// read back through a source reader.
+    fn read_video_samples(
+        path: &std::path::Path,
+    ) -> Vec<(i64, windows::Win32::Media::MediaFoundation::IMFSample)> {
         use windows::Win32::Media::MediaFoundation::{
-            MF_MT_MAJOR_TYPE, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
-            MFCreateSourceReaderFromURL, MFMediaType_Video,
+            MF_SOURCE_READERF_ENDOFSTREAM, MFCreateSourceReaderFromURL,
         };
-        unsafe {
-            let url = windows::core::HSTRING::from(path.to_str().unwrap());
-            let reader = MFCreateSourceReaderFromURL(&url, None).expect("source reader");
-            let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-            let native = reader.GetNativeMediaType(stream, 0).expect("native type");
-            assert_eq!(
-                native.GetGUID(&MF_MT_MAJOR_TYPE).unwrap(),
-                MFMediaType_Video
-            );
-            let packed = native.GetUINT64(&MF_MT_FRAME_RATE).expect("frame rate");
-            let fps = ((packed >> 32) as f64 / (packed & 0xFFFF_FFFF) as f64).round() as u32;
-            let mut samples = 0;
-            loop {
-                let mut flags = 0u32;
-                let mut sample = None;
-                reader
-                    .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
-                    .expect("ReadSample");
-                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                    break;
-                }
-                if sample.is_some() {
-                    samples += 1;
-                }
+        let url = windows::core::HSTRING::from(path.to_str().unwrap());
+        let reader = unsafe { MFCreateSourceReaderFromURL(&url, None) }.expect("source reader");
+        let mut samples = Vec::new();
+        loop {
+            let mut flags = 0u32;
+            let mut timestamp = 0i64;
+            let mut sample = None;
+            unsafe {
+                reader.ReadSample(
+                    FIRST_VIDEO_STREAM,
+                    0,
+                    None,
+                    Some(&mut flags),
+                    Some(&mut timestamp),
+                    Some(&mut sample),
+                )
             }
-            (fps, samples)
+            .expect("ReadSample");
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                return samples;
+            }
+            if let Some(sample) = sample {
+                samples.push((timestamp, sample));
+            }
         }
     }
 
     /// The timestamps of the video stream's keyframes (samples flagged
     /// `MFSampleExtension_CleanPoint`), read back through a source reader.
     fn read_keyframe_times(path: &std::path::Path) -> Vec<std::time::Duration> {
-        use windows::Win32::Media::MediaFoundation::{
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
-            MFCreateSourceReaderFromURL, MFSampleExtension_CleanPoint,
-        };
-        unsafe {
-            let url = windows::core::HSTRING::from(path.to_str().unwrap());
-            let reader = MFCreateSourceReaderFromURL(&url, None).expect("source reader");
-            let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-            let mut keyframes = Vec::new();
-            loop {
-                let mut flags = 0u32;
-                let mut timestamp = 0i64;
-                let mut sample = None;
-                reader
-                    .ReadSample(
-                        stream,
-                        0,
-                        None,
-                        Some(&mut flags),
-                        Some(&mut timestamp),
-                        Some(&mut sample),
-                    )
-                    .expect("ReadSample");
-                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                    break;
-                }
-                if let Some(sample) = sample
-                    && sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1
-                {
-                    keyframes.push(std::time::Duration::from_nanos(timestamp as u64 * 100));
-                }
-            }
-            keyframes
-        }
+        use windows::Win32::Media::MediaFoundation::MFSampleExtension_CleanPoint;
+        read_video_samples(path)
+            .into_iter()
+            .filter(|(_, sample)| {
+                unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }.unwrap_or(0) == 1
+            })
+            .map(|(timestamp, _)| std::time::Duration::from_nanos(timestamp as u64 * 100))
+            .collect()
     }
 
     type Rgb = (u8, u8, u8);
@@ -1584,7 +1686,8 @@ mod tests {
         let pixels: Vec<u8> = (0..64 * 64 * 4).map(|i| (i % 251) as u8).collect();
         unsafe {
             let copied = make_sample(&pixels, 1234, 166_666).unwrap();
-            let zero_copy = make_frame_sample(pixels.clone().into(), 1234, 166_666).unwrap();
+            let buffer = frame_buffer(pixels.clone().into()).unwrap();
+            let zero_copy = make_buffer_sample(&buffer, 1234, 166_666).unwrap();
             assert_eq!(sample_bytes(&zero_copy), sample_bytes(&copied));
             assert_eq!(sample_bytes(&zero_copy), pixels);
             assert_eq!(
@@ -1630,7 +1733,7 @@ mod tests {
         let pool = crate::capture::frame_pool::FramePool::new();
         let frame = pool.take(64);
         let frame_ptr = frame.as_ptr();
-        let sample = unsafe { make_frame_sample(frame, 0, 1).unwrap() };
+        let sample = unsafe { make_buffer_sample(&frame_buffer(frame).unwrap(), 0, 1).unwrap() };
         drop(sample);
         assert_eq!(
             pool.take(64).as_ptr(),

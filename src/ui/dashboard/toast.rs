@@ -3,7 +3,7 @@
 //! typically a fullscreen game, where nothing else confirms the press landed.
 
 use super::App;
-use super::overlay::{hud_window, keep_on_top_and_out_of_captures, show_viewport_immediate};
+use super::overlay::{hud_window, keep_on_top_and_out_of_captures};
 use super::theme::{Palette, TEXT_BODY};
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
@@ -111,13 +111,13 @@ impl App {
             return;
         };
         let text = toast.text.clone();
-        show_viewport_immediate(
+        self.toast_window.show(
             ctx,
             toast_viewport_id(),
             hud_window("PolyRec Toast")
                 .with_inner_size(size)
                 .with_position(egui::pos2(center_x - size.x / 2.0, top + 40.0)),
-            move |ctx, _class| {
+            move |ctx| {
                 // Same ctx-only form as the overlay HUD -- see the comment
                 // in `render_overlay_viewport`.
                 #[allow(deprecated)]

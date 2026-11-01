@@ -1,4 +1,5 @@
 pub mod actor;
+pub(crate) mod cfr;
 pub mod gpu;
 pub mod highlight_export;
 pub(crate) mod mf;
