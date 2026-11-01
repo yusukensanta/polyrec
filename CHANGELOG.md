@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.126] - 2026-11-01
+
 ### Added
 
 - The free-space line also says about how long that space lasts at the current quality, before and during a recording. It turns amber below 10 minutes, and while recording a message says so once, so a recording isn't cut short by a full drive without warning.
