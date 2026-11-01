@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.135] - 2026-11-02
+
 ### Changed
 
 - Recordings now run at exactly their frame rate from the first instant to the last: a 60 fps recording is 60.000 fps, where players used to show 59.94 or so. Every frame sits on an exact 1/60 s grid from the start of the recording; where Windows gave no new frame for a slot (a still window, or a frame the game dropped), the frame before it fills the slot. The Highlight buffer's 10-second pieces are constant-rate too, though a saved clip can still have one uneven frame where two of them join. A still window now costs the encoder as much as a moving one, since its video runs at the full rate.
