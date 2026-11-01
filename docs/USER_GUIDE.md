@@ -55,6 +55,7 @@ Releases are also immutable once published — assets can't be silently replaced
 - **Export** — remux the recording with only the audio tracks you want, no re-encoding.
 - **Update check** — compares your version against the latest GitHub release on launch and offers an in-app, checksum-verified self-update.
 - **English / 日本語** — UI language toggle, persisted in config.
+- **Text size** — PolyRec's text follows Windows' **Settings → Accessibility → Text size**, as Windows' own apps do, and changes as soon as that setting does. The window also opens at the size (and maximized or not) it was left at.
 
 ## Usage
 

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Text is easier to read: body text, buttons and checkboxes are 14 px (they were 12.5) and the small status lines 12 px (they were 11), Windows 11's own sizes. Spacing inside cards and boxes is a little roomier, on Windows' 4 px grid, and a line now marks where the dashboard's content scrolls under the REC row.
+
+### Added
+
+- PolyRec's text follows Windows' **Text size** setting (Settings → Accessibility), and changes as soon as it does.
+- The window opens at the size it was left at, and maximized if it was.
+
 ## [v0.5.127] - 2026-11-01
 
 ### Added

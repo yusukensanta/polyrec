@@ -10,6 +10,9 @@ use std::path::PathBuf;
 /// existed, or a hand-edited one -- falls back to that field's own default
 /// instead of failing the whole load, so adding a setting never needs a
 /// per-field `#[serde(default = ...)]` again.
+/// The smallest the dashboard can be made (logical points).
+pub const MIN_WINDOW_SIZE: (f32, f32) = (620.0, 450.0);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -43,6 +46,11 @@ pub struct Config {
     /// `Config::sane_window_position` for why this isn't restored
     /// unconditionally.
     pub window_position: Option<(f32, f32)>,
+    /// The dashboard's size (logical points, not maximized) and whether it
+    /// was maximized, when PolyRec last closed -- restored on next launch,
+    /// like `window_position`. See `Config::sane_window_size`.
+    pub window_size: Option<(f32, f32)>,
+    pub window_maximized: bool,
     /// Apps pinned to always appear in the Applications audio list, even
     /// while not currently producing sound (or not running at all) --
     /// see `AppAudioSource::process_ids`'s doc comment for how these merge
@@ -333,6 +341,8 @@ impl Default for Config {
             default_app_audio_only: true,
             audio_device_gain: std::collections::HashMap::new(),
             window_position: None,
+            window_size: None,
+            window_maximized: false,
             registered_app_audio: Vec::new(),
             selected_audio_device_ids: None,
             show_recording_border: true,
@@ -418,6 +428,14 @@ impl Config {
     /// accepted, undetected edge case; Windows' own window-placement
     /// recovery (right-click taskbar icon -> Move, or Win+Shift+Arrow) is the
     /// fallback for it, same as for any other app.
+    /// `window_size` if it's still worth restoring: no smaller than the
+    /// window may be made (`MIN_WINDOW_SIZE`), and not absurdly large.
+    pub fn sane_window_size(&self) -> Option<(f32, f32)> {
+        self.window_size.filter(|&(w, h)| {
+            (MIN_WINDOW_SIZE.0..20_000.0).contains(&w) && (MIN_WINDOW_SIZE.1..20_000.0).contains(&h)
+        })
+    }
+
     pub fn sane_window_position(&self) -> Option<(f32, f32)> {
         // Symmetric and generous in both directions -- a monitor placed to
         // the left of (or above) the primary is common and puts the window
@@ -466,6 +484,33 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_window_comes_back_at_its_size_unless_that_size_is_unusable() {
+        let with = |size| Config {
+            window_size: Some(size),
+            ..Config::default()
+        };
+        assert_eq!(Config::default().sane_window_size(), None);
+        assert_eq!(
+            with((900.0, 800.0)).sane_window_size(),
+            Some((900.0, 800.0))
+        );
+        // Smaller than the window may be made, or absurdly large: ignored.
+        assert_eq!(with((300.0, 800.0)).sane_window_size(), None);
+        assert_eq!(with((900.0, 50_000.0)).sane_window_size(), None);
+        // Saved and read back, maximized too; absent in older configs.
+        let original = Config {
+            window_size: Some((1000.0, 700.0)),
+            window_maximized: true,
+            ..Config::default()
+        };
+        let parsed: Config = toml::from_str(&toml::to_string_pretty(&original).unwrap()).unwrap();
+        assert_eq!(parsed.window_size, Some((1000.0, 700.0)));
+        assert!(parsed.window_maximized);
+        let old: Config = toml::from_str("output_dir = \".\"").unwrap();
+        assert_eq!((old.window_size, old.window_maximized), (None, false));
+    }
     use super::*;
     use tempfile::tempdir;
 

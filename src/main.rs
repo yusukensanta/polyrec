@@ -77,8 +77,13 @@ fn main() -> eframe::Result<()> {
         // (via UI Automation bounding rects) to give "App audio only" a
         // comfortable margin below the window's bottom edge at that fixed
         // total.
-        .with_inner_size([760.0, 740.0])
-        .with_min_inner_size([620.0, 450.0])
+        .with_inner_size(
+            config
+                .sane_window_size()
+                .map_or([760.0, 740.0], |(w, h)| [w, h]),
+        )
+        .with_min_inner_size([config::MIN_WINDOW_SIZE.0, config::MIN_WINDOW_SIZE.1])
+        .with_maximized(config.window_maximized)
         .with_icon(icon);
     // Reopen where the window was left (including across a self-update's
     // relaunch, since config.toml lives in %APPDATA%, untouched by the exe
