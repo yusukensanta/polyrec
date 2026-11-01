@@ -7,6 +7,7 @@ mod actions;
 mod audio_popup;
 mod background;
 mod checks;
+mod color_profile;
 mod fps_support;
 mod graphics_device;
 mod overlay;

@@ -45,6 +45,8 @@ pub(super) struct Palette {
     pub(super) on_accent: egui::Color32,
     /// Indigo as text, e.g. PAUSED.
     pub(super) accent_text: egui::Color32,
+    /// REC's record dot, on its indigo fill.
+    pub(super) rec_dot: egui::Color32,
     /// Recording live -- the dot, RECORDING -- and errors.
     pub(super) danger: egui::Color32,
     /// STOP's fill, and its text.
@@ -94,6 +96,7 @@ impl Palette {
         accent: rgb(0x5b, 0x61, 0xe6),
         on_accent: rgb(0xff, 0xff, 0xff),
         accent_text: rgb(0x9e, 0xa3, 0xff),
+        rec_dot: rgb(0xff, 0x8a, 0x8a),
         danger: rgb(0xff, 0x6b, 0x6b),
         danger_fill: rgb(0xc9, 0x34, 0x3a),
         on_danger: rgb(0xff, 0xff, 0xff),
@@ -128,6 +131,7 @@ impl Palette {
         accent: rgb(0x4b, 0x50, 0xd6),
         on_accent: rgb(0xff, 0xff, 0xff),
         accent_text: rgb(0x3d, 0x42, 0xc4),
+        rec_dot: rgb(0xff, 0x8a, 0x8a),
         danger: rgb(0xc6, 0x2f, 0x35),
         danger_fill: rgb(0xc9, 0x34, 0x3a),
         on_danger: rgb(0xff, 0xff, 0xff),
@@ -140,6 +144,88 @@ impl Palette {
         bg_overlay: Self::DARK.bg_overlay,
         dark: false,
     };
+
+    /// Every colour converted by `f`: for the monitor (`color_profile`).
+    pub(super) fn through(self, mut f: impl FnMut(egui::Color32) -> egui::Color32) -> Self {
+        // Every field by name, so a colour added later can't be left out.
+        let Self {
+            bg_deep,
+            bg_window,
+            bg_faint,
+            bg_base,
+            bg_card,
+            bg_hover,
+            bg_selected,
+            border,
+            border_hover,
+            outline,
+            outline_strong,
+            bg_button,
+            link,
+            hover_tint,
+            text_primary,
+            text_muted,
+            accent,
+            on_accent,
+            accent_text,
+            rec_dot,
+            danger,
+            danger_fill,
+            on_danger,
+            disabled_fill,
+            disabled_text,
+            warn,
+            warn_bg,
+            success,
+            meter,
+            bg_overlay,
+            dark,
+        } = self;
+        Self {
+            bg_deep: f(bg_deep),
+            bg_window: f(bg_window),
+            bg_faint: f(bg_faint),
+            bg_base: f(bg_base),
+            bg_card: f(bg_card),
+            bg_hover: f(bg_hover),
+            bg_selected: f(bg_selected),
+            border: f(border),
+            border_hover: f(border_hover),
+            outline: f(outline),
+            outline_strong: f(outline_strong),
+            bg_button: f(bg_button),
+            link: f(link),
+            hover_tint: f(hover_tint),
+            text_primary: f(text_primary),
+            text_muted: f(text_muted),
+            accent: f(accent),
+            on_accent: f(on_accent),
+            accent_text: f(accent_text),
+            rec_dot: f(rec_dot),
+            danger: f(danger),
+            danger_fill: f(danger_fill),
+            on_danger: f(on_danger),
+            disabled_fill: f(disabled_fill),
+            disabled_text: f(disabled_text),
+            warn: f(warn),
+            warn_bg: f(warn_bg),
+            success: f(success),
+            meter: f(meter),
+            bg_overlay: f(bg_overlay),
+            dark,
+        }
+    }
+
+    /// Every colour, in field order.
+    #[cfg(test)]
+    fn colours(&self) -> Vec<egui::Color32> {
+        let mut colours = Vec::new();
+        self.through(|c| {
+            colours.push(c);
+            c
+        });
+        colours
+    }
 
     /// The palette for Windows' theme (`dark`), or its own colours when a
     /// high-contrast theme is on -- which wins whatever the theme. Windows'
@@ -175,6 +261,7 @@ impl Palette {
             accent: c.highlight,
             on_accent: c.highlight_text,
             accent_text: c.hotlight,
+            rec_dot: Self::DARK.rec_dot,
             danger: c.window_text,
             danger_fill: c.highlight,
             on_danger: c.highlight_text,
@@ -254,12 +341,14 @@ pub(super) fn motion() -> bool {
 
 /// Follows Windows' theme while PolyRec runs: light or dark (what egui
 /// hears from the window), a high-contrast theme, and whether animations
-/// are on. The last two are asked of Windows every `CHECK_EVERY`.
+/// are on. The last two are asked of Windows every `CHECK_EVERY`. The
+/// palette is converted for the dashboard's monitor (`MonitorColors`).
 pub(super) struct ThemeWatch {
     settings: Option<windows::UI::ViewManagement::UISettings>,
     checked_at: Option<std::time::Instant>,
     high_contrast: Option<SystemColors>,
     animations: bool,
+    monitor_colors: super::color_profile::MonitorColors,
     applied: Option<Palette>,
 }
 
@@ -274,6 +363,7 @@ impl ThemeWatch {
             checked_at: None,
             high_contrast: None,
             animations: true,
+            monitor_colors: Default::default(),
             applied: None,
         }
     }
@@ -299,7 +389,13 @@ impl ThemeWatch {
         }
         let dark = ctx.input(|i| i.raw.system_theme) != Some(egui::Theme::Light);
 
-        let palette = Palette::choose(dark, self.high_contrast);
+        self.monitor_colors
+            .update(super::hud_place::dashboard_monitor());
+        let palette = match self.high_contrast {
+            // Windows' own colours, as Windows gives them.
+            Some(_) => Palette::choose(dark, self.high_contrast),
+            None => self.monitor_colors.convert(Palette::choose(dark, None)),
+        };
         if self.applied != Some(palette) {
             PALETTE.with(|p| p.set(palette));
             ctx.set_visuals(visuals_for(&palette));
@@ -783,6 +879,19 @@ mod palette_tests {
         assert_readable(&Palette::DARK, "dark");
         assert_readable(&Palette::LIGHT, "light");
         const { assert!(Palette::DARK.dark && !Palette::LIGHT.dark) };
+    }
+
+    /// A conversion for the monitor (`color_profile`) has to reach every
+    /// colour, REC's dot included, or that one shows unconverted.
+    #[test]
+    fn a_conversion_reaches_every_colour() {
+        let magenta = egui::Color32::from_rgb(255, 0, 255);
+        for p in [Palette::DARK, Palette::LIGHT] {
+            let converted = p.through(|_| magenta);
+            assert!(converted.colours().iter().all(|&c| c == magenta));
+            assert_eq!(converted.dark, p.dark);
+            assert_eq!(converted.rec_dot, magenta);
+        }
     }
 
     #[test]
