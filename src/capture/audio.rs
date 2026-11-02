@@ -102,17 +102,20 @@ impl LinearResampler {
         }
 
         let mut out = Vec::new();
-        while (self.pos.floor() as usize) <= in_frames {
+        // Up to the last frame, not past it: a sample between the last
+        // frame and the next chunk's first waits for that chunk (and comes
+        // out of it, at a position under 1) rather than being guessed.
+        while self.pos <= in_frames as f64 {
             let i0 = self.pos.floor() as usize;
-            let i1 = i0 + 1;
             let frac = self.pos - i0 as f64;
             let f0 = frame_at(i0, input, &self.prev_frame, ch);
-            let f1_owned;
-            let f1: &[f32] = if i1 <= in_frames {
-                frame_at(i1, input, &self.prev_frame, ch)
+            // Exactly on a frame (always, when the rates match), there's
+            // nothing to interpolate towards -- and at the last frame,
+            // nothing there yet.
+            let f1 = if frac == 0.0 {
+                f0
             } else {
-                f1_owned = f0.to_vec();
-                &f1_owned
+                frame_at(i0 + 1, input, &self.prev_frame, ch)
             };
             for c in 0..ch {
                 let sample = f0[c] as f64 * (1.0 - frac) + f1[c] as f64 * frac;
@@ -142,9 +145,10 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
             let Ok(dev) = enumerator.GetDefaultAudioEndpoint(flow, role) else {
                 continue;
             };
+            // Ours to free: this runs on every refresh, every ~2 s.
             let id = dev
                 .GetId()
-                .map(|p| p.to_string().unwrap_or_default())
+                .map(|p| CoTaskMem(p.0).text())
                 .unwrap_or_default();
             let name = get_device_friendly_name(&dev).unwrap_or_else(|| fallback_name.to_string());
             devices.push(AudioDevice {
@@ -480,6 +484,16 @@ struct CoTaskMem<T>(*mut T);
 impl<T> Drop for CoTaskMem<T> {
     fn drop(&mut self) {
         unsafe { CoTaskMemFree(Some(self.0 as *const _)) };
+    }
+}
+
+impl CoTaskMem<u16> {
+    /// The wide string it holds; empty if there's none, or it isn't UTF-16.
+    fn text(&self) -> String {
+        if self.0.is_null() {
+            return String::new();
+        }
+        unsafe { windows::core::PWSTR(self.0).to_string() }.unwrap_or_default()
     }
 }
 
@@ -1414,6 +1428,31 @@ mod tests {
             (out_frames as i64 - expected as i64).abs() <= 2,
             "expected ~{expected} frames, got {out_frames}"
         );
+    }
+
+    /// WASAPI hands audio over 10 ms at a time. At a rate that doesn't
+    /// divide evenly into 48 kHz (44.1 kHz), the last output sample of every
+    /// chunk fell between its last input frame and the next chunk's first,
+    /// not yet seen -- and was output as the last frame, held, instead of
+    /// waiting for it: a wrong sample every 10 ms, a faint 100 Hz buzz.
+    /// Chunked or not, the output must be the same.
+    #[test]
+    fn resampling_in_10ms_chunks_matches_resampling_all_at_once() {
+        let channels = 2;
+        // A ramp, so a held sample differs from an interpolated one.
+        let input: Vec<f32> = (0..4410 * channels)
+            .map(|i| (i / channels) as f32 / 4410.0)
+            .collect();
+        let whole = LinearResampler::new(44_100, 48_000, 2).process(&input);
+        let mut chunked = LinearResampler::new(44_100, 48_000, 2);
+        let pieces: Vec<f32> = input
+            .chunks(441 * channels)
+            .flat_map(|chunk| chunked.process(chunk))
+            .collect();
+        assert_eq!(pieces.len(), whole.len());
+        for (i, (a, b)) in pieces.iter().zip(&whole).enumerate() {
+            assert!((a - b).abs() < 1e-6, "sample {i}: {a} chunked, {b} whole");
+        }
     }
 
     #[test]
