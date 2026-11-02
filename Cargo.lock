@@ -2957,6 +2957,7 @@ dependencies = [
 name = "polyrec"
 version = "0.5.141"
 dependencies = [
+ "base64",
  "chrono",
  "dirs",
  "eframe",
@@ -2967,6 +2968,7 @@ dependencies = [
  "self-replace",
  "semver",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
