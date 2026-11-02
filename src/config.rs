@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::i18n::Lang;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Persisted settings (`config.toml`).
 ///
@@ -453,12 +453,45 @@ impl Config {
             .join("config.toml")
     }
 
-    pub fn load() -> Result<Self, AppError> {
-        let path = Self::config_path();
+    /// The settings in config.toml, or the defaults if there's none yet. One
+    /// PolyRec can't read -- a hand edit gone wrong, or one from a newer
+    /// version -- is moved aside to `config.toml.bad` and the defaults used
+    /// instead: left where it was, the defaults would overwrite it at the next
+    /// save. Also says where it went, if it was moved.
+    pub fn load_or_set_aside() -> (Self, Option<PathBuf>) {
+        Self::load_or_set_aside_at(&Self::config_path())
+    }
+
+    fn load_or_set_aside_at(path: &Path) -> (Self, Option<PathBuf>) {
+        let e = match Self::load_from(path) {
+            Ok(config) => return (config, None),
+            Err(e) => e,
+        };
+        let aside = path.with_file_name("config.toml.bad");
+        match std::fs::rename(path, &aside) {
+            Ok(()) => {
+                tracing::warn!(
+                    "couldn't read {} ({e}); moved it to {} and started with the defaults",
+                    path.display(),
+                    aside.display()
+                );
+                (Self::default(), Some(aside))
+            }
+            Err(move_err) => {
+                tracing::warn!(
+                    "couldn't read {} ({e}) or move it aside ({move_err}); started with the defaults",
+                    path.display()
+                );
+                (Self::default(), None)
+            }
+        }
+    }
+
+    fn load_from(path: &Path) -> Result<Self, AppError> {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(&path)?;
+        let text = std::fs::read_to_string(path)?;
         toml::from_str(&text).map_err(|e| AppError::Config(e.to_string()))
     }
 
@@ -715,6 +748,50 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         let loaded: Config = toml::from_str(&text).unwrap();
         assert_eq!(loaded.output_dir, expected);
+    }
+
+    /// One wrong value (or a file from a newer version) made PolyRec start
+    /// on the defaults and then overwrite the user's config.toml with them
+    /// at the next save -- every setting gone, with no word of why.
+    #[test]
+    fn a_config_that_cant_be_read_is_set_aside_not_overwritten() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "output_dir = 'E:\\\\videos'\n[encode]\nfps = \"sixty\"\n";
+        std::fs::write(&path, text).unwrap();
+
+        let (config, aside) = Config::load_or_set_aside_at(&path);
+
+        assert_eq!(config.encode.fps, Config::default().encode.fps);
+        let aside = aside.expect("set aside");
+        assert_eq!(aside, dir.path().join("config.toml.bad"));
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), text);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_readable_config_is_loaded_where_it_is() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mine = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        std::fs::write(&path, toml::to_string_pretty(&mine).unwrap()).unwrap();
+
+        let (config, aside) = Config::load_or_set_aside_at(&path);
+
+        assert_eq!(config.output_dir, mine.output_dir);
+        assert_eq!(aside, None);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn no_config_yet_means_the_defaults_and_nothing_set_aside() {
+        let dir = tempdir().unwrap();
+        let (config, aside) = Config::load_or_set_aside_at(&dir.path().join("config.toml"));
+        assert_eq!(config.encode.fps, Config::default().encode.fps);
+        assert_eq!(aside, None);
     }
 
     #[test]
