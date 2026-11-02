@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- If the video stops saving partway through a recording (a graphics driver reset, say), PolyRec stops the recording after two seconds and says why, keeping what was recorded until then. Before, it went on showing "Recording" until you pressed Stop, and the video from that point on was lost.
+- A recording that failed no longer leaves the previous recording showing as just saved, and Export no longer pairs that older file with the new recording's track names.
+- One failed start (a folder that couldn't be written to, say) no longer makes a frame rate like 120 or 144 fps unavailable until PolyRec is restarted. Only the encoder actually turning a rate down is remembered.
+- A recording could come out with no video if its capture started on a thread something else had left in another COM mode. It now records as usual.
+
 ## [v0.5.143] - 2026-11-02
 
 ### Fixed

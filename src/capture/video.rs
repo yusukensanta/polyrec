@@ -75,11 +75,8 @@ impl CaptureTarget {
 /// Callers must use this (not GetClientRect) to size the encoder, or captured frames
 /// will be written at the wrong stride and appear skewed/distorted.
 pub fn query_capture_size(target: CaptureTarget) -> Result<(u32, u32), AppError> {
+    crate::com::join_mta();
     unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        );
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
                 .capture_ctx("IGraphicsCaptureItemInterop factory")?;
@@ -615,14 +612,7 @@ pub async fn run_video_capture(
     show_border: bool,
     gpu: Option<GpuFrames>,
 ) -> Result<(), AppError> {
-    unsafe {
-        windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        )
-        .ok()
-        .capture_ctx("CoInitializeEx")?;
-    }
+    crate::com::join_mta();
 
     // Half a slot, not a whole one: a minimum interval of exactly 1/fps would
     // make WGC skip a frame whenever one lands a hair early against the
@@ -1289,6 +1279,53 @@ mod tests {
             frames >= expected - 2,
             "{frames} frames in {SECS} s from a still window"
         );
+    }
+
+    /// A capture loop that lands on a thread something left in a
+    /// single-threaded COM apartment -- one of tokio's reused pool threads
+    /// -- still captures. It used to fail before its first frame: a
+    /// recording with no video. Shows a small window in the top-left corner
+    /// for ~1 s, so it's ignored by default.
+    #[test]
+    #[ignore]
+    fn capture_works_on_a_thread_left_in_a_single_threaded_apartment() {
+        let window = SlidingBarWindow::spawn();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let hwnd = window.hwnd;
+        let target = CaptureTarget::from_raw(CaptureKind::Window, hwnd);
+        let (w, h) = query_capture_size(target).expect("query_capture_size");
+        let size = (w & !1, h & !1);
+        let ctrl = CaptureControl::new();
+        let (tx, mut rx) = mpsc::channel(256);
+        let capture_ctrl = ctrl.clone();
+        let capture = std::thread::spawn(move || {
+            let _sta = crate::sources::SingleThreadedApartment::join();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_video_capture(
+                    CaptureTarget::from_raw(CaptureKind::Window, hwnd),
+                    size,
+                    size,
+                    LiveFps::new(30),
+                    capture_ctrl,
+                    tx,
+                    false,
+                    None,
+                ))
+        });
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        ctrl.request_stop();
+        capture
+            .join()
+            .unwrap()
+            .expect("run_video_capture failed on a single-threaded apartment's thread");
+        let mut frames = 0;
+        while rx.try_recv().is_ok() {
+            frames += 1;
+        }
+        assert!(frames > 0, "no frames");
     }
 
     /// A minimized window gives no frame at all, so there's nothing to send

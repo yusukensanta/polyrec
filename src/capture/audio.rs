@@ -17,10 +17,7 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
-use windows::Win32::System::Com::{
-    BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-    STGM_READ,
-};
+use windows::Win32::System::Com::{BLOB, CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Interface, Owned, implement};
@@ -161,11 +158,11 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
     Ok(devices)
 }
 
-/// Best-effort `CoInitializeEx(MTA)` (S_FALSE -- already initialized -- is
-/// fine too) and the endpoint enumerator every device lookup here starts from.
+/// The endpoint enumerator every device lookup here starts from, on a
+/// thread in COM (`com::join_mta`).
 fn device_enumerator() -> Result<IMMDeviceEnumerator, AppError> {
+    crate::com::join_mta();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
             .windows_ctx("CoCreateInstance MMDeviceEnumerator")
     }
@@ -508,9 +505,8 @@ pub async fn run_process_loopback_capture(
     tx: mpsc::Sender<AudioSamples>,
     gain: f32,
 ) -> Result<(), AppError> {
+    crate::com::join_mta();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
         let audio_client = activate_process_loopback_audio_client(target_pid, include_tree)?;
 
         // Process loopback is a synthesized stream with no natural device mix format,

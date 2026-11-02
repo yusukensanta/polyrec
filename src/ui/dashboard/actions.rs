@@ -620,8 +620,7 @@ impl App {
                 // A notice about the previous recording would read as being
                 // about this one.
                 self.notice = None;
-                self.last_recording_audio_labels = audio_labels;
-                self.last_recording_app_name = app_name;
+                self.last_recording.started(audio_labels, app_name);
             }
             Err(e) => {
                 tracing::error!("start_capture failed for source={source_title:?}: {e}");

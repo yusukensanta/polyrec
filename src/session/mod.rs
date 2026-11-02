@@ -7,7 +7,7 @@ pub use pipeline::{CaptureInputs, FpsSupport, estimated_bytes_per_sec, probe_fps
 use crate::capture::frame_rate::LiveFps;
 use crate::config::{BitrateMode, Codec, EncoderMode, ResolutionMode};
 use crate::encode::RecordingCommand;
-use crate::encode::actor::spawn_recording_actor;
+use crate::encode::actor::{StoppedItself, spawn_recording_actor};
 use crate::encode::highlight_export;
 use crate::error::{AppError, ResultExt};
 use crate::highlight::{
@@ -66,11 +66,10 @@ pub struct ActiveCapture {
     pub output_dir: PathBuf,
     pub app_name: String,
     pub naming: RecordingNaming,
-    /// Set by the recorder actor if it stopped itself early because free disk
-    /// space dropped below `disk_space::MIN_FREE_BYTES` — the file up to that
-    /// point is still finalized normally, this just tells the caller *why* the
-    /// recording ended without the user pressing stop, so it can be surfaced.
-    pub disk_full_flag: Arc<AtomicBool>,
+    /// Why the recorder actor stopped itself, if it did, without the user
+    /// pressing stop: the disk ran low, or writes kept failing -- see
+    /// `encode::actor::StoppedItself`.
+    pub stopped_itself: StoppedItself,
     /// The window or monitor this recording is capturing -- used to position
     /// the overlay HUD on whichever monitor is relevant (see
     /// `render_overlay_viewport`), instead of assuming the primary display.
@@ -207,14 +206,14 @@ impl SessionManager {
 
         let dims = CaptureDimensions::resolve(&source, &inputs.encode);
         let fps = dims.fps.clone();
-        let disk_full_flag = Arc::new(AtomicBool::new(false));
+        let stopped_itself = StoppedItself::default();
         let (recording_tx, recorder_handle) = spawn_recording_actor(
             output_path.clone(),
             polyrec_dir.clone(),
             app_name.clone(),
             naming.clone(),
             dims.encoder_params(&inputs),
-            Arc::clone(&disk_full_flag),
+            stopped_itself.clone(),
             fps.clone(),
         );
         let pipeline = CapturePipeline::spawn(
@@ -235,7 +234,7 @@ impl SessionManager {
             output_dir: polyrec_dir,
             app_name,
             naming,
-            disk_full_flag,
+            stopped_itself,
             hwnd: source.hwnd,
             kind: source.kind,
             fps,
@@ -588,7 +587,7 @@ mod tests {
             output_dir: PathBuf::new(),
             app_name: String::new(),
             naming: RecordingNaming::ProcessName,
-            disk_full_flag: Arc::new(AtomicBool::new(false)),
+            stopped_itself: StoppedItself::default(),
             hwnd: 0,
             kind: CaptureKind::Window,
             fps: LiveFps::new(60),

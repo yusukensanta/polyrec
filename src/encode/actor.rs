@@ -9,7 +9,7 @@ use crate::types::{AudioLevel, AudioSamples, TrackId, VideoFrame};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
@@ -17,6 +17,105 @@ use tokio::task::JoinHandle;
 /// `DiskSpaceGuard`'s doc comment for why this is on an interval, not every
 /// frame.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long video writes may fail one after another, with none getting
+/// through, before the recorder gives up: an encoder or GPU that has given
+/// out (a driver reset, say) loses about this much video instead of the
+/// rest of the recording, with "Recording" showing all along.
+const GIVE_UP_AFTER: Duration = Duration::from_secs(2);
+
+/// Why the recorder stopped itself before it was stopped, if it did --
+/// shared with the dashboard, which says so once the recording is saved
+/// (the file up to that point is finalized as usual).
+#[derive(Clone, Default, Debug)]
+pub struct StoppedItself {
+    /// Free disk space dropped below `disk_space::MIN_FREE_BYTES`.
+    disk_full: Arc<AtomicBool>,
+    /// Writes kept failing (see `FailingWrites`): the last failure.
+    gave_up: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl StoppedItself {
+    pub fn disk_full(&self) -> bool {
+        self.disk_full.load(Ordering::Relaxed)
+    }
+
+    /// The last failed write's error, if writes kept failing until the
+    /// recorder gave up.
+    pub fn gave_up(&self) -> Option<String> {
+        self.gave_up
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn give_up(&self, why: String) {
+        *self
+            .gave_up
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+    }
+}
+
+/// Writes failing one after another.
+#[derive(Default)]
+struct FailingWrites {
+    /// When the current run of failures began.
+    since: Option<Instant>,
+    /// The latest failure.
+    last: Option<String>,
+}
+
+impl FailingWrites {
+    /// Notes how one write of `what` went, at `now`. Whether it's time to
+    /// give up: writes have failed for `GIVE_UP_AFTER` with none getting
+    /// through. Logs the first failure of a run, not each one: every frame
+    /// and audio packet fails once something has given out.
+    fn note(&mut self, result: Result<(), AppError>, what: &str, now: Instant) -> bool {
+        match result {
+            Ok(()) => {
+                if self.since.take().is_some() {
+                    tracing::info!("writes are getting through again");
+                }
+                false
+            }
+            Err(e) => {
+                let since = *self.since.get_or_insert_with(|| {
+                    tracing::error!("write_{what} error: {e}");
+                    now
+                });
+                self.last = Some(e.to_string());
+                now.duration_since(since) >= GIVE_UP_AFTER
+            }
+        }
+    }
+}
+
+/// How the writes are going, video and audio apart: either can give out
+/// while the other carries on. A driver reset most likely takes only the
+/// video encoder, while audio, with an encoder of its own, goes on being
+/// written -- 100 packets a second a track.
+#[derive(Default)]
+struct Writes {
+    video: FailingWrites,
+    audio: FailingWrites,
+}
+
+impl Writes {
+    /// Notes how a frame's write went, at `now`. Whether to give up: video
+    /// writes have all failed for `GIVE_UP_AFTER`, whatever audio did
+    /// meanwhile -- the recording is its video.
+    fn note_video(&mut self, result: Result<(), AppError>, now: Instant) -> bool {
+        self.video.note(result, "video", now)
+    }
+
+    /// Notes how an audio packet's write went, at `now`. Audio failing on
+    /// its own, with the video still written, doesn't end the recording (it
+    /// never did); it's logged, once a run.
+    fn note_audio(&mut self, result: Result<(), AppError>, now: Instant) {
+        self.audio.note(result, "audio", now);
+    }
+}
 
 /// Spawns the RecordingActor on a dedicated blocking OS thread.
 ///
@@ -34,7 +133,7 @@ pub fn spawn_recording_actor(
     app_name: String,
     naming: RecordingNaming,
     params: EncoderParams,
-    disk_full_flag: Arc<AtomicBool>,
+    stopped_itself: StoppedItself,
     fps: LiveFps,
 ) -> (
     mpsc::Sender<RecordingCommand>,
@@ -53,24 +152,34 @@ pub fn spawn_recording_actor(
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);
         let mut wrote_any = false;
+        let mut writes = Writes::default();
 
         while let Some(cmd) = rx.blocking_recv() {
-            match cmd {
-                RecordingCommand::WriteVideo(frame, _slot) => match writer.write_video(frame) {
-                    Ok(()) => wrote_any = true,
-                    Err(e) => tracing::error!("write_video error: {e}"),
-                },
+            let gave_out = match cmd {
+                RecordingCommand::WriteVideo(frame, _slot) => {
+                    let written = writer.write_video(frame);
+                    wrote_any |= written.is_ok();
+                    writes.note_video(written, Instant::now())
+                }
                 RecordingCommand::WriteAudio(samples) => {
                     let track_idx = samples.track_id.0 as usize;
-                    match writer.write_audio(track_idx, samples) {
-                        Ok(()) => wrote_any = true,
-                        Err(e) => tracing::error!("write_audio error: {e}"),
-                    }
+                    let written = writer.write_audio(track_idx, samples);
+                    wrote_any |= written.is_ok();
+                    writes.note_audio(written, Instant::now());
+                    false
                 }
                 RecordingCommand::Stop => break,
+            };
+            if gave_out {
+                let why = writes.video.last.take().unwrap_or_default();
+                tracing::error!(
+                    "video writes have failed for {GIVE_UP_AFTER:?}; stopping the recording: {why}"
+                );
+                stopped_itself.give_up(why);
+                break;
             }
 
-            if disk_guard.should_stop(&disk_full_flag, "recording") {
+            if disk_guard.should_stop(&stopped_itself.disk_full, "recording") {
                 break;
             }
         }
@@ -202,6 +311,71 @@ mod tests {
     use crate::types::TrackId;
     use std::time::Duration;
 
+    fn failed() -> Result<(), AppError> {
+        Err(AppError::Encode("ProcessSample: device removed".into()))
+    }
+
+    /// An encoder or GPU that gives out fails every write from then on. The
+    /// recorder used to log each one (60+ a second) and carry on, the
+    /// dashboard showing "Recording" until Stop, and the video lost.
+    #[test]
+    fn two_seconds_of_nothing_but_failed_video_writes_is_giving_up() {
+        let t0 = Instant::now();
+        let mut writes = Writes::default();
+        assert!(!writes.note_video(failed(), t0));
+        assert!(!writes.note_video(failed(), t0 + Duration::from_millis(1500)));
+        assert!(writes.note_video(failed(), t0 + GIVE_UP_AFTER));
+        assert_eq!(
+            writes.video.last.as_deref(),
+            Some("Encode error: ProcessSample: device removed")
+        );
+    }
+
+    /// A driver reset most likely takes only the video encoder: audio, with
+    /// an encoder of its own, goes on being written -- 100 packets a second
+    /// a track -- which mustn't keep a recording with no video going.
+    #[test]
+    fn video_failing_gives_up_even_while_audio_gets_through() {
+        let t0 = Instant::now();
+        let mut writes = Writes::default();
+        let mut gave_up_at = None;
+        for ms in (0..=2500).step_by(10) {
+            let at = t0 + Duration::from_millis(ms);
+            writes.note_audio(Ok(()), at);
+            if writes.note_video(failed(), at) {
+                gave_up_at = Some(ms);
+                break;
+            }
+        }
+        assert_eq!(gave_up_at, Some(2000));
+    }
+
+    /// Audio failing on its own, video still written, doesn't end the
+    /// recording -- it never did.
+    #[test]
+    fn audio_failing_on_its_own_doesnt_end_the_recording() {
+        let t0 = Instant::now();
+        let mut writes = Writes::default();
+        for ms in (0..=10_000).step_by(10) {
+            let at = t0 + Duration::from_millis(ms);
+            writes.note_audio(failed(), at);
+            assert!(!writes.note_video(Ok(()), at), "{ms} ms");
+        }
+    }
+
+    /// A write failing now and then, with others getting through, isn't
+    /// giving up.
+    #[test]
+    fn a_failed_write_now_and_then_isnt_giving_up() {
+        let t0 = Instant::now();
+        let mut writes = Writes::default();
+        for second in 0..10 {
+            let at = t0 + Duration::from_secs(second);
+            assert!(!writes.note_video(failed(), at));
+            assert!(!writes.note_video(Ok(()), at + Duration::from_millis(500)));
+        }
+    }
+
     /// A recording stopped before anything reached it can't be finalized
     /// (Media Foundation won't finish a file with nothing in it), and that
     /// used to leave its `.tmp.mp4` behind for good: hidden from Recent,
@@ -215,7 +389,7 @@ mod tests {
             "game".into(),
             RecordingNaming::ProcessName,
             EncoderParams::tiny_test(Codec::H264, &[]),
-            Arc::new(AtomicBool::new(false)),
+            StoppedItself::default(),
             LiveFps::new(30),
         );
         tx.send(RecordingCommand::Stop).await.unwrap();

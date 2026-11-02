@@ -331,6 +331,9 @@ pub struct Strings {
     // Error popup
     pub error_title: &'static str,
     pub disk_full_mid_recording: &'static str,
+    /// A recording the recorder stopped because writing it kept failing.
+    /// `{error}` is the last failure.
+    pub notice_recording_gave_up: &'static str,
     pub recording_failed_prefix: &'static str,
     pub recording_ended_unexpectedly_prefix: &'static str,
     pub couldnt_start_recording_prefix: &'static str,
@@ -548,6 +551,7 @@ pub static EN: Strings = Strings {
 
     error_title: "Error",
     disk_full_mid_recording: "Recording stopped automatically — your disk ran low on free space (below 500 MB). The recording up to that point was saved.",
+    notice_recording_gave_up: "Recording stopped automatically — PolyRec couldn't keep writing it ({error}). The recording up to that point was saved.",
     recording_failed_prefix: "Recording failed: ",
     recording_ended_unexpectedly_prefix: "Recording ended unexpectedly: ",
     couldnt_start_recording_prefix: "Couldn't start recording: ",
@@ -743,6 +747,7 @@ pub static JA: Strings = Strings {
 
     error_title: "エラー",
     disk_full_mid_recording: "空き容量が不足したため録画を自動停止しました（500MB未満）。その時点までの録画は保存されています。",
+    notice_recording_gave_up: "録画を書き込めなくなったため自動停止しました（{error}）。その時点までの録画は保存されています。",
     recording_failed_prefix: "録画に失敗しました: ",
     recording_ended_unexpectedly_prefix: "録画が予期せず終了しました: ",
     couldnt_start_recording_prefix: "録画を開始できませんでした: ",

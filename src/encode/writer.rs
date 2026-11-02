@@ -152,9 +152,9 @@ pub(crate) fn video_encoder_accepts(params: &EncoderParams) -> bool {
         audio_tracks: Vec::new(),
         ..params.clone()
     };
-    let accepted = match RecordingWriter::new(&probe_path, &video_only) {
-        Ok(_writer) => true,
-        Err(e) => {
+    let answer = match RecordingWriter::try_new(&probe_path, &video_only) {
+        Ok(_writer) => Some(true),
+        Err(WriterError::Rejected(e)) => {
             tracing::info!(
                 "encoder rejects {:?} {}x{} at {} fps: {e}",
                 params.codec,
@@ -162,12 +162,42 @@ pub(crate) fn video_encoder_accepts(params: &EncoderParams) -> bool {
                 params.height,
                 params.fps
             );
-            false
+            Some(false)
+        }
+        // Not an answer: asked again next time.
+        Err(WriterError::Other(e)) => {
+            tracing::warn!("couldn't ask the encoder about {} fps: {e}", params.fps);
+            None
         }
     };
     let _ = std::fs::remove_file(&probe_path);
-    encoder_answers().insert(key, accepted);
-    accepted
+    if let Some(accepted) = answer {
+        encoder_answers().insert(key, accepted);
+    }
+    answer.unwrap_or(false)
+}
+
+/// Why `RecordingWriter::try_new` failed: the video encoder turned the
+/// settings down -- what `ENCODER_ANSWERS` remembers -- or something else
+/// did (the file couldn't be created, the audio encoder, the GPU), which
+/// says nothing about what the encoder takes.
+enum WriterError {
+    Rejected(AppError),
+    Other(AppError),
+}
+
+impl From<AppError> for WriterError {
+    fn from(e: AppError) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<WriterError> for AppError {
+    fn from(e: WriterError) -> Self {
+        match e {
+            WriterError::Rejected(e) | WriterError::Other(e) => e,
+        }
+    }
 }
 
 /// Everything `RecordingWriter::new` needs to configure its sink writer --
@@ -291,6 +321,11 @@ impl RecordingWriter {
     /// and returns that rate with the writer. Rates already known to be
     /// rejected (`ENCODER_ANSWERS`) are skipped without asking again. Runs on
     /// the writer actor's thread, so recording start never waits on it.
+    ///
+    /// Only the encoder turning a rate down counts, and only once a lower
+    /// rate has worked: had none, whatever is wrong (a driver reset, say)
+    /// isn't the rate. Anything else -- the file can't be created -- is
+    /// returned at once, the same at every rate.
     pub fn new_at_highest_fps(
         output_path: &Path,
         params: &EncoderParams,
@@ -300,28 +335,50 @@ impl RecordingWriter {
             ..params.clone()
         };
         let mut writer = None;
+        let mut turned_down = Vec::new();
+        let mut failed = None;
         let fps = highest_encodable_fps(params.fps, |fps| {
             let attempt = at(fps);
             let key = encoder_answer_key(&attempt);
-            if encoder_answers().get(&key) == Some(&false) {
+            if failed.is_some() || encoder_answers().get(&key) == Some(&false) {
                 return false;
             }
-            let created = Self::new(output_path, &attempt);
-            if let Err(e) = &created {
-                tracing::warn!("encoder rejects {fps} fps ({e}), trying a lower rate");
+            match Self::try_new(output_path, &attempt) {
+                Ok(created) => {
+                    writer = Some(created);
+                    true
+                }
+                Err(WriterError::Rejected(e)) => {
+                    tracing::warn!("encoder rejects {fps} fps ({e}), trying a lower rate");
+                    turned_down.push(key);
+                    false
+                }
+                Err(WriterError::Other(e)) => {
+                    failed = Some(e);
+                    false
+                }
             }
-            encoder_answers().insert(key, created.is_ok());
-            writer = created.ok();
-            writer.is_some()
         });
+        if let Some(e) = failed {
+            return Err(e);
+        }
         let writer = match writer {
             Some(writer) => writer,
             None => Self::new(output_path, &at(fps))?,
         };
+        let mut answers = encoder_answers();
+        answers.extend(turned_down.into_iter().map(|key| (key, false)));
+        answers.insert(encoder_answer_key(&at(fps)), true);
         Ok((writer, fps))
     }
 
     pub fn new(output_path: &Path, params: &EncoderParams) -> Result<Self, AppError> {
+        Ok(Self::try_new(output_path, params)?)
+    }
+
+    /// `new`, telling the video encoder turning `params` down apart from
+    /// anything else failing -- see `WriterError`.
+    fn try_new(output_path: &Path, params: &EncoderParams) -> Result<Self, WriterError> {
         let EncoderParams {
             width,
             height,
@@ -375,6 +432,8 @@ impl RecordingWriter {
             };
             let video_out =
                 make_video_output_type(width, height, fps, requested_subtype, bitrate_bps)?;
+            // From here to the video stream's input type, a failure is the
+            // video encoder turning these settings down.
             let video_stream = match writer.AddStream(&video_out) {
                 Ok(idx) => idx,
                 Err(e) if requested_subtype == MFVideoFormat_HEVC => {
@@ -388,15 +447,21 @@ impl RecordingWriter {
                     )?;
                     writer
                         .AddStream(&fallback_out)
-                        .encode_ctx("AddStream video (H264 fallback)")?
+                        .encode_ctx("AddStream video (H264 fallback)")
+                        .map_err(WriterError::Rejected)?
                 }
-                Err(e) => return Err(AppError::Encode(format!("AddStream video: {e}"))),
+                Err(e) => {
+                    return Err(WriterError::Rejected(AppError::Encode(format!(
+                        "AddStream video: {e}"
+                    ))));
+                }
             };
             let (in_width, in_height) = direct.map_or((width, height), |gpu| gpu.size);
             let video_in = make_video_input_type(in_width, in_height, fps)?;
             writer
                 .SetInputMediaType(video_stream, &video_in, None)
-                .encode_ctx("SetInputMediaType video")?;
+                .encode_ctx("SetInputMediaType video")
+                .map_err(WriterError::Rejected)?;
             let codec_api = video_codec_api(&writer, video_stream);
             let gop_set = codec_api.as_ref().is_some_and(|api| set_gop_size(api, fps));
 
@@ -901,6 +966,54 @@ fn pack_u64(high: u32, low: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The answers remembered for one frame size -- a size no other test
+    /// uses, as answers are kept for the whole test run.
+    fn answers_for(width: u32, height: u32) -> Vec<(u32, bool)> {
+        encoder_answers()
+            .iter()
+            .filter(|((_, w, h, ..), _)| (*w, *h) == (width, height))
+            .map(|(&(_, _, _, fps, ..), &accepted)| (fps, accepted))
+            .collect()
+    }
+
+    /// A recording file that can't be created says nothing about which
+    /// frame rates the encoder takes. It used to be remembered as the
+    /// encoder turning every rate above 60 down, for the rest of the run --
+    /// a bad output folder, once, and 120 and 144 fps were gone until
+    /// PolyRec was restarted.
+    #[test]
+    fn a_file_that_cant_be_created_isnt_taken_for_the_encoder_turning_rates_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let nowhere = dir.path().join("not there").join("recording.tmp.mp4");
+        let params = EncoderParams {
+            width: 96,
+            height: 48,
+            fps: 120,
+            ..EncoderParams::tiny_test(Codec::H264, &[])
+        };
+        assert!(RecordingWriter::new_at_highest_fps(&nowhere, &params).is_err());
+        assert_eq!(answers_for(96, 48), vec![]);
+    }
+
+    /// The encoder turning a rate down is still remembered, once a lower
+    /// rate shows the encoder itself works.
+    #[test]
+    fn a_rate_the_encoder_turns_down_is_remembered_once_a_lower_one_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let params = EncoderParams {
+            width: 80,
+            height: 48,
+            fps: 240,
+            ..EncoderParams::tiny_test(Codec::H264, &[])
+        };
+        let (_writer, fps) =
+            RecordingWriter::new_at_highest_fps(&dir.path().join("rec.mp4"), &params).unwrap();
+        assert!(fps < 240, "the software encoder took 240 fps");
+        let answers = answers_for(80, 48);
+        assert!(answers.contains(&(240, false)), "{answers:?}");
+        assert!(answers.contains(&(fps, true)), "{answers:?}");
+    }
 
     #[test]
     fn video_bitrate_scales_with_resolution_and_fps() {

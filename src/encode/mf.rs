@@ -2,7 +2,6 @@
 
 use crate::error::{AppError, ResultExt};
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup};
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 /// One `MFStartup` reference, released by `MFShutdown` on drop.
 ///
@@ -32,16 +31,12 @@ impl MfSession {
         Ok(Self(()))
     }
 
-    /// Best-effort `CoInitializeEx(MTA)` first, then `start()` -- for the
-    /// one-shot offline jobs (remux/export/highlight save/track probe). The
-    /// COM result is deliberately ignored: `S_FALSE` (already initialized)
-    /// and `RPC_E_CHANGED_MODE` (thread is already an STA, e.g. the UI
-    /// thread probing a finished recording's track count) both leave the
-    /// thread in a state Media Foundation works from.
+    /// `com::join_mta` first, then `start()` -- for the one-shot offline
+    /// jobs (remux/export/highlight save/track probe), which may run on the
+    /// dashboard's own thread (probing a finished recording's track count),
+    /// already a single-threaded apartment.
     pub(crate) fn start_mta() -> Result<Self, AppError> {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
+        crate::com::join_mta();
         Self::start()
     }
 }
