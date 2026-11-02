@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.144] - 2026-11-02
+
 ### Fixed
 
 - If the video stops saving partway through a recording (a graphics driver reset, say), PolyRec stops the recording after two seconds and says why, keeping what was recorded until then. Before, it went on showing "Recording" until you pressed Stop, and the video from that point on was lost.
