@@ -76,19 +76,42 @@ fn build_app_audio_sources_from(
     sources
 }
 
-/// Which of `devices`' checkboxes should start checked -- `config`'s saved
-/// selection (`Config::selected_audio_device_ids`) if the user has ever
-/// changed one, matched by the device's stable WASAPI endpoint id so a
-/// reconnected device (unplugged mic, sleeping Bluetooth headset) keeps
-/// its remembered state; otherwise falls back to the original
-/// loopback-only default (see the call sites' doc comments for why that's
-/// the right first-run default). Shared by `App::new` (initial load) and
+/// Which of `devices`' checkboxes should start checked: the default
+/// output's (the loopback device) as `Config::records_default_output` says,
+/// the default microphone's as `Config::records_default_input` says --
+/// whichever devices Windows' defaults are now, so a switched-to device
+/// keeps the tick its role had. Shared by `App::new` (initial load) and
 /// `refresh_sources_and_audio_if_due` (device set changed) so both apply
-/// the exact same precedence.
+/// the exact same rule.
 pub(super) fn resolve_selected_audio(devices: &[AudioDevice], config: &Config) -> Vec<bool> {
-    match &config.selected_audio_device_ids {
-        Some(ids) => devices.iter().map(|d| ids.contains(&d.id)).collect(),
-        None => devices.iter().map(|d| d.is_loopback).collect(),
+    devices
+        .iter()
+        .map(|d| {
+            if d.is_loopback {
+                config.records_default_output()
+            } else {
+                config.records_default_input()
+            }
+        })
+        .collect()
+}
+
+/// Saves which SYSTEM checkboxes are ticked (`selected`, one per `devices`)
+/// to `config`: as Windows' default output or default microphone being
+/// recorded, not as the devices they happen to be -- see
+/// `Config::record_default_output`. A role with no device listed (no
+/// microphone plugged in) keeps what it had.
+pub(super) fn remember_selected_audio(
+    config: &mut Config,
+    devices: &[AudioDevice],
+    selected: &[bool],
+) {
+    for (device, &on) in devices.iter().zip(selected) {
+        if device.is_loopback {
+            config.record_default_output = Some(on);
+        } else {
+            config.record_default_input = Some(on);
+        }
     }
 }
 
@@ -462,14 +485,7 @@ impl App {
     /// every device (not just ones the user cares about) is always present
     /// in `self.audio_devices`.
     pub(super) fn persist_selected_audio_devices(&mut self, s: &'static Strings) {
-        let ids: Vec<String> = self
-            .audio_devices
-            .iter()
-            .zip(self.selected_audio.iter())
-            .filter(|&(_, &selected)| selected)
-            .map(|(d, _)| d.id.clone())
-            .collect();
-        self.config.selected_audio_device_ids = Some(ids);
+        remember_selected_audio(&mut self.config, &self.audio_devices, &self.selected_audio);
         self.save_config_or_report(s);
     }
 
@@ -871,6 +887,69 @@ mod tests {
             name: id.into(),
             is_loopback: false,
         }
+    }
+
+    const SOUND_BLASTER: &str = "{0.0.0.00000000}.{sound-blaster}";
+    const BT_W3X: &str = "{0.0.0.00000000}.{bt-w3x}";
+    const YETI: &str = "{0.0.1.00000000}.{yeti}";
+    const HEADSET_MIC: &str = "{0.0.1.00000000}.{headset}";
+
+    /// The SYSTEM list as Windows' defaults stand: the default output (its
+    /// sound, through loopback), then the default microphone.
+    fn defaults(output: &str, mic: &str) -> [AudioDevice; 2] {
+        [
+            AudioDevice {
+                id: output.into(),
+                name: "Speakers".into(),
+                is_loopback: true,
+            },
+            AudioDevice {
+                id: mic.into(),
+                name: "Microphone".into(),
+                is_loopback: false,
+            },
+        ]
+    }
+
+    /// The list only ever shows Windows' default output and microphone, but
+    /// ticks were saved against the devices they were: switch a default to
+    /// another device for a while -- a headset -- and it showed unticked,
+    /// so it wasn't recorded, with nothing to say so. A tick now stays with
+    /// its role.
+    #[test]
+    fn a_tick_stays_with_its_role_when_windows_default_device_changes() {
+        let mut config = Config::default();
+        let usual = defaults(SOUND_BLASTER, YETI);
+        remember_selected_audio(&mut config, &usual, &[true, true]);
+        let switched = defaults(BT_W3X, HEADSET_MIC);
+        assert_eq!(resolve_selected_audio(&switched, &config), vec![true, true]);
+        assert_eq!(resolve_selected_audio(&usual, &config), vec![true, true]);
+    }
+
+    /// Ticking the switched-to device used to forget the one before it,
+    /// which then came back unticked.
+    #[test]
+    fn ticking_during_a_switch_leaves_the_device_switched_back_to_ticked() {
+        let mut config = Config::default();
+        let usual = defaults(SOUND_BLASTER, YETI);
+        remember_selected_audio(&mut config, &usual, &[true, true]);
+        remember_selected_audio(
+            &mut config,
+            &defaults(SOUND_BLASTER, HEADSET_MIC),
+            &[true, true],
+        );
+        assert_eq!(resolve_selected_audio(&usual, &config), vec![true, true]);
+    }
+
+    /// With no microphone plugged in, only the output is listed; changing its
+    /// tick leaves the microphone's alone.
+    #[test]
+    fn a_role_with_no_device_listed_keeps_its_tick() {
+        let mut config = Config::default();
+        let both = defaults(SOUND_BLASTER, YETI);
+        remember_selected_audio(&mut config, &both, &[true, true]);
+        remember_selected_audio(&mut config, &both[..1], &[false]);
+        assert_eq!(resolve_selected_audio(&both, &config), vec![false, true]);
     }
 
     #[test]
