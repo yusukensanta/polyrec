@@ -246,10 +246,9 @@ impl App {
                     self.set_dashboard_shown(ctx, !shown);
                 }
                 TrayAction::StartStop => {
-                    let is_recording = self.session.is_recording();
-                    let can_stop = is_recording || self.session.is_paused();
+                    let can_stop = self.session.is_recording() || self.session.is_paused();
                     if can_stop || self.rec_blocked_reason(s).is_none() {
-                        self.handle_rec_button(is_recording);
+                        self.handle_rec_button();
                     }
                     // A start that didn't happen says why on the dashboard
                     // (an error, or REC's tooltip), which may be hidden.

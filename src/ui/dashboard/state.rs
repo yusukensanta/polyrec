@@ -3,6 +3,7 @@
 //! reads as a list of features rather than ~50 loose fields.
 
 use crate::error::AppError;
+use crate::session::SessionManager;
 use crate::sources::InstalledApp;
 use eframe::egui;
 use std::collections::HashMap;
@@ -65,10 +66,28 @@ pub(super) struct RecordingStatusCache {
 #[derive(Default)]
 pub(super) struct Finalizing {
     pub handle: Option<JoinHandle<Result<PathBuf, AppError>>>,
-    pub path: Option<PathBuf>,
     pub disk_full: Option<Arc<AtomicBool>>,
     /// What the recording being saved lost before it was stopped.
     pub lost_sources: crate::capture::LostSources,
+}
+
+impl Finalizing {
+    /// Stops `session`'s manual recording and keeps what reporting on its
+    /// save needs. Whether there was one to stop: with none -- a second
+    /// Stop queued behind the first -- the save under way is left alone.
+    pub(super) fn stop(&mut self, session: &mut SessionManager) -> bool {
+        let Some(active) = session.active() else {
+            return false;
+        };
+        tracing::info!(
+            "recording stop requested, finalizing: {}",
+            active.output_path.display()
+        );
+        self.disk_full = Some(Arc::clone(&active.disk_full_flag));
+        self.lost_sources = active.lost_sources();
+        self.handle = session.stop_capture();
+        true
+    }
 }
 
 /// The post-recording export controls -- see `render_export_controls`.
@@ -165,5 +184,27 @@ impl Default for SelfUpdate {
             state: SelfUpdateState::Idle,
             handle: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The start/stop hotkey pressed twice before the dashboard caught up
+    /// (a game holding the GPU, say) queues two Stops. The second finds
+    /// nothing left to stop -- and must leave the save the first one
+    /// started alone, or the saved recording's panel, and any disk-full or
+    /// lost-source notice, never show.
+    #[tokio::test]
+    async fn a_second_stop_leaves_the_first_ones_save_alone() {
+        let mut session = SessionManager::recording_stuck();
+        let mut finalizing = Finalizing::default();
+        assert!(finalizing.stop(&mut session));
+        assert!(finalizing.handle.is_some());
+        assert!(finalizing.disk_full.is_some());
+        assert!(!finalizing.stop(&mut session));
+        assert!(finalizing.handle.is_some());
+        assert!(finalizing.disk_full.is_some());
     }
 }

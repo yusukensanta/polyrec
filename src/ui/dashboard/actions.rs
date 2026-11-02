@@ -300,9 +300,16 @@ impl App {
         }
     }
 
-    pub(super) fn handle_rec_button(&mut self, is_recording: bool) {
-        let is_paused = self.session.is_paused();
-        if is_recording || is_paused {
+    /// Whether a manual recording is running or paused -- read from the
+    /// session each time, never from a copy taken earlier in the frame:
+    /// several start/stop presses can be handled in one frame, each after
+    /// the last one's start or stop.
+    fn has_recording(&self) -> bool {
+        self.session.is_recording() || self.session.is_paused()
+    }
+
+    pub(super) fn handle_rec_button(&mut self) {
+        if self.has_recording() {
             self.stop_recording();
         } else if let Some(idx) = self.selected_source {
             let Some(source) = self.sources.get(idx).cloned() else {
@@ -318,9 +325,8 @@ impl App {
     /// manual source-list selection. It captures whatever window is currently in the
     /// foreground instead, so "press hotkey, record what I'm doing right now" works
     /// while alt-tabbed into a game with the dashboard never brought to front.
-    pub(super) fn handle_hotkey_start_stop(&mut self, is_recording: bool) {
-        let is_paused = self.session.is_paused();
-        if is_recording || is_paused {
+    pub(super) fn handle_hotkey_start_stop(&mut self) {
+        if self.has_recording() {
             self.stop_recording();
         } else if let Some(source) = foreground_capture_source() {
             self.start_recording_with_source(source);
@@ -493,19 +499,9 @@ impl App {
     }
 
     pub(super) fn stop_recording(&mut self) {
-        let path = self.session.active().map(|a| a.output_path.clone());
-        if let Some(p) = &path {
-            tracing::info!("recording stop requested, finalizing: {}", p.display());
+        if !self.finalizing.stop(&mut self.session) {
+            return;
         }
-        let disk_full = self.session.active().map(|a| Arc::clone(&a.disk_full_flag));
-        self.finalizing.lost_sources = self
-            .session
-            .active()
-            .map(|a| a.lost_sources())
-            .unwrap_or_default();
-        self.finalizing.handle = self.session.stop_capture();
-        self.finalizing.path = path;
-        self.finalizing.disk_full = disk_full;
         self.recording_start = None;
         self.frame_count.store(0, Ordering::Relaxed);
         // export.track_selection/export.available_tracks are set once finalize

@@ -284,7 +284,8 @@ struct HookContext {
     /// re-firing on Windows' OS-level key-repeat while the key stays held,
     /// the hook equivalent of `RegisterHotKey`'s `MOD_NOREPEAT` flag. Cleared
     /// on that key's key-up, regardless of what modifiers are held at that
-    /// point (matching a key release always ends "repeat" for it).
+    /// point (matching a key release always ends "repeat" for it). See
+    /// `on_key`.
     held: HashSet<u32>,
     tx: mpsc::Sender<HotkeyEvent>,
     /// Called right after a matched event is queued -- see `HotkeyListener::spawn`
@@ -348,6 +349,56 @@ fn mask_key_inputs() -> [INPUT; 2] {
     [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)]
 }
 
+/// What the hook does with one key event.
+enum KeyOutcome<'a> {
+    /// Not ours: on to the next hook and the focused app.
+    Pass,
+    /// Ours, and already acted on.
+    Swallow,
+    /// Ours: fire this binding, and swallow the key.
+    Fire(&'a Binding),
+}
+
+/// The hook's decision for `vk` going down (`down`) or up, given the keys it
+/// has fired on that are still `held`. `mods` reads the modifiers held now,
+/// only needed for a fresh key-down.
+///
+/// A held hotkey's auto-repeats and its release are swallowed too: the
+/// focused app never saw it go down, so they'd reach a game as presses from
+/// nowhere and the release of a key that was never pressed. Should a
+/// release ever be missed (one made on the secure desktop, say), the next
+/// press of that key is taken for a repeat -- swallowed without firing --
+/// and its release puts things right.
+fn on_key<'a>(
+    held: &mut HashSet<u32>,
+    bindings: &'a [Binding],
+    vk: u32,
+    down: bool,
+    mods: impl FnOnce() -> HOT_KEY_MODIFIERS,
+) -> KeyOutcome<'a> {
+    if !down {
+        return if held.remove(&vk) {
+            KeyOutcome::Swallow
+        } else {
+            KeyOutcome::Pass
+        };
+    }
+    if held.contains(&vk) {
+        return KeyOutcome::Swallow;
+    }
+    let mods = mods();
+    match bindings
+        .iter()
+        .find(|b| b.vk.0 as u32 == vk && b.mods.0 == mods.0)
+    {
+        Some(binding) => {
+            held.insert(vk);
+            KeyOutcome::Fire(binding)
+        }
+        None => KeyOutcome::Pass,
+    }
+}
+
 /// `WH_KEYBOARD_LL` callback -- sees every keystroke system-wide before it
 /// reaches whatever window/app has focus (including exclusive-fullscreen
 /// games), unlike `RegisterHotKey`'s `WM_HOTKEY`, which some games'
@@ -373,16 +424,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 let Some(hc) = ctx.as_mut() else {
                     return;
                 };
-                if is_up {
-                    hc.held.remove(&vk_code);
-                } else if !hc.held.contains(&vk_code) {
-                    let current_mods = live_modifiers();
-                    if let Some(binding) = hc
-                        .bindings
-                        .iter()
-                        .find(|b| b.vk.0 as u32 == vk_code && b.mods.0 == current_mods.0)
-                    {
-                        hc.held.insert(vk_code);
+                match on_key(&mut hc.held, &hc.bindings, vk_code, is_down, live_modifiers) {
+                    KeyOutcome::Pass => {}
+                    KeyOutcome::Swallow => consumed = true,
+                    KeyOutcome::Fire(binding) => {
                         hc.tx.send(binding.event).ok();
                         (hc.wake)();
                         consumed = true;
@@ -487,6 +532,85 @@ fn run_hook_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const F8: u32 = 0x77;
+    const F9: u32 = 0x78;
+
+    fn f8_binding() -> [Binding; 1] {
+        [Binding {
+            vk: VIRTUAL_KEY(F8 as u16),
+            mods: HOT_KEY_MODIFIERS(0),
+            event: HotkeyEvent::StartStop,
+        }]
+    }
+
+    fn no_mods() -> HOT_KEY_MODIFIERS {
+        HOT_KEY_MODIFIERS(0)
+    }
+
+    /// What one key event comes to: `None` passes it on, `Some(None)`
+    /// swallows it, `Some(Some(event))` fires `event` (and swallows it).
+    fn outcome(
+        held: &mut HashSet<u32>,
+        bindings: &[Binding],
+        vk: u32,
+        down: bool,
+    ) -> Option<Option<HotkeyEvent>> {
+        match on_key(held, bindings, vk, down, no_mods) {
+            KeyOutcome::Pass => None,
+            KeyOutcome::Swallow => Some(None),
+            KeyOutcome::Fire(binding) => Some(Some(binding.event)),
+        }
+    }
+
+    /// Held down, a hotkey repeats: Windows sends key-down after key-down,
+    /// then one key-up. It fires once; the game must see none of it --
+    /// it never saw the first key-down, so the repeats would be keys
+    /// pressed from nowhere, and the key-up a release of a key that was
+    /// never down.
+    #[test]
+    fn a_held_hotkey_fires_once_and_the_game_never_sees_it() {
+        let bindings = f8_binding();
+        let mut held = HashSet::new();
+        assert_eq!(
+            outcome(&mut held, &bindings, F8, true),
+            Some(Some(HotkeyEvent::StartStop))
+        );
+        for _ in 0..3 {
+            assert_eq!(outcome(&mut held, &bindings, F8, true), Some(None));
+        }
+        assert_eq!(outcome(&mut held, &bindings, F8, false), Some(None));
+        // Pressed again after that, it fires again.
+        assert_eq!(
+            outcome(&mut held, &bindings, F8, true),
+            Some(Some(HotkeyEvent::StartStop))
+        );
+    }
+
+    #[test]
+    fn other_keys_pass_through_down_repeated_and_up() {
+        let bindings = f8_binding();
+        let mut held = HashSet::new();
+        for down in [true, true, false] {
+            assert_eq!(outcome(&mut held, &bindings, F9, down), None);
+        }
+    }
+
+    /// F8 bound bare, pressed with Shift: someone else's Shift+F8.
+    #[test]
+    fn a_hotkey_key_with_other_modifiers_held_passes_through() {
+        let bindings = f8_binding();
+        let mut held = HashSet::new();
+        let shift = || MOD_SHIFT;
+        assert!(matches!(
+            on_key(&mut held, &bindings, F8, true, shift),
+            KeyOutcome::Pass
+        ));
+        assert!(matches!(
+            on_key(&mut held, &bindings, F8, false, shift),
+            KeyOutcome::Pass
+        ));
+    }
 
     #[test]
     fn a_consumed_hotkey_with_modifiers_presses_the_mask_key() {
