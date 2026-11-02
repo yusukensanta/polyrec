@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.143] - 2026-11-02
+
 ### Fixed
 
 - Audio from a device running at 44.1 kHz (or any rate that isn't a multiple of 48 kHz) had one wrong sample every 10 ms, a faint 100 Hz buzz. Converting it to the recording's 48 kHz now carries on smoothly from one 10 ms piece to the next.
