@@ -23,10 +23,15 @@ struct GithubRelease {
 /// (e.g. from `env!("CARGO_PKG_VERSION")`). `None` means either string failed to
 /// parse as semver — treated the same as "no update" by the caller, not an error.
 fn is_newer(current_version: &str, latest_tag: &str) -> Option<bool> {
-    let latest = latest_tag.trim_start_matches('v');
     let current = semver::Version::parse(current_version).ok()?;
-    let latest = semver::Version::parse(latest).ok()?;
+    let latest = tag_version(latest_tag)?;
     Some(latest > current)
+}
+
+/// The version a release tag (`"v0.2.0"` or `"0.2.0"`) names, if it names
+/// one.
+pub(crate) fn tag_version(tag: &str) -> Option<semver::Version> {
+    semver::Version::parse(tag.trim_start_matches('v')).ok()
 }
 
 pub async fn check_for_update(current_version: &str) -> Option<AvailableUpdate> {
