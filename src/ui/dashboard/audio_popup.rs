@@ -2,7 +2,8 @@ use super::App;
 use super::icons::Icon;
 use super::theme::{POPUP_WIDTH, pal};
 use super::widgets::{
-    RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, section_header,
+    RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, popup_window,
+    section_header,
 };
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -47,16 +48,13 @@ impl App {
             return;
         }
         let mut close = false;
-        egui::Window::new(s.audio_title)
-            .collapsible(false)
-            .resizable(false)
+        popup_window(ctx, s.audio_title)
             // Same fixed-width convention as Quality/Hotkeys -- see
             // POPUP_WIDTH's doc comment for why this is pinned rather than
             // left to auto-size.
             .default_width(POPUP_WIDTH)
             .min_width(POPUP_WIDTH)
             .max_width(POPUP_WIDTH)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
                 // machine with many audio devices/apps scrolls inside the

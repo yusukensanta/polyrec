@@ -1,6 +1,6 @@
 use super::App;
 use super::theme::{POPUP_WIDTH, pal};
-use super::widgets::{accent_button, caption, section_header};
+use super::widgets::{accent_button, caption, grid_section_header, popup_window};
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -81,12 +81,10 @@ impl App {
         self.capture_pending_hotkey(ctx, s);
 
         let mut close = false;
-        egui::Window::new(s.hotkeys_title)
-            .collapsible(false)
-            .resizable(false)
+        popup_window(ctx, s.hotkeys_title)
             // Explicit width instead of relying on auto-sizing -- the Grid
             // below computes its column width from the widest cell, and
-            // section_header's separator (which fills "available width")
+            // grid_section_header's separator (which fills "available width")
             // would otherwise stretch the Grid -- and the whole Window -- out
             // to the full app window's width, since an unconstrained floating
             // Window's content area has no real upper bound of its own.
@@ -98,7 +96,6 @@ impl App {
             .default_width(POPUP_WIDTH)
             .min_width(POPUP_WIDTH)
             .max_width(POPUP_WIDTH)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
                 // short window (or a future 5th/6th hotkey row) scrolls
@@ -202,7 +199,7 @@ impl App {
         header: &str,
         slot: HotkeySlot,
     ) {
-        section_header(ui, header);
+        grid_section_header(ui, header);
         ui.end_row();
 
         let current = match slot {
