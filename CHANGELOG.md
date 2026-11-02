@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.141] - 2026-11-02
+
 ### Fixed
 
 - Exporting a recording over itself (picking the recording in the Save dialog) destroyed it. PolyRec now says it's the recording being exported and asks for another name.
