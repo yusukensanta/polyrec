@@ -568,14 +568,14 @@ impl App {
                         self.handle_pause_button();
                     }
                     if add_named(ui, true, stop_btn(), s.stop_button).clicked() {
-                        self.handle_rec_button(is_recording);
+                        self.handle_rec_button();
                     }
                 });
             } else if is_recording {
                 let content_width = STOP_WIDTH + ui.spacing().item_spacing.x + 44.0;
                 centered_action_row(ui, content_width, 52.0, |ui| {
                     if add_named(ui, true, stop_btn(), s.stop_button).clicked() {
-                        self.handle_rec_button(is_recording);
+                        self.handle_rec_button();
                     }
 
                     let pause_btn =
@@ -595,7 +595,7 @@ impl App {
                     if let Some(reason) = blocked {
                         rec.on_disabled_hover_text(reason);
                     } else if rec.clicked() {
-                        self.handle_rec_button(is_recording);
+                        self.handle_rec_button();
                     }
                 });
             }

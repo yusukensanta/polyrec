@@ -180,6 +180,9 @@ impl SessionManager {
     /// session `Idle` instead of showing "Recording" for a capture that never
     /// started. `frame_count` is incremented by the video pump for each frame
     /// forwarded to the encoder.
+    ///
+    /// Refused while a recording is already running (or paused): replacing
+    /// it would leave it capturing with nothing left to stop it.
     pub fn start_capture(
         &mut self,
         source: CaptureSource,
@@ -189,6 +192,11 @@ impl SessionManager {
         output_dir: &Path,
         naming: RecordingNaming,
     ) -> Result<PathBuf, AppError> {
+        if self.active.is_some() {
+            return Err(AppError::Capture(
+                "a recording is already in progress".into(),
+            ));
+        }
         let app_name = app_name_from_exe(&source.exe_name);
         let (output_path, polyrec_dir) = prepare_recording_paths(output_dir, &app_name);
 
@@ -274,6 +282,17 @@ impl SessionManager {
 
     pub fn is_recording(&self) -> bool {
         matches!(self.state, SessionState::Recording)
+    }
+
+    /// A session in the middle of a manual recording that never finishes
+    /// -- see `tests::stuck_recording`.
+    #[cfg(test)]
+    pub(crate) fn recording_stuck() -> Self {
+        Self {
+            state: SessionState::Recording,
+            active: Some(tests::stuck_recording()),
+            highlight: None,
+        }
     }
 
     pub fn is_highlighting(&self) -> bool {
@@ -559,7 +578,7 @@ mod tests {
     /// A manual recording whose capture loop and recorder never finish --
     /// the shape of every recorder stall so far, like the still-window one
     /// fixed in #204.
-    fn stuck_recording() -> ActiveCapture {
+    pub(super) fn stuck_recording() -> ActiveCapture {
         let (recording_tx, _recording_rx) = mpsc::channel(1);
         ActiveCapture {
             pipeline: CapturePipeline::stuck(),
@@ -650,6 +669,37 @@ mod tests {
         let mut sm = SessionManager::new();
         assert!(!sm.apply(SessionAction::Stop));
         assert!(matches!(sm.state(), SessionState::Idle));
+    }
+
+    /// A second Start while a recording runs -- a double-tapped hotkey, say
+    /// -- must leave it be: replaced, the first would go on capturing with
+    /// nothing left to stop it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_while_recording_leaves_the_recording_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::recording_stuck();
+        let second = CaptureSource {
+            kind: CaptureKind::Window,
+            process_id: 0,
+            window_title: "second".into(),
+            exe_name: "second.exe".into(),
+            hwnd: 0,
+            icon_rgba: None,
+        };
+        let started = sm.start_capture(
+            second,
+            inputs(vec![], vec![], false),
+            false,
+            Arc::new(AtomicU64::new(0)),
+            dir.path(),
+            RecordingNaming::ProcessName,
+        );
+        assert!(started.is_err(), "{started:?}");
+        assert!(sm.is_recording());
+        assert_eq!(
+            sm.active().map(|a| a.output_path.clone()),
+            Some(PathBuf::from("stuck.tmp.mp4"))
+        );
     }
 
     #[test]

@@ -10,8 +10,6 @@ use std::sync::atomic::Ordering;
 
 impl App {
     pub(super) fn poll_background_work(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        let is_recording = self.session.is_recording();
-
         self.refresh_free_space();
         self.refresh_sources_and_audio_if_due(ctx);
         self.poll_self_update_result(ctx);
@@ -53,7 +51,7 @@ impl App {
         while let Some(event) = self.hotkey_listener.as_ref().and_then(|h| h.try_recv()) {
             let before = self.session.state().clone();
             match event {
-                HotkeyEvent::StartStop => self.handle_hotkey_start_stop(is_recording),
+                HotkeyEvent::StartStop => self.handle_hotkey_start_stop(),
                 HotkeyEvent::Pause => self.handle_pause_button(),
                 HotkeyEvent::ToggleOverlay => {
                     self.overlay_enabled = !self.overlay_enabled;
@@ -84,8 +82,7 @@ impl App {
         // result flows through the same finalize handling below as any other
         // stop, instead of the UI being stuck showing "Recording" forever for
         // a capture that already ended on its own.
-        if (is_recording || self.session.is_paused())
-            && self.finalizing.handle.is_none()
+        if self.finalizing.handle.is_none()
             && self.session.active().is_some_and(|a| a.recorder_finished())
         {
             self.stop_recording();
@@ -94,7 +91,6 @@ impl App {
         // Show export controls (inline in the status panel) once recorder has
         // finished writing the file
         if let Some(handle) = take_if_finished(&mut self.finalizing.handle) {
-            self.finalizing.path = None;
             let disk_full = self
                 .finalizing
                 .disk_full
