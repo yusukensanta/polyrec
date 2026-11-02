@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- With Windows' display scaling above 100 % (125 % or 150 %, common on laptops), the recording overlay landed partly off the right edge of the screen and the hotkey toast sat off-centre and low. Both now go where they do at 100 %, on any monitor and scale.
+
 ## [v0.5.141] - 2026-11-02
 
 ### Fixed
