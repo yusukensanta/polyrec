@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Exporting a recording over itself (picking the recording in the Save dialog) destroyed it. PolyRec now says it's the recording being exported and asks for another name.
+- An export that failed partway left a broken, half-written file under the name you chose; if that name was a file you'd agreed to replace, it was lost too. Exports are now written to a temporary file first and only take the chosen name once complete.
+- A settings file PolyRec couldn't read (a hand edit gone wrong, or one from a newer version) was silently replaced by the default settings at the next save. It's now kept as `config.toml.bad`, and the dashboard says so.
+- A recording that never started, or was stopped as soon as it started, left an unplayable `.tmp.mp4` in the recordings folder for good. It's now removed.
+
 ## [v0.5.140] - 2026-11-02
 
 ### Fixed
