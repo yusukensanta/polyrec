@@ -27,7 +27,7 @@ impl App {
     /// records one track per running process (none while it's idle), not one
     /// per checkbox.
     pub(super) fn recording_track_count(&self) -> usize {
-        self.last_recording_audio_labels.len()
+        self.last_recording.audio_labels.len()
     }
 
     /// Why REC (and the tray's Start item) can't start a recording right
@@ -102,7 +102,7 @@ impl App {
             let fill = if is_paused { 0.0 } else { meter_fill(peak) };
             self.meter_levels[i] = meter_decay(self.meter_levels[i], fill, dt);
         }
-        let labels = &self.last_recording_audio_labels;
+        let labels = &self.last_recording.audio_labels;
         let meter_levels = &self.meter_levels;
         ui.scope(|ui| {
             // Compact rows: the theme's 32 px minimum control height would
@@ -297,7 +297,7 @@ impl App {
                     .size(text_px(TEXT_BODY))
                     .color(pal().text_muted),
             );
-        } else if let Some(path) = self.last_output_path.clone() {
+        } else if let Some(path) = self.last_recording.saved.clone() {
             self.render_export_controls(ui, s, &path);
         } else {
             ui.add_space(8.0);
@@ -618,7 +618,7 @@ impl App {
         // checkbox sets every track in that group together, so they can
         // never end up selected inconsistently.
         let resolved_labels: Vec<TrackLabel> = (0..self.export.track_selection.len())
-            .map(|i| match self.last_recording_audio_labels.get(i) {
+            .map(|i| match self.last_recording.audio_labels.get(i) {
                 Some(label) => label.clone(),
                 None => TrackLabel {
                     kind: TrackKind::App,
@@ -652,7 +652,7 @@ impl App {
         let default_dir = default_export_dir(&self.config.output_dir);
         let _ = std::fs::create_dir_all(&default_dir);
         let default_name =
-            default_export_file_name(&self.last_recording_app_name, chrono::Local::now());
+            default_export_file_name(&self.last_recording.app_name, chrono::Local::now());
         if let Some(dest) = rfd::FileDialog::new()
             .add_filter("MP4 video", &["mp4"])
             .set_directory(&default_dir)

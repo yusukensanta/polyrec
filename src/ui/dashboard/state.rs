@@ -2,14 +2,13 @@
 //! groups the fields one feature reads and writes together, so `App` itself
 //! reads as a list of features rather than ~50 loose fields.
 
+use crate::encode::actor::StoppedItself;
 use crate::error::AppError;
 use crate::session::SessionManager;
 use crate::sources::InstalledApp;
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
@@ -66,7 +65,8 @@ pub(super) struct RecordingStatusCache {
 #[derive(Default)]
 pub(super) struct Finalizing {
     pub handle: Option<JoinHandle<Result<PathBuf, AppError>>>,
-    pub disk_full: Option<Arc<AtomicBool>>,
+    /// Why the recorder stopped itself, if it did -- see `StoppedItself`.
+    pub stopped_itself: StoppedItself,
     /// What the recording being saved lost before it was stopped.
     pub lost_sources: crate::capture::LostSources,
 }
@@ -83,10 +83,53 @@ impl Finalizing {
             "recording stop requested, finalizing: {}",
             active.output_path.display()
         );
-        self.disk_full = Some(Arc::clone(&active.disk_full_flag));
+        self.stopped_itself = active.stopped_itself.clone();
         self.lost_sources = active.lost_sources();
         self.handle = session.stop_capture();
         true
+    }
+}
+
+/// The manual recording the dashboard reports on and exports: the one under
+/// way, or else the last one.
+#[derive(Default)]
+pub(super) struct LastRecording {
+    /// Where it was saved: `None` until it is, and for one that failed.
+    pub saved: Option<PathBuf>,
+    /// Display label for each of its audio tracks (set when it starts;
+    /// devices, then app-audio sources, in the same order
+    /// `start_recording_with_source` assigns track ids) -- NOT the live
+    /// system device list (`audio_devices`), which reflects whatever's
+    /// currently plugged in and has no entries for app-audio sources at
+    /// all. The export checkbox list zips this against
+    /// `export.track_selection` by position; a length mismatch (e.g. a
+    /// device disconnected mid-recording, producing fewer tracks than were
+    /// selected) falls back to a generic "Track N" label for the unlabeled
+    /// tail rather than panicking or misattributing a name.
+    pub audio_labels: Vec<super::actions::TrackLabel>,
+    /// Its app name (same derivation as the recording's own filename, via
+    /// `session::app_name_from_exe`) -- used to pre-fill the export Save
+    /// dialog's default filename. Stored at record-start rather than
+    /// re-parsed from the recording's filename, so it can't drift if that
+    /// filename format ever changes.
+    pub app_name: String,
+}
+
+impl LastRecording {
+    /// A new recording started, with these tracks; it's the one reported on
+    /// from now on. The last one's file goes with the rest of it: kept, it
+    /// showed as just saved after a new recording that failed, and Export
+    /// used the new recording's track labels on it.
+    pub(super) fn started(
+        &mut self,
+        audio_labels: Vec<super::actions::TrackLabel>,
+        app_name: String,
+    ) {
+        *self = Self {
+            saved: None,
+            audio_labels,
+            app_name,
+        };
     }
 }
 
@@ -191,6 +234,21 @@ impl Default for SelfUpdate {
 mod tests {
     use super::*;
 
+    /// The last recording's file stayed the one reported on through a new
+    /// recording: if that one failed, the old file still showed as just
+    /// saved -- and Export used the new recording's track labels on it.
+    #[test]
+    fn a_new_recording_takes_over_from_the_last_one_saved() {
+        let mut last = LastRecording {
+            saved: Some(PathBuf::from(r"E:\recordings\polyrec\game.mp4")),
+            audio_labels: Vec::new(),
+            app_name: "game".into(),
+        };
+        last.started(Vec::new(), "editor".into());
+        assert_eq!(last.saved, None);
+        assert_eq!(last.app_name, "editor");
+    }
+
     /// The start/stop hotkey pressed twice before the dashboard caught up
     /// (a game holding the GPU, say) queues two Stops. The second finds
     /// nothing left to stop -- and must leave the save the first one
@@ -202,9 +260,7 @@ mod tests {
         let mut finalizing = Finalizing::default();
         assert!(finalizing.stop(&mut session));
         assert!(finalizing.handle.is_some());
-        assert!(finalizing.disk_full.is_some());
         assert!(!finalizing.stop(&mut session));
         assert!(finalizing.handle.is_some());
-        assert!(finalizing.disk_full.is_some());
     }
 }

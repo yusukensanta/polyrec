@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod com;
 mod config;
 mod crash_log;
 mod disk_space;

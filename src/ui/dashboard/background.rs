@@ -91,11 +91,8 @@ impl App {
         // Show export controls (inline in the status panel) once recorder has
         // finished writing the file
         if let Some(handle) = take_if_finished(&mut self.finalizing.handle) {
-            let disk_full = self
-                .finalizing
-                .disk_full
-                .take()
-                .is_some_and(|f| f.load(Ordering::Relaxed));
+            let stopped_itself = std::mem::take(&mut self.finalizing.stopped_itself);
+            let (disk_full, gave_up) = (stopped_itself.disk_full(), stopped_itself.gave_up());
             match tokio::runtime::Handle::current().block_on(handle) {
                 Ok(Ok(path)) => {
                     // Probed from the file itself, not trusted from the
@@ -116,26 +113,31 @@ impl App {
                     self.export.track_selection = vec![true; self.export.available_tracks];
                     self.export.state = ExportState::Idle;
                     self.export.result_rx = None;
-                    self.last_output_path = Some(path);
+                    self.last_recording.saved = Some(path);
                     self.refresh_recent();
                     let lost = std::mem::take(&mut self.finalizing.lost_sources);
-                    if disk_full {
+                    if let Some(why) = gave_up {
+                        self.notice = Some(recording_gave_up_message(s, &why));
+                    } else if disk_full {
                         self.notice = Some(s.disk_full_mid_recording.to_string());
                     } else if let Some(msg) =
-                        lost_sources_message(s, &lost, &self.last_recording_audio_labels)
+                        lost_sources_message(s, &lost, &self.last_recording.audio_labels)
                     {
                         self.notice = Some(msg);
                     } else if let Some(msg) = audio_tracks_missing_message(
                         s,
                         self.export.available_tracks,
-                        self.last_recording_audio_labels.len(),
+                        self.last_recording.audio_labels.len(),
                     ) {
                         self.notice = Some(msg);
                     }
                 }
                 Ok(Err(e)) => {
                     tracing::error!("recording finalize failed: {e}");
-                    self.error_message = Some(format!("{}{e}", s.recording_failed_prefix));
+                    // What made it give up says more than finishing the file
+                    // failing too.
+                    let why = gave_up.unwrap_or_else(|| e.to_string());
+                    self.error_message = Some(format!("{}{why}", s.recording_failed_prefix));
                 }
                 Err(e) => {
                     tracing::error!("recorder task did not complete cleanly: {e}");
@@ -327,6 +329,12 @@ fn audio_tracks_missing_message(s: &Strings, actual: usize, expected: usize) -> 
     )
 }
 
+/// The notice for a recording the recorder stopped because writing it kept
+/// failing (`why`) -- see `encode::actor::GaveUp`.
+fn recording_gave_up_message(s: &Strings, why: &str) -> String {
+    s.notice_recording_gave_up.replace("{error}", why)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +462,16 @@ mod tests {
                 !msg.contains('{'),
                 "{lang:?}: unreplaced placeholder in: {msg}"
             );
+        }
+    }
+
+    /// Says why, in every language.
+    #[test]
+    fn a_recording_that_gave_up_says_why() {
+        for lang in [Lang::En, Lang::Ja] {
+            let msg = recording_gave_up_message(lang.strings(), "device removed");
+            assert!(msg.contains("device removed"), "{lang:?}: {msg}");
+            assert!(!msg.contains('{'), "{lang:?}: {msg}");
         }
     }
 }

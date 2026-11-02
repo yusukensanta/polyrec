@@ -36,10 +36,9 @@ use eframe::egui;
 use fps_support::FpsSupportProbe;
 use hotkeys_popup::HotkeySlot;
 use state::{
-    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, RecordingStatusCache,
-    SelfUpdate,
+    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, LastRecording,
+    RecordingStatusCache, SelfUpdate,
 };
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -104,7 +103,8 @@ pub struct App {
     /// What each audio level meter shows right now, by track -- see
     /// `render_audio_meters`.
     meter_levels: Vec<f32>,
-    last_output_path: Option<PathBuf>,
+    /// The recording reported on and exported -- see `LastRecording`.
+    last_recording: LastRecording,
     output_dir_input: String,
     /// Why recordings can't be saved under `config.output_dir`, if they
     /// can't -- checked at startup and whenever the folder is changed (see
@@ -119,24 +119,6 @@ pub struct App {
     /// The in-flight refresh's result channel, if one is running -- see
     /// `refresh_sources_and_audio_if_due`.
     refresh_rx: Option<mpsc::Receiver<actions::RefreshSnapshot>>,
-    /// Display label for each audio track actually used in the current
-    /// manual recording, or the last finished one (set when a recording
-    /// starts; devices, then app-audio sources, in the same order
-    /// `start_recording_with_source` assigns track ids) --
-    /// NOT the live system device list (`audio_devices`), which reflects
-    /// whatever's currently plugged in and has no entries for app-audio
-    /// sources at all. The export checkbox list zips this against
-    /// `export.track_selection` by position; a length mismatch (e.g. a
-    /// device disconnected mid-recording, producing fewer tracks than were
-    /// selected) falls back to a generic "Track N" label for the unlabeled
-    /// tail rather than panicking or misattributing a name.
-    last_recording_audio_labels: Vec<actions::TrackLabel>,
-    /// App name for the last finished manual recording (same derivation as
-    /// the recording's own filename, via `session::app_name_from_exe`) --
-    /// used to pre-fill the export Save dialog's default filename. Stored at
-    /// record-start rather than re-parsed from the recording's filename, so
-    /// it can't drift if that filename format ever changes.
-    last_recording_app_name: String,
     hotkey_listener: Option<HotkeyListener>,
     update_available: Option<crate::update_check::AvailableUpdate>,
     update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
@@ -335,14 +317,12 @@ impl App {
             recording_checks: checks::RecordingChecks::default(),
             recording_status: None,
             meter_levels: Vec::new(),
-            last_output_path: None,
+            last_recording: LastRecording::default(),
             output_dir_input,
             output_dir_problem,
             recent,
             sources_checked_at: None,
             refresh_rx: None,
-            last_recording_audio_labels: Vec::new(),
-            last_recording_app_name: String::new(),
             hotkey_listener: Some(hotkey_listener),
             update_available: None,
             update_check_rx: Some(update_check_rx),

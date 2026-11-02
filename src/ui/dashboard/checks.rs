@@ -187,7 +187,7 @@ impl App {
                 .iter()
                 .map(AudioLevel::loudest)
                 .collect();
-            let silent = silent_microphones(&self.last_recording_audio_labels, &loudest);
+            let silent = silent_microphones(&self.last_recording.audio_labels, &loudest);
             if !silent.is_empty() {
                 let message = silent_microphones_message(s, &silent);
                 self.notice = Some(message.clone());
