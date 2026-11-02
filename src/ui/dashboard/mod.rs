@@ -223,21 +223,28 @@ impl App {
         show_requested: Arc<AtomicBool>,
         closed_for_lost_graphics: Arc<AtomicBool>,
         restarted: Option<crate::restart::Reason>,
+        config_set_aside: Option<std::path::PathBuf>,
     ) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
         let graphics = graphics_device::GraphicsDevice::watch(cc);
+        let s = config.lang().strings();
         // In place of a copy that closed on its own -- quite possibly while
         // a game had focus, which a window coming up in front would take.
-        let notice = restarted.map(|reason| {
-            let s = config.lang().strings();
-            match reason {
-                crate::restart::Reason::Graphics => s.notice_restarted_graphics.to_owned(),
-                crate::restart::Reason::Error => s
-                    .notice_restarted_error
-                    .replace("{path}", &crate::crash_log::path().to_string_lossy()),
-            }
+        let restarted_notice = restarted.map(|reason| match reason {
+            crate::restart::Reason::Graphics => s.notice_restarted_graphics.to_owned(),
+            crate::restart::Reason::Error => s
+                .notice_restarted_error
+                .replace("{path}", &crate::crash_log::path().to_string_lossy()),
         });
+        let config_notice = config_set_aside.map(|path| {
+            s.notice_config_set_aside
+                .replace("{path}", &path.to_string_lossy())
+        });
+        let notice = match (restarted_notice, config_notice) {
+            (Some(restarted), Some(config)) => Some(format!("{restarted}\n{config}")),
+            (restarted, config) => restarted.or(config),
+        };
         if restarted.is_some() {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));

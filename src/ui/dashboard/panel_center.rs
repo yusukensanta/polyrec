@@ -11,7 +11,7 @@ use super::widgets::{
     RowIcon, accent_button, caption, centered_action_row, format_bytes, icon_slot, primary_button,
     section_header,
 };
-use crate::encode::remux::{export_grouped, mix_tracks};
+use crate::encode::remux::{export_grouped, is_same_file, mix_tracks};
 use crate::i18n::Strings;
 use crate::types::{AudioLevel, SessionState};
 use eframe::egui;
@@ -660,6 +660,14 @@ impl App {
             .save_file()
         {
             let src = path.to_path_buf();
+            // Picked in the Save dialog, which asks only whether to replace
+            // it. `export_grouped` refuses it too; this says why in the
+            // user's language.
+            if is_same_file(&src, &dest) {
+                let s = self.config.lang().strings();
+                self.export.state = ExportState::Failed(s.export_over_itself.to_owned());
+                return;
+            }
             // Global "Mix into one track" (if checked) still
             // mixes everything selected regardless of app
             // grouping -- selected_groups (same-app tracks
