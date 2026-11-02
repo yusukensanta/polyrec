@@ -395,16 +395,18 @@ mod tests {
             CloseHandle(mutex).unwrap();
             dacl
         };
-        assert_eq!(dacl, format!("D:(A;;0x1f0001;;;{sid})"));
+        // Through the same conversion: Windows writes some SIDs as an
+        // alias (the built-in Administrator, CI's user, as `LA`).
+        let only_this_user =
+            SecurityDescriptor::from_sddl(&format!("D:(A;;0x1f0001;;;{sid})")).unwrap();
+        assert_eq!(dacl, unsafe { dacl_text(&only_this_user) });
         drop(release);
         thread.join().unwrap();
     }
 
     /// `handle`'s DACL, as SDDL.
     unsafe fn dacl_sddl(handle: HANDLE) -> String {
-        use windows::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
-        };
+        use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
         use windows::Win32::Security::DACL_SECURITY_INFORMATION;
         unsafe {
             let mut sd = PSECURITY_DESCRIPTOR::default();
@@ -420,7 +422,15 @@ mod tests {
             )
             .ok()
             .unwrap();
-            let sd = SecurityDescriptor(sd);
+            dacl_text(&SecurityDescriptor(sd))
+        }
+    }
+
+    /// `sd`'s DACL, as SDDL.
+    unsafe fn dacl_text(sd: &SecurityDescriptor) -> String {
+        use windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+        use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+        unsafe {
             let mut text = PWSTR::null();
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 sd.0,
