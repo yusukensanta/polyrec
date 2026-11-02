@@ -39,34 +39,21 @@ impl App {
         // Not over a game in exclusive full-screen, though: there it goes on
         // another monitor, or isn't shown (see `hud_place`).
         let active_target = self.session.active().map(|a| (a.hwnd, a.kind));
-        let target_monitor = active_target.map(|(hwnd_val, kind)| match kind {
-            CaptureKind::Window => unsafe {
-                windows::Win32::Graphics::Gdi::MonitorFromWindow(
-                    windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void),
-                    windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
-                )
-            },
-            CaptureKind::Monitor => {
-                windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void)
-            }
-        });
-        let monitor_rect = match target_monitor {
-            Some(monitor) => match super::hud_place::hud_monitor_rect(monitor) {
-                Some(rect) => Some(rect),
-                None => return,
-            },
-            None => None,
-        };
-        let (screen_right, screen_top) = match monitor_rect {
-            Some(rect) => (rect.right as f32, rect.top as f32),
-            None => {
-                let screen_w = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                        windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
-                    ) as f32
-                };
-                (screen_w, 0.0)
-            }
+        let target_monitor = active_target
+            .map(|(hwnd_val, kind)| match kind {
+                CaptureKind::Window => unsafe {
+                    windows::Win32::Graphics::Gdi::MonitorFromWindow(
+                        windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void),
+                        windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST,
+                    )
+                },
+                CaptureKind::Monitor => {
+                    windows::Win32::Graphics::Gdi::HMONITOR(hwnd_val as *mut core::ffi::c_void)
+                }
+            })
+            .unwrap_or_else(super::hud_place::primary_monitor);
+        let Some(monitor) = super::hud_place::hud_monitor_for(target_monitor) else {
+            return;
         };
         let tracks_word = s.tracks_word;
         // Paused: a pause mark and how to resume. Recording: the red dot and
@@ -84,14 +71,13 @@ impl App {
             format!("  |  {}", hint_template.replace("{key}", key))
         };
 
+        // Widened from 310 to fit longer modifier combos (e.g.
+        // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
+        let size = egui::vec2(400.0, 32.0);
         self.overlay_window.show(
             ctx,
             overlay_viewport_id(),
-            hud_window("PolyRec Overlay")
-                // Widened from 310 to fit longer modifier combos (e.g.
-                // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
-                .with_inner_size([400.0, 32.0])
-                .with_position(egui::pos2(screen_right - 410.0, screen_top + 10.0)),
+            hud_window("PolyRec Overlay").with_inner_size(size),
             move |ctx| {
                 // CentralPanel::show(ctx, ...) is soft-deprecated in favor of
                 // show_inside(ui, ...), but this closure only ever receives a
@@ -127,7 +113,10 @@ impl App {
         // repaint happens to land right after the game's own re-assertion).
         // Re-asserting HWND_TOPMOST every frame the overlay is visible fights
         // that back instead of relying on a one-time flag.
-        keep_on_top_and_out_of_captures(windows::core::w!("PolyRec Overlay"));
+        keep_on_top_and_out_of_captures(
+            windows::core::w!("PolyRec Overlay"),
+            monitor.top_right(size, 10.0),
+        );
     }
 }
 
@@ -239,7 +228,7 @@ pub(super) fn show_viewport_immediate(
 /// toast), found by its exact window title, since egui doesn't expose a
 /// viewport's native HWND through its public API. A miss (the window not
 /// created yet, e.g. its very first frame) is silently ignored; the next
-/// frame's call picks it up. Two things, every frame it's shown:
+/// frame's call picks it up. Three things, every frame it's shown:
 ///
 /// - **Out of captures.** `WDA_EXCLUDEFROMCAPTURE` keeps the window out of
 ///   screen captures, PolyRec's own included: a display recording used to
@@ -248,6 +237,12 @@ pub(super) fn show_viewport_immediate(
 ///   `SetWindowPos`, on top of egui/winit's one-time `with_always_on_top()`
 ///   hint; see the call site in `render_overlay_viewport` for why that's
 ///   needed every frame rather than once.
+/// - **In place.** At `at`, the top-left corner in physical pixels (see
+///   `hud_place::HudMonitor`). egui takes a window's position in points,
+///   and turns them into pixels with the scale of whichever monitor the
+///   window is on at the time -- not the one it's going to -- so at
+///   125 % or 150 % the window landed off target. Done here, the window
+///   still hidden on its first frame is in place before it's shown.
 ///
 /// `SWP_ASYNCWINDOWPOS` is required here, not optional: this runs on the
 /// same thread that owns the window and is mid-repaint of it via egui/winit
@@ -256,9 +251,9 @@ pub(super) fn show_viewport_immediate(
 /// pump on this same thread -- reentering winit's event handling from inside
 /// its own repaint reliably crashed the process in testing. The async flag
 /// posts the request instead of sending it, avoiding the reentrant call.
-pub(super) fn keep_on_top_and_out_of_captures(title: windows::core::PCWSTR) {
+pub(super) fn keep_on_top_and_out_of_captures(title: windows::core::PCWSTR, at: (i32, i32)) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        FindWindowW, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
         SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE,
     };
     unsafe {
@@ -269,11 +264,11 @@ pub(super) fn keep_on_top_and_out_of_captures(title: windows::core::PCWSTR) {
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
+            at.0,
+            at.1,
             0,
             0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
     }
 }

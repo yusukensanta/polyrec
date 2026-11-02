@@ -5,13 +5,16 @@
 //! to click back into the game. Windows holds its own notifications back in
 //! that state for the same reason.
 
+use eframe::egui;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromWindow,
+    EnumDisplayMonitors, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    MonitorFromPoint, MonitorFromWindow,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::SHQueryUserNotificationState;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::core::BOOL;
@@ -95,10 +98,40 @@ fn monitors() -> Vec<MonitorId> {
     list
 }
 
-/// The screen rectangle of the monitor a display that would go on
-/// `preferred` goes on (see `hud_monitor`); `None` when it shouldn't be
-/// shown at all.
-pub(super) fn hud_monitor_rect(preferred: HMONITOR) -> Option<RECT> {
+/// The monitor one of PolyRec's on-screen displays goes on: its screen
+/// rectangle, in physical pixels, and its scale -- Windows' Scale setting
+/// for it, 1.0 at 100 %, 1.5 at 150 %. egui sizes the display's window in
+/// points, which the scale turns into pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct HudMonitor {
+    pub rect: RECT,
+    pub scale: f32,
+}
+
+impl HudMonitor {
+    /// The top-left corner, in physical pixels, of a window `size` points
+    /// big whose top-right corner is `inset` points in from the monitor's.
+    pub(super) fn top_right(&self, size: egui::Vec2, inset: f32) -> (i32, i32) {
+        (
+            (self.rect.right as f32 - (size.x + inset) * self.scale).round() as i32,
+            (self.rect.top as f32 + inset * self.scale).round() as i32,
+        )
+    }
+
+    /// The top-left corner, in physical pixels, of a window `size` points
+    /// big centred across the monitor, `down` points below its top.
+    pub(super) fn top_centre(&self, size: egui::Vec2, down: f32) -> (i32, i32) {
+        let centre = (self.rect.left + self.rect.right) as f32 / 2.0;
+        (
+            (centre - size.x * self.scale / 2.0).round() as i32,
+            (self.rect.top as f32 + down * self.scale).round() as i32,
+        )
+    }
+}
+
+/// The monitor a display that would go on `preferred` goes on (see
+/// `hud_monitor`); `None` when it shouldn't be shown at all.
+pub(super) fn hud_monitor_for(preferred: HMONITOR) -> Option<HudMonitor> {
     let dashboard = dashboard_monitor().map(|m| m.0 as MonitorId);
     let monitor = hud_monitor(
         preferred.0 as MonitorId,
@@ -106,7 +139,27 @@ pub(super) fn hud_monitor_rect(preferred: HMONITOR) -> Option<RECT> {
         dashboard,
         &monitors(),
     )?;
-    crate::capture::video::monitor_rect(HMONITOR(monitor as *mut _)).ok()
+    let monitor = HMONITOR(monitor as *mut _);
+    let rect = crate::capture::video::monitor_rect(monitor).ok()?;
+    Some(HudMonitor {
+        rect,
+        scale: monitor_scale(monitor),
+    })
+}
+
+/// Windows' Scale setting for `monitor` -- its effective DPI over 96 -- or
+/// 1.0 if that can't be read.
+fn monitor_scale(monitor: HMONITOR) -> f32 {
+    let (mut x, mut y) = (0, 0);
+    match unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) } {
+        Ok(()) if x > 0 => x as f32 / 96.0,
+        _ => 1.0,
+    }
+}
+
+/// The primary display.
+pub(super) fn primary_monitor() -> HMONITOR {
+    unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }
 }
 
 #[cfg(test)]
@@ -149,6 +202,51 @@ mod tests {
         );
         // Nowhere else: not shown at all.
         assert_eq!(hud_monitor(GAME, Some(GAME), Some(GAME), &[GAME]), None);
+    }
+
+    /// A 2560x1440 monitor at 150 % (1706x960 points), right of the
+    /// primary.
+    const AT_150: HudMonitor = HudMonitor {
+        rect: RECT {
+            left: 1920,
+            top: 0,
+            right: 1920 + 2560,
+            bottom: 1440,
+        },
+        scale: 1.5,
+    };
+
+    /// The HUD and toast windows are sized in points, and were placed by
+    /// pixel counts taken as points: at 125 % or 150 % they landed off to
+    /// the right (the HUD partly off the screen) and low.
+    #[test]
+    fn at_150_percent_the_overlay_sits_10_points_in_from_the_top_right() {
+        let size = egui::vec2(400.0, 32.0);
+        let (x, y) = AT_150.top_right(size, 10.0);
+        assert_eq!(x + (400.0 * 1.5) as i32, AT_150.rect.right - 15);
+        assert_eq!(y, 15);
+    }
+
+    #[test]
+    fn at_150_percent_the_toast_is_centred_40_points_down() {
+        let size = egui::vec2(200.0, 30.0);
+        let (x, y) = AT_150.top_centre(size, 40.0);
+        let centre = (AT_150.rect.left + AT_150.rect.right) / 2;
+        assert_eq!(x + (200.0 * 1.5 / 2.0) as i32, centre);
+        assert_eq!(y, 60);
+    }
+
+    /// At 100 %, points are pixels: where they always went.
+    #[test]
+    fn at_100_percent_they_go_where_they_always_did() {
+        let at_100 = HudMonitor {
+            scale: 1.0,
+            ..AT_150
+        };
+        let size = egui::vec2(400.0, 32.0);
+        assert_eq!(at_100.top_right(size, 10.0), (at_100.rect.right - 410, 10));
+        let centre = (at_100.rect.left + at_100.rect.right) / 2;
+        assert_eq!(at_100.top_centre(size, 40.0), (centre - 200, 40));
     }
 
     #[test]

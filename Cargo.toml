@@ -84,6 +84,8 @@ features = [
     # Named mutex and event for `single_instance`, and who may open them.
     "Win32_Security",
     "Win32_Security_Authorization",
+    # A monitor's Scale setting, for placing the HUD and toast (`hud_place`).
+    "Win32_UI_HiDpi",
     # The dashboard's monitor's colour profile, and converting the palette
     # through it (`color_profile`).
     "Win32_UI_ColorSystem",

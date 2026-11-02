@@ -3,6 +3,7 @@
 //! typically a fullscreen game, where nothing else confirms the press landed.
 
 use super::App;
+use super::hud_place::HudMonitor;
 use super::overlay::{hud_window, keep_on_top_and_out_of_captures};
 use super::theme::{Palette, TEXT_BODY};
 use crate::hotkeys::HotkeyEvent;
@@ -21,11 +22,10 @@ pub(super) fn toast_viewport_id() -> egui::ViewportId {
 pub(super) struct Toast {
     text: String,
     until: Instant,
-    /// Where to show it, in screen coordinates: the horizontal centre and
-    /// the top of the monitor the user was working on when they pressed the
-    /// hotkey -- or another, or nowhere (`None`), when that's a game in
-    /// exclusive full-screen (see `hud_place`).
-    anchor: Option<(f32, f32)>,
+    /// Where to show it: top-centre of the monitor the user was working on
+    /// when they pressed the hotkey -- or another, or nowhere (`None`), when
+    /// that's a game in exclusive full-screen (see `hud_place`).
+    monitor: Option<HudMonitor>,
 }
 
 impl Toast {
@@ -34,7 +34,7 @@ impl Toast {
         Self {
             text,
             until: Instant::now() + TOAST_DURATION,
-            anchor: foreground_monitor_anchor(),
+            monitor: foreground_monitor(),
         }
     }
 }
@@ -72,15 +72,14 @@ pub(super) fn hotkey_toast(
     Some(text.to_owned())
 }
 
-/// Top-centre of the monitor the foreground window is on (the primary
-/// display's if that can't be told) -- or of the one `hud_place` moves it
-/// to; `None` when it shouldn't be shown.
-fn foreground_monitor_anchor() -> Option<(f32, f32)> {
+/// The monitor the foreground window is on (the primary display if that
+/// can't be told) -- or the one `hud_place` moves the toast to; `None` when
+/// it shouldn't be shown.
+fn foreground_monitor() -> Option<HudMonitor> {
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow};
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
     let monitor = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY) };
-    let r = super::hud_place::hud_monitor_rect(monitor)?;
-    Some(((r.left + r.right) as f32 / 2.0, r.top as f32))
+    super::hud_place::hud_monitor_for(monitor)
 }
 
 impl App {
@@ -107,16 +106,14 @@ impl App {
                 .size()
         });
         let size = text_size + egui::vec2(24.0, 14.0);
-        let Some((center_x, top)) = toast.anchor else {
+        let Some(monitor) = toast.monitor else {
             return;
         };
         let text = toast.text.clone();
         self.toast_window.show(
             ctx,
             toast_viewport_id(),
-            hud_window("PolyRec Toast")
-                .with_inner_size(size)
-                .with_position(egui::pos2(center_x - size.x / 2.0, top + 40.0)),
+            hud_window("PolyRec Toast").with_inner_size(size),
             move |ctx| {
                 // Same ctx-only form as the overlay HUD -- see the comment
                 // in `render_overlay_viewport`.
@@ -137,7 +134,10 @@ impl App {
                     });
             },
         );
-        keep_on_top_and_out_of_captures(windows::core::w!("PolyRec Toast"));
+        keep_on_top_and_out_of_captures(
+            windows::core::w!("PolyRec Toast"),
+            monitor.top_centre(size, 40.0),
+        );
     }
 }
 
