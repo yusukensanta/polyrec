@@ -66,12 +66,16 @@ pub struct Config {
     /// until then.
     pub record_default_output: Option<bool>,
     pub record_default_input: Option<bool>,
-    /// What PolyRec 0.5.144 and before saved instead: the WASAPI endpoint ids
-    /// of the devices ticked at the time -- so a tick didn't follow a changed
-    /// default, and the device that took over showed up unticked. Read only
-    /// to carry those choices over to the settings above; never written
-    /// again.
-    #[serde(default, skip_serializing)]
+    /// What PolyRec 0.5.144 and before saved instead, and still all they
+    /// read: the WASAPI endpoint ids of the devices ticked -- so there a
+    /// tick didn't follow a changed default. Still written, with the device
+    /// each ticked default is now (`record_default`), for an older copy
+    /// sharing this config.toml (an installed one beside one built from
+    /// source): without it, that copy found no ticks, fell back to speakers
+    /// on and microphone off, and saved over the settings above, which it
+    /// doesn't know. Read when those are missing -- a config.toml an older
+    /// copy wrote last -- to carry its ticks over.
+    #[serde(default)]
     pub selected_audio_device_ids: Option<Vec<String>>,
     /// Whether Windows' own colored capture-border indicator shows around the
     /// recorded window/monitor during a manual recording (see
@@ -370,10 +374,6 @@ impl Config {
         self.language
     }
 
-    /// Recording volume for `device_id` as a linear multiplier -- 1.0 (100%)
-    /// if the device has no entry in `audio_device_gain` yet, which is every
-    /// device the first time it's seen (and any `config.toml` saved before
-    /// this setting existed).
     /// Whether recordings take Windows' default output's sound: as the user
     /// last ticked it, else as PolyRec 0.5.144 and before had it (any output
     /// ticked), else on -- what anyone recording a game wants.
@@ -398,6 +398,29 @@ impl Config {
             .map(|ids| ids.iter().any(|id| id.starts_with(kind)))
     }
 
+    /// Ticks (`on`) or unticks recording Windows' default output (`output`)
+    /// or default microphone, which is the device `device_id` now -- in the
+    /// device list too, as the device that is that default now, for older
+    /// copies of PolyRec (see `selected_audio_device_ids`).
+    pub fn record_default(&mut self, output: bool, device_id: &str, on: bool) {
+        let kind = if output {
+            self.record_default_output = Some(on);
+            OUTPUT_ENDPOINT
+        } else {
+            self.record_default_input = Some(on);
+            INPUT_ENDPOINT
+        };
+        let ids = self.selected_audio_device_ids.get_or_insert_with(Vec::new);
+        ids.retain(|id| !id.starts_with(kind));
+        if on {
+            ids.push(device_id.to_owned());
+        }
+    }
+
+    /// Recording volume for `device_id` as a linear multiplier -- 1.0 (100%)
+    /// if the device has no entry in `audio_device_gain` yet, which is every
+    /// device the first time it's seen (and any `config.toml` saved before
+    /// this setting existed).
     pub fn audio_gain(&self, device_id: &str) -> f32 {
         self.audio_device_gain
             .get(device_id)
@@ -1221,14 +1244,51 @@ codec = \"h264\"
         assert!(!config.records_default_input());
     }
 
-    /// The old list is read, to carry it over, but not written again.
+    const HEADSET_MIC: &str = "{0.0.1.00000000}.{headset}";
+
+    /// PolyRec 0.5.144 and before read only the device list. With it gone
+    /// (0.5.145), an older copy sharing this config.toml -- an installed
+    /// one beside one built from source -- found no ticks and fell back to
+    /// speakers on, mic off.
     #[test]
-    fn the_old_device_list_is_read_but_never_written_again() {
-        let saved = toml::to_string_pretty(&ticked_before(&[MIC])).unwrap();
-        assert!(!saved.contains("selected_audio_device_ids"), "{saved}");
-        let old_file = format!("selected_audio_device_ids = [\"{MIC}\"]\n{saved}");
-        let parsed: Config = toml::from_str(&old_file).unwrap();
+    fn older_copies_still_find_the_ticks_in_the_device_list_they_read() {
+        let mut config = Config::default();
+        config.record_default(true, SPEAKERS, true);
+        config.record_default(false, MIC, true);
+        let saved = toml::to_string_pretty(&config).unwrap();
+        assert!(saved.contains("selected_audio_device_ids"), "{saved}");
+        let ids = config.selected_audio_device_ids.unwrap_or_default();
+        assert!(ids.contains(&SPEAKERS.to_string()) && ids.contains(&MIC.to_string()));
+    }
+
+    /// An older copy saving config.toml drops the settings it doesn't know
+    /// -- the ticks by role -- and keeps the device list. The microphone
+    /// tick came back off.
+    #[test]
+    fn the_ticks_survive_an_older_copy_saving_over_them() {
+        let mut config = Config::default();
+        config.record_default(true, SPEAKERS, false);
+        config.record_default(false, MIC, true);
+        let mut as_an_older_copy_saves_it: Config =
+            toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        as_an_older_copy_saves_it.record_default_output = None;
+        as_an_older_copy_saves_it.record_default_input = None;
+        let parsed: Config =
+            toml::from_str(&toml::to_string_pretty(&as_an_older_copy_saves_it).unwrap()).unwrap();
+        assert!(!parsed.records_default_output());
         assert!(parsed.records_default_input());
+    }
+
+    /// The device list holds the current default microphone, not every one
+    /// it has been.
+    #[test]
+    fn a_switched_microphone_replaces_the_one_before_it_in_the_device_list() {
+        let mut config = Config::default();
+        config.record_default(true, SPEAKERS, true);
+        config.record_default(false, MIC, true);
+        config.record_default(false, HEADSET_MIC, true);
+        let ids = config.selected_audio_device_ids.unwrap_or_default();
+        assert_eq!(ids, vec![SPEAKERS.to_string(), HEADSET_MIC.to_string()]);
     }
 
     #[test]

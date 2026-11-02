@@ -107,11 +107,7 @@ pub(super) fn remember_selected_audio(
     selected: &[bool],
 ) {
     for (device, &on) in devices.iter().zip(selected) {
-        if device.is_loopback {
-            config.record_default_output = Some(on);
-        } else {
-            config.record_default_input = Some(on);
-        }
+        config.record_default(device.is_loopback, &device.id, on);
     }
 }
 
