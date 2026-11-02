@@ -8,12 +8,22 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use windows::Win32::Foundation::{HANDLE, WAIT_ABANDONED, WAIT_EVENT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, HANDLE, HLOCAL, LocalFree, WAIT_ABANDONED, WAIT_EVENT, WAIT_OBJECT_0,
+};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows::Win32::Security::{
+    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
+};
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, INFINITE, ReleaseMutex, SetEvent, WaitForSingleObject,
+    CreateEventW, CreateMutexW, GetCurrentProcess, INFINITE, OpenProcessToken, ReleaseMutex,
+    SetEvent, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, Owned, PWSTR};
 
 /// The command-line flag a self-update's relaunch carries: the copy it
 /// replaces is still closing, so wait for that instead of bringing it up.
@@ -52,19 +62,35 @@ pub fn claim(after_update: bool) -> Option<Instance> {
 }
 
 fn claim_named(name: &str, timeout_ms: u32) -> Option<Instance> {
+    let security = for_this_user()
+        .inspect_err(|e| tracing::warn!("the claim gets Windows' default access: {e}"))
+        .ok();
+    let attributes = security.as_ref().map(SecurityDescriptor::attributes);
+    let attributes = attributes.as_ref().map(std::ptr::from_ref);
     unsafe {
         // Made (or opened) before claiming, so a request made while the
         // running copy is still starting up waits for it to listen.
-        let show_event = CreateEventW(None, false, false, &HSTRING::from(format!("{name}-show")))
-            .inspect_err(|e| tracing::warn!("a later launch can't bring this one up: {e}"))
-            .ok();
+        let show_event = CreateEventW(
+            attributes,
+            false,
+            false,
+            &HSTRING::from(format!("{name}-show")),
+        )
+        .inspect_err(|e| tracing::warn!("a later launch can't bring this one up: {e}"))
+        .ok();
         let mut instance = Instance {
             show_event: show_event.map(|event| event.0 as usize),
             mutex: None,
             released: Arc::new(AtomicBool::new(false)),
         };
-        let mutex = match CreateMutexW(None, false, &HSTRING::from(name)) {
+        let mutex = match CreateMutexW(attributes, false, &HSTRING::from(name)) {
             Ok(mutex) => mutex,
+            // There, but not ours to open: a copy running elevated, from a
+            // PolyRec that left its claim to Windows' default access.
+            Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => {
+                tracing::info!("another copy holds the claim, closed to this one: {e}");
+                return None;
+            }
             Err(e) => {
                 tracing::warn!("can't tell whether PolyRec is already running: {e}");
                 return Some(instance);
@@ -150,6 +176,78 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+/// A security descriptor made from SDDL, freed when dropped.
+struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+impl SecurityDescriptor {
+    fn from_sddl(sddl: &str) -> windows::core::Result<Self> {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &HSTRING::from(sddl),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )?;
+        }
+        Ok(Self(sd))
+    }
+
+    /// For creating an object with this descriptor; valid while it lives.
+    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: self.0.0,
+            bInheritHandle: false.into(),
+        }
+    }
+}
+
+impl Drop for SecurityDescriptor {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(self.0.0)));
+        }
+    }
+}
+
+/// The SID of the user running this process, as a string (`S-1-5-21-...`).
+fn current_user_sid() -> windows::core::Result<String> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+        let token = Owned::new(token);
+        let mut len = 0;
+        let _ = GetTokenInformation(*token, TokenUser, None, 0, &mut len);
+        // u64s, for TOKEN_USER's pointer alignment.
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        GetTokenInformation(
+            *token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )?;
+        let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut text)?;
+        let sid = text.to_string();
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        sid.map_err(|e| windows::core::Error::new(windows::core::HRESULT(-1), e.to_string()))
+    }
+}
+
+/// Who may open the claim's mutex and event: the user running PolyRec,
+/// elevated or not, and no one else -- at medium integrity, so an elevated
+/// copy's are open to an ordinary launch. Left to Windows' default, an
+/// elevated copy's (run as administrator, to record an elevated game) were
+/// administrators-only, and an ordinary launch of the same user's then ran
+/// a second copy.
+fn for_this_user() -> windows::core::Result<SecurityDescriptor> {
+    let sid = current_user_sid()?;
+    SecurityDescriptor::from_sddl(&format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +255,9 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{READ_CONTROL, SYNCHRONIZE};
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
 
     #[test]
     fn fnv1a_matches_its_published_test_vectors() {
@@ -261,6 +362,78 @@ mod tests {
         assert!(!third);
         wait_for(&new_shows, 1);
         assert_eq!(old_shows.load(Ordering::SeqCst), 0);
+    }
+
+    /// A claim made by a copy this one may not open -- run elevated by a
+    /// PolyRec before this change, which left its claim to Windows' default
+    /// access: administrators only -- is still a copy running. It used to
+    /// count as "can't tell", and a second copy ran.
+    #[test]
+    fn a_claim_this_copy_may_not_open_still_counts_as_running() {
+        let name = test_name("not-ours");
+        let system_only = SecurityDescriptor::from_sddl("D:(A;;GA;;;SY)").unwrap();
+        let attributes = system_only.attributes();
+        let theirs = unsafe { CreateMutexW(Some(&attributes), false, &HSTRING::from(&name)) }
+            .expect("made the claim");
+        assert!(claim_named(&name, 0).is_none(), "a second copy ran");
+        unsafe { CloseHandle(theirs) }.unwrap();
+    }
+
+    /// Made open to the user running PolyRec alone, elevated or not --
+    /// Windows' default is administrators and SYSTEM only for an elevated
+    /// copy, so an ordinary launch couldn't open its claim.
+    #[test]
+    fn the_claim_is_open_to_this_user_alone() {
+        let name = test_name("this-user");
+        let (claimed, release, thread) = claim_on_a_thread(&name, 0, Arc::new(0.into()));
+        assert!(claimed);
+        let sid = current_user_sid().unwrap();
+        let dacl = unsafe {
+            let access = SYNCHRONIZATION_ACCESS_RIGHTS(SYNCHRONIZE.0 | READ_CONTROL.0);
+            let mutex = OpenMutexW(access, false, &HSTRING::from(&name)).expect("opened the claim");
+            let dacl = dacl_sddl(mutex);
+            CloseHandle(mutex).unwrap();
+            dacl
+        };
+        assert_eq!(dacl, format!("D:(A;;0x1f0001;;;{sid})"));
+        drop(release);
+        thread.join().unwrap();
+    }
+
+    /// `handle`'s DACL, as SDDL.
+    unsafe fn dacl_sddl(handle: HANDLE) -> String {
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+        };
+        use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+        unsafe {
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                Some(&mut sd),
+            )
+            .ok()
+            .unwrap();
+            let sd = SecurityDescriptor(sd);
+            let mut text = PWSTR::null();
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd.0,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                None,
+            )
+            .unwrap();
+            let sddl = text.to_string().unwrap();
+            let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+            sddl
+        }
     }
 
     #[test]

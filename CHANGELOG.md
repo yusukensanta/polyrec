@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Updates are only installed if GitHub confirms PolyRec's own release workflow built them. The checksum PolyRec checked came from the same release as the update, so it only proved the download arrived intact: anyone able to publish a release could have published both. Now the update must also carry GitHub's build-provenance record, saying PolyRec's release workflow built that exact file for that version. If it can't be confirmed (offline, say), the update isn't installed and PolyRec says why.
+- Update downloads are limited in size, only ever come from GitHub over HTTPS, and are checked again just before they're installed. A downloaded installer can't be changed or replaced while Windows asks whether to let it run.
+
+### Fixed
+
+- Starting PolyRec normally while a copy of it was running as administrator started a second copy, with a second tray icon and the hotkeys registered twice. The running copy is now used, as with any second launch.
+
 ## [v0.5.141] - 2026-11-02
 
 ### Fixed
