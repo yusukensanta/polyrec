@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.147] - 2026-11-02
+
 ### Fixed
 
 - A pop-up's title (Audio, Quality, Hotkeys, an error or an update) was hard to pick out: in the dark theme its title bar was a shade barely different from the pop-up, and in the light theme almost invisible. Titles now sit on an indigo band of their own, in white.
