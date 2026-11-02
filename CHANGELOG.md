@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.146] - 2026-11-02
+
 ### Fixed
 
 - After 0.5.145, an older copy of PolyRec (0.5.43–0.5.144) using the same settings, such as an installed copy beside one you build yourself, showed your microphone unticked. Once that copy saved its settings, the microphone was unticked in 0.5.145 too. Your Audio choices are now saved in a form older copies read as well, and picked up again after one has saved. Copies older than 0.5.43 don't keep audio choices at all, so keep every copy up to date.
