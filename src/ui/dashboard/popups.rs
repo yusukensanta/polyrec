@@ -2,7 +2,9 @@ use super::App;
 use super::state::SelfUpdateState;
 use super::theme::{POPUP_WIDTH, TEXT_BODY, pal, text_px};
 use super::util::{open_url, take_if_finished};
-use super::widgets::{accent_button, caption, primary_button, section_header};
+use super::widgets::{
+    accent_button, caption, choice_row, popup_window, primary_button, section_header,
+};
 use crate::capture::frame_rate::{FPS_PRESETS, fps_fits_display};
 use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
@@ -15,13 +17,13 @@ impl App {
     /// them.
     fn render_encode_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         section_header(ui, s.codec_header);
-        ui.horizontal(|ui| {
+        choice_row(ui, |ui| {
             ui.selectable_value(&mut self.config.encode.codec, Codec::H264, "H264");
             ui.selectable_value(&mut self.config.encode.codec, Codec::H265, "H265");
         });
 
         section_header(ui, s.encoder_mode_header);
-        ui.horizontal(|ui| {
+        choice_row(ui, |ui| {
             ui.selectable_value(
                 &mut self.config.encode.encoder_mode,
                 EncoderMode::Hardware,
@@ -49,7 +51,7 @@ impl App {
         }
 
         section_header(ui, s.resolution_header);
-        ui.horizontal(|ui| {
+        choice_row(ui, |ui| {
             ui.selectable_value(
                 &mut self.config.encode.resolution_mode,
                 ResolutionKind::Native,
@@ -79,7 +81,7 @@ impl App {
         self.render_fps_presets(ui, s);
 
         section_header(ui, s.bitrate_header);
-        ui.horizontal(|ui| {
+        choice_row(ui, |ui| {
             ui.selectable_value(
                 &mut self.config.encode.bitrate_mode,
                 BitrateKind::Auto,
@@ -134,7 +136,7 @@ impl App {
     fn render_fps_presets(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         let support = self.fps_support.result().cloned();
         let codec = self.config.encode.codec;
-        ui.horizontal(|ui| {
+        choice_row(ui, |ui| {
             for fps in FPS_PRESETS {
                 let blocked = support
                     .as_ref()
@@ -177,9 +179,7 @@ impl App {
         let encode = self.encode_settings();
         let source = self.selected_source.and_then(|i| self.sources.get(i));
         self.fps_support.update(ctx, source, &encode);
-        egui::Window::new(s.quality_title)
-            .collapsible(false)
-            .resizable(false)
+        popup_window(ctx, s.quality_title)
             // Explicit width instead of relying on auto-sizing -- an
             // unconstrained floating Window's content area is effectively as
             // wide as the whole app window, and section_header's separator
@@ -189,7 +189,6 @@ impl App {
             .default_width(POPUP_WIDTH)
             .min_width(POPUP_WIDTH)
             .max_width(POPUP_WIDTH)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
                 // short window (or more settings added later) scrolls instead
@@ -224,21 +223,17 @@ impl App {
             return;
         };
         let mut close = false;
-        egui::Window::new(s.error_title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(&msg)
-                        .size(text_px(TEXT_BODY))
-                        .color(pal().danger),
-                );
-                ui.add_space(8.0);
-                if ui.add(accent_button(s.close_button, pal().link)).clicked() {
-                    close = true;
-                }
-            });
+        popup_window(ctx, s.error_title).show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(&msg)
+                    .size(text_px(TEXT_BODY))
+                    .color(pal().danger),
+            );
+            ui.add_space(8.0);
+            if ui.add(accent_button(s.close_button, pal().link)).clicked() {
+                close = true;
+            }
+        });
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.error_message = None;
         }
@@ -258,37 +253,33 @@ impl App {
             SelfUpdateState::Confirming(update) => {
                 let update = update.clone();
                 let mut action: Option<&str> = None;
-                egui::Window::new(s.update_confirm_title)
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ctx, |ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}{}{}",
-                                s.update_confirm_prefix, update.version, s.update_confirm_suffix
-                            ))
-                            .size(text_px(TEXT_BODY))
-                            .color(pal().text_primary),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(caption(s.update_confirm_uac_note, pal().text_muted));
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.add(primary_button(s.update_now_button)).clicked() {
-                                action = Some("now");
-                            }
-                            if ui
-                                .add(accent_button(s.update_not_now_button, pal().link))
-                                .clicked()
-                            {
-                                action = Some("not_now");
-                            }
-                        });
-                        if ui.link(s.update_view_release_notes).clicked() {
-                            open_url(&update.url);
+                popup_window(ctx, s.update_confirm_title).show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}{}{}",
+                            s.update_confirm_prefix, update.version, s.update_confirm_suffix
+                        ))
+                        .size(text_px(TEXT_BODY))
+                        .color(pal().text_primary),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(caption(s.update_confirm_uac_note, pal().text_muted));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(primary_button(s.update_now_button)).clicked() {
+                            action = Some("now");
+                        }
+                        if ui
+                            .add(accent_button(s.update_not_now_button, pal().link))
+                            .clicked()
+                        {
+                            action = Some("not_now");
                         }
                     });
+                    if ui.link(s.update_view_release_notes).clicked() {
+                        open_url(&update.url);
+                    }
+                });
                 // Escape == "Not Now" here, but deliberately not wired into the
                 // Working/Failed branches below -- Working shouldn't let Escape
                 // interrupt an in-flight update, and Failed already has its own
@@ -309,36 +300,28 @@ impl App {
                 }
             }
             SelfUpdateState::Working => {
-                egui::Window::new(s.update_confirm_title)
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ctx, |ui| {
-                        ui.label(
-                            egui::RichText::new(s.update_working_message)
-                                .size(text_px(TEXT_BODY))
-                                .color(pal().text_primary),
-                        );
-                    });
+                popup_window(ctx, s.update_confirm_title).show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new(s.update_working_message)
+                            .size(text_px(TEXT_BODY))
+                            .color(pal().text_primary),
+                    );
+                });
             }
             SelfUpdateState::Failed(msg) => {
                 let msg = msg.clone();
                 let mut close = false;
-                egui::Window::new(s.update_confirm_title)
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                    .show(ctx, |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
-                                .size(text_px(TEXT_BODY))
-                                .color(pal().danger),
-                        );
-                        ui.add_space(8.0);
-                        if ui.add(accent_button(s.close_button, pal().link)).clicked() {
-                            close = true;
-                        }
-                    });
+                popup_window(ctx, s.update_confirm_title).show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{}{msg}", s.update_failed_prefix))
+                            .size(text_px(TEXT_BODY))
+                            .color(pal().danger),
+                    );
+                    ui.add_space(8.0);
+                    if ui.add(accent_button(s.close_button, pal().link)).clicked() {
+                        close = true;
+                    }
+                });
                 if close {
                     self.self_update.state = SelfUpdateState::Idle;
                 }

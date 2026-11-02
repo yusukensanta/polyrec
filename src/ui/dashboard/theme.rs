@@ -10,6 +10,10 @@ pub(super) struct Palette {
     pub(super) bg_deep: egui::Color32,
     /// Pop-ups.
     pub(super) bg_window: egui::Color32,
+    /// A pop-up's title bar, an indigo band of its own -- deeper than
+    /// `accent`, so it isn't taken for a button -- with its title in
+    /// `on_accent`.
+    pub(super) bg_title: egui::Color32,
     /// Status boxes.
     pub(super) bg_faint: egui::Color32,
     /// Panels -- the window itself.
@@ -74,6 +78,7 @@ impl Palette {
     pub(super) const DARK: Self = Self {
         bg_deep: rgb(0x0f, 0x10, 0x17),
         bg_window: rgb(0x19, 0x1a, 0x25),
+        bg_title: rgb(0x3a, 0x3f, 0x9e),
         bg_faint: rgb(0x18, 0x19, 0x23),
         bg_base: rgb(0x14, 0x15, 0x1d),
         bg_card: rgb(0x1c, 0x1d, 0x28),
@@ -106,6 +111,7 @@ impl Palette {
     pub(super) const LIGHT: Self = Self {
         bg_deep: rgb(0xff, 0xff, 0xff),
         bg_window: rgb(0xff, 0xff, 0xff),
+        bg_title: rgb(0x38, 0x3c, 0xb4),
         bg_faint: rgb(0xf9, 0xf9, 0xfd),
         bg_base: rgb(0xf4, 0xf5, 0xfa),
         bg_card: rgb(0xff, 0xff, 0xff),
@@ -140,6 +146,7 @@ impl Palette {
         let Self {
             bg_deep,
             bg_window,
+            bg_title,
             bg_faint,
             bg_base,
             bg_card,
@@ -170,6 +177,7 @@ impl Palette {
         Self {
             bg_deep: f(bg_deep),
             bg_window: f(bg_window),
+            bg_title: f(bg_title),
             bg_faint: f(bg_faint),
             bg_base: f(bg_base),
             bg_card: f(bg_card),
@@ -227,6 +235,7 @@ impl Palette {
         Self {
             bg_deep: c.window,
             bg_window: c.window,
+            bg_title: c.highlight,
             bg_faint: c.window,
             bg_base: c.window,
             bg_card: c.window,
@@ -297,6 +306,12 @@ thread_local! {
 /// The colours to draw with.
 pub(super) fn pal() -> Palette {
     PALETTE.with(std::cell::Cell::get)
+}
+
+/// Draws with `p` on this thread (each test runs on its own).
+#[cfg(test)]
+pub(super) fn use_palette(p: Palette) {
+    PALETTE.with(|palette| palette.set(p));
 }
 
 /// Whether Windows' "Animation effects" setting is on (`apply_motion`).
@@ -546,8 +561,11 @@ impl TextScaleWatch {
 /// egui's Resize area auto-expands to whatever the widest content seen so
 /// far was and never shrinks back, so without this the Hotkeys popup would
 /// permanently widen the first time its longer "press any key" prompt
-/// rendered, and never return to `default_width` afterward.
-pub(super) const POPUP_WIDTH: f32 = 320.0;
+/// rendered, and never return to `default_width` afterward. 380 holds the
+/// Quality popup's Native (window) / Match display / Custom on one line in
+/// English (at 320 they stretched the popup past its title bar);
+/// `choice_row` wraps them where they still don't fit.
+pub(super) const POPUP_WIDTH: f32 = 380.0;
 
 /// The product typeface: IBM Plex Sans for Latin text, IBM Plex Sans JP for
 /// Japanese. Both are compiled into the exe, so the UI looks the same on
@@ -661,6 +679,9 @@ fn visuals_for(p: &Palette) -> egui::Visuals {
         state.bg_stroke = egui::Stroke::new(1.0, outline);
         state.fg_stroke.color = p.text_primary;
     }
+    // egui fills the topmost window's title bar with this (combo boxes and
+    // menus, PolyRec has neither, would use it too); `popup_window` the rest.
+    w.open.weak_bg_fill = p.bg_title;
     // A checkbox's box and a slider's rail.
     w.inactive.bg_fill = p.bg_deep;
     w.hovered.bg_fill = p.hover_tint;
@@ -835,6 +856,7 @@ mod palette_tests {
             (p.on_accent, p.accent, "REC/RESUME/selected toggle"),
             (p.on_danger, p.danger_fill, "STOP"),
             (p.text_primary, p.warn_bg, "notice"),
+            (p.on_accent, p.bg_title, "pop-up title"),
         ] {
             let ratio = contrast(text, bg);
             assert!(ratio >= 4.5, "{name}: {what} text is {ratio:.2}:1");
@@ -860,6 +882,27 @@ mod palette_tests {
         assert_readable(&Palette::DARK, "dark");
         assert_readable(&Palette::LIGHT, "light");
         const { assert!(Palette::DARK.dark && !Palette::LIGHT.dark) };
+    }
+
+    /// A pop-up's title sat on the indigo of a pressed button or a selected
+    /// card, 1.25:1 from the pop-up below it (1.15:1 in light), and read as
+    /// a highlight rather than a title: it gets a band of its own, which
+    /// stands out from the pop-up, and white text at AAA.
+    #[test]
+    fn a_popup_title_has_its_own_band() {
+        for (p, name) in [(Palette::DARK, "dark"), (Palette::LIGHT, "light")] {
+            let ratio = contrast(p.on_accent, p.bg_title);
+            assert!(ratio >= 7.0, "{name}: title is {ratio:.2}:1");
+            let band = contrast(p.bg_title, p.bg_window);
+            assert!(
+                band >= 1.8,
+                "{name}: band against the pop-up is {band:.2}:1"
+            );
+            assert_ne!(p.bg_title, p.bg_selected, "{name}: not a selection");
+            assert_ne!(p.bg_title, p.accent, "{name}: not a button to press");
+            // egui fills the topmost window's title bar with this.
+            assert_eq!(visuals_for(&p).widgets.open.weak_bg_fill, p.bg_title);
+        }
     }
 
     /// A conversion for the monitor (`color_profile`) has to reach every

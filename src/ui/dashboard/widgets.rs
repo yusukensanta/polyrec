@@ -69,20 +69,55 @@ pub(super) fn centered_action_row(
     );
 }
 
+/// A pop-up (Audio, Quality, Hotkeys, an error...), centred on the
+/// dashboard, with its title in `on_accent` on the `bg_title` band. egui
+/// fills only the topmost window's title bar (`theme::visuals_for`), so the
+/// title frame carries the band too: one pop-up behind another keeps it.
+pub(super) fn popup_window(ctx: &egui::Context, title: &str) -> egui::Window<'static> {
+    let p = pal();
+    egui::Window::new(egui::RichText::new(title).color(p.on_accent))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .title_frame(egui::Frame::window(&ctx.global_style()).fill(p.bg_title))
+}
+
+/// A row of choices in a pop-up, e.g. Native (window) / Match display /
+/// Custom: wrapped onto another line where it doesn't fit (another
+/// language, a larger text size) rather than stretching the pop-up past its
+/// title bar.
+pub(super) fn choice_row<R>(
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    ui.horizontal_wrapped(add_contents)
+}
+
 pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
     // 14pt: up from 10pt (too small to read comfortably as a section label),
     // still clearly below the "PolyRec" heading's default 18pt so it reads as
     // a subordinate label, not competing with it.
     ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(title)
-            .size(text_px(TEXT_SUBTITLE))
-            .color(pal().text_muted)
-            .strong(),
-    );
+    ui.label(section_label(title));
     ui.add_space(SPACE_TIGHT);
     ui.separator();
     ui.add_space(SPACE_TIGHT);
+}
+
+fn section_label(title: &str) -> egui::RichText {
+    egui::RichText::new(title)
+        .size(text_px(TEXT_SUBTITLE))
+        .color(pal().text_muted)
+        .strong()
+}
+
+/// `section_header` in a two-column `egui::Grid`, e.g. the Hotkeys popup's:
+/// the title, and its line in the next column. No added space -- a Grid
+/// can't place it (egui asserts in a debug build; a release build laid the
+/// rows out wider than the popup).
+pub(super) fn grid_section_header(ui: &mut egui::Ui, title: &str) {
+    ui.label(section_label(title));
+    ui.separator();
 }
 
 /// Icon for an audio-device checkbox label — used in the source panel's
@@ -265,5 +300,179 @@ mod icon_column_tests {
         });
         output.textures_delta.clear();
         assert!(starts.windows(2).all(|w| w[0] == w[1]), "{starts:?}");
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    fn flatten(shapes: Vec<egui::Shape>) -> Vec<egui::Shape> {
+        shapes
+            .into_iter()
+            .flat_map(|shape| match shape {
+                egui::Shape::Vec(inner) => flatten(inner),
+                shape => vec![shape],
+            })
+            .collect()
+    }
+
+    /// Every shape `show` paints in palette `p`, with the product fonts at
+    /// Windows' text size `text_scale`, once its pop-ups have sized
+    /// themselves (unseen, on the first pass).
+    fn painted(
+        p: Palette,
+        text_scale: f32,
+        mut show: impl FnMut(&egui::Context),
+    ) -> Vec<egui::Shape> {
+        use_palette(p);
+        let _turn = text_scale_turn();
+        let ctx = egui::Context::default();
+        setup_theme(&ctx);
+        apply_text_scale(&ctx, text_scale);
+        setup_fonts(&ctx);
+        // No fade-in: its colours are part-way there.
+        let mut style = (*ctx.global_style()).clone();
+        style.animation_time = 0.0;
+        ctx.set_global_style(style);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui.ctx()));
+            output.textures_delta.clear();
+            shapes = output.shapes.into_iter().map(|c| c.shape).collect();
+        }
+        flatten(shapes)
+    }
+
+    /// The colour `text` is painted in.
+    fn text_colour(shapes: &[egui::Shape], text: &str) -> Option<egui::Color32> {
+        shapes.iter().find_map(|shape| match shape {
+            egui::Shape::Text(t) if t.galley.text() == text => {
+                let own = t.galley.job.sections.first()?.format.color;
+                let colour = if own == egui::Color32::PLACEHOLDER {
+                    t.fallback_color
+                } else {
+                    own
+                };
+                Some(t.override_text_color.unwrap_or(colour))
+            }
+            _ => None,
+        })
+    }
+
+    fn title_bands(shapes: &[egui::Shape], p: &Palette) -> usize {
+        shapes
+            .iter()
+            .filter(|shape| matches!(shape, egui::Shape::Rect(r) if r.fill == p.bg_title))
+            .count()
+    }
+
+    /// A pop-up's title was egui's text colour on the dark indigo of a
+    /// pressed button, and read as a highlight rather than a title. In the
+    /// light theme its band was 1.15:1 from the white pop-up below.
+    #[test]
+    fn a_popup_title_is_on_accent_on_its_own_band() {
+        for (p, name) in [(Palette::DARK, "dark"), (Palette::LIGHT, "light")] {
+            let shapes = painted(p, 1.0, |ctx| {
+                popup_window(ctx, "Title").show(ctx, |ui| ui.label("body"));
+            });
+            assert_eq!(text_colour(&shapes, "Title"), Some(p.on_accent), "{name}");
+            assert_eq!(title_bands(&shapes, &p), 1, "{name}");
+        }
+    }
+
+    /// One pop-up over another, e.g. an error over Quality: the one behind
+    /// keeps its band, or its title would be white on white in the light
+    /// theme (egui fills only the topmost window's title bar itself).
+    #[test]
+    fn a_popup_behind_another_keeps_its_title_band() {
+        for (p, name) in [(Palette::DARK, "dark"), (Palette::LIGHT, "light")] {
+            let shapes = painted(p, 1.0, |ctx| {
+                popup_window(ctx, "Behind").show(ctx, |ui| ui.label("body"));
+                popup_window(ctx, "In front").show(ctx, |ui| ui.label("body"));
+            });
+            assert_eq!(title_bands(&shapes, &p), 2, "{name}");
+        }
+    }
+
+    /// The Quality pop-up's resolution choices, in `lang` at Windows' text
+    /// size `text_scale`: the pop-up's width, and where each choice's top
+    /// is.
+    fn resolution_choices(lang: Lang, text_scale: f32) -> (f32, Vec<f32>) {
+        let s = lang.strings();
+        let mut laid_out = (0.0, Vec::new());
+        painted(Palette::DARK, text_scale, |ctx| {
+            let mut tops = Vec::new();
+            let shown = popup_window(ctx, s.quality_title)
+                .min_width(POPUP_WIDTH)
+                .max_width(POPUP_WIDTH)
+                .show(ctx, |ui| {
+                    let mut chosen = 0;
+                    choice_row(ui, |ui| {
+                        for (i, choice) in [
+                            s.resolution_native,
+                            s.resolution_display,
+                            s.resolution_custom,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            tops.push(ui.selectable_value(&mut chosen, i, choice).rect.top());
+                        }
+                    });
+                });
+            laid_out = (shown.unwrap().response.rect.width(), tops);
+        });
+        laid_out
+    }
+
+    /// The Quality pop-up's Native (window) / Match display / Custom was
+    /// wider than the pop-up: it stretched the pop-up past its title bar,
+    /// which stopped short of the right edge. Where it doesn't fit, it
+    /// wraps.
+    #[test]
+    fn a_row_of_choices_wraps_inside_its_popup() {
+        for (lang, text_scale) in [(Lang::En, 1.5), (Lang::Ja, 1.0), (Lang::Ja, 1.5)] {
+            let (width, ..) = resolution_choices(lang, text_scale);
+            assert!(
+                width <= POPUP_WIDTH + 2.0,
+                "{lang:?} at {text_scale}: {width}"
+            );
+        }
+    }
+
+    /// The pop-ups are wide enough for those choices on one line, in
+    /// English at the default text size.
+    #[test]
+    fn the_resolution_choices_fit_on_one_line() {
+        let (_, tops) = resolution_choices(Lang::En, 1.0);
+        assert!(tops.iter().all(|&top| top == tops[0]), "{tops:?}");
+    }
+
+    /// The Hotkeys popup's headers went through `section_header`, whose
+    /// spacing a Grid can't take: egui asserts in a debug build, and a
+    /// release build laid the rows out wider than the popup, past its title
+    /// bar.
+    #[test]
+    fn a_section_header_in_a_grid_stays_inside_its_popup() {
+        let s = Lang::En.strings();
+        let mut width = 0.0;
+        painted(Palette::DARK, 1.0, |ctx| {
+            let shown = popup_window(ctx, s.hotkeys_title)
+                .min_width(POPUP_WIDTH)
+                .max_width(POPUP_WIDTH)
+                .show(ctx, |ui| {
+                    egui::Grid::new("hotkeys").num_columns(2).show(ui, |ui| {
+                        grid_section_header(ui, s.hotkey_start_stop_header);
+                        ui.end_row();
+                        ui.label("ALT+SHIFT+F9");
+                        let _ = ui.button(s.hotkey_change_button);
+                        ui.end_row();
+                    });
+                });
+            width = shown.unwrap().response.rect.width();
+        });
+        assert!(width <= POPUP_WIDTH + 2.0, "{width}");
     }
 }
