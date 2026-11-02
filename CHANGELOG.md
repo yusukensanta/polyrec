@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.142] - 2026-11-02
+
 ### Security
 
 - Updates are only installed if GitHub confirms PolyRec's own release workflow built them. The checksum PolyRec checked came from the same release as the update, so it only proved the download arrived intact: anyone able to publish a release could have published both. Now the update must also carry GitHub's build-provenance record, saying PolyRec's release workflow built that exact file for that version. If it can't be confirmed (offline, say), the update isn't installed and PolyRec says why.
