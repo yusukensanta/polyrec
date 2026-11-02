@@ -56,17 +56,22 @@ pub struct Config {
     /// see `AppAudioSource::process_ids`'s doc comment for how these merge
     /// with live WASAPI sessions.
     pub registered_app_audio: Vec<RegisteredApp>,
-    /// Which SYSTEM audio devices' checkboxes (mic, desktop/loopback, etc.)
-    /// were checked as of the last time the user changed one -- keyed by the
-    /// device's stable WASAPI endpoint id (`AudioDevice::id`), same identity
-    /// convention as `audio_device_gain`. `None` means this has never been
-    /// saved (a fresh install, or a `config.toml` saved before this field
-    /// existed) -- the UI falls back to its original default (loopback
-    /// devices checked, everything else unchecked) in that case. Once
-    /// `Some`, it's used verbatim regardless of that default, including an
-    /// intentional "nothing checked" (`Some(vec![])`) -- distinct from `None`
-    /// precisely so an explicit uncheck-everything sticks across a restart
-    /// instead of silently reverting to the loopback default.
+    /// Whether the SYSTEM audio list's two checkboxes are ticked: Windows'
+    /// default output (its sound, through loopback) and default microphone.
+    /// The list only ever shows those two, as whatever devices they are, so
+    /// a tick belongs to the role, not the device: switching Windows'
+    /// default to another device -- a headset, for a while -- keeps it
+    /// ticked. `None` until the user changes that checkbox; see
+    /// `records_default_output`/`records_default_input` for what it means
+    /// until then.
+    pub record_default_output: Option<bool>,
+    pub record_default_input: Option<bool>,
+    /// What PolyRec 0.5.144 and before saved instead: the WASAPI endpoint ids
+    /// of the devices ticked at the time -- so a tick didn't follow a changed
+    /// default, and the device that took over showed up unticked. Read only
+    /// to carry those choices over to the settings above; never written
+    /// again.
+    #[serde(default, skip_serializing)]
     pub selected_audio_device_ids: Option<Vec<String>>,
     /// Whether Windows' own colored capture-border indicator shows around the
     /// recorded window/monitor during a manual recording (see
@@ -329,6 +334,11 @@ impl EncodeConfig {
 pub const AUDIO_GAIN_MIN_PERCENT: i32 = 0;
 pub const AUDIO_GAIN_MAX_PERCENT: i32 = 100;
 
+/// How a WASAPI endpoint id starts for an output device (`eRender`) and a
+/// microphone (`eCapture`): `{0.0.0.00000000}.{…}` and `{0.0.1.00000000}.{…}`.
+const OUTPUT_ENDPOINT: &str = "{0.0.0.";
+const INPUT_ENDPOINT: &str = "{0.0.1.";
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -344,6 +354,8 @@ impl Default for Config {
             window_size: None,
             window_maximized: false,
             registered_app_audio: Vec::new(),
+            record_default_output: None,
+            record_default_input: None,
             selected_audio_device_ids: None,
             show_recording_border: true,
             close_to_tray: false,
@@ -362,6 +374,30 @@ impl Config {
     /// if the device has no entry in `audio_device_gain` yet, which is every
     /// device the first time it's seen (and any `config.toml` saved before
     /// this setting existed).
+    /// Whether recordings take Windows' default output's sound: as the user
+    /// last ticked it, else as PolyRec 0.5.144 and before had it (any output
+    /// ticked), else on -- what anyone recording a game wants.
+    pub fn records_default_output(&self) -> bool {
+        self.record_default_output
+            .unwrap_or_else(|| self.ticked_before(OUTPUT_ENDPOINT).unwrap_or(true))
+    }
+
+    /// Whether recordings take Windows' default microphone: as the user last
+    /// ticked it, else as PolyRec 0.5.144 and before had it (any microphone
+    /// ticked), else off -- a voice in the recording is something to choose.
+    pub fn records_default_input(&self) -> bool {
+        self.record_default_input
+            .unwrap_or_else(|| self.ticked_before(INPUT_ENDPOINT).unwrap_or(false))
+    }
+
+    /// Whether a device whose endpoint id starts with `kind` was ticked in
+    /// the list PolyRec 0.5.144 and before saved, if it saved one.
+    fn ticked_before(&self, kind: &str) -> Option<bool> {
+        self.selected_audio_device_ids
+            .as_ref()
+            .map(|ids| ids.iter().any(|id| id.starts_with(kind)))
+    }
+
     pub fn audio_gain(&self, device_id: &str) -> f32 {
         self.audio_device_gain
             .get(device_id)
@@ -1144,33 +1180,68 @@ codec = \"h264\"
         assert_eq!(parsed.selected_audio_device_ids, None);
     }
 
-    #[test]
-    fn selected_audio_device_ids_round_trips_toml_with_values() {
-        let original = Config {
-            selected_audio_device_ids: Some(vec!["mic-123".into(), "speakers-456".into()]),
+    const SPEAKERS: &str = "{0.0.0.00000000}.{2cdd9143-16c3-42ba-b371-58651e4f0f4a}";
+    const MIC: &str = "{0.0.1.00000000}.{1bdba34e-35f7-4c39-9c98-14eef5a49919}";
+
+    /// What PolyRec 0.5.144 and before saved: the ids of the devices ticked.
+    fn ticked_before(ids: &[&str]) -> Config {
+        Config {
+            selected_audio_device_ids: Some(ids.iter().map(|&id| id.into()).collect()),
             ..Config::default()
-        };
-        let text = toml::to_string_pretty(&original).unwrap();
-        let parsed: Config = toml::from_str(&text).unwrap();
-        assert_eq!(
-            parsed.selected_audio_device_ids,
-            original.selected_audio_device_ids
-        );
+        }
     }
 
     #[test]
-    fn selected_audio_device_ids_round_trips_an_explicit_empty_selection() {
-        // Some(vec![]) (user unchecked every device) must survive the round
-        // trip distinctly from None (never saved) -- otherwise an
-        // intentional "record nothing" would silently revert to the
-        // loopback-only default on next launch.
+    fn with_nothing_ticked_yet_the_default_output_is_recorded_and_the_mic_isnt() {
+        let config = Config::default();
+        assert!(config.records_default_output());
+        assert!(!config.records_default_input());
+    }
+
+    /// The devices someone had ticked are carried over by what they were --
+    /// an output, a microphone -- whatever devices those are now.
+    #[test]
+    fn ticks_saved_by_device_before_carry_over_by_role() {
+        let both = ticked_before(&[SPEAKERS, MIC]);
+        assert!(both.records_default_output() && both.records_default_input());
+        let mic_only = ticked_before(&[MIC]);
+        assert!(!mic_only.records_default_output() && mic_only.records_default_input());
+        // Everything unticked on purpose stays so; it isn't "never saved".
+        let none = ticked_before(&[]);
+        assert!(!none.records_default_output() && !none.records_default_input());
+    }
+
+    #[test]
+    fn a_tick_changed_since_wins_over_the_old_list() {
+        let config = Config {
+            record_default_input: Some(false),
+            ..ticked_before(&[SPEAKERS, MIC])
+        };
+        assert!(config.records_default_output());
+        assert!(!config.records_default_input());
+    }
+
+    /// The old list is read, to carry it over, but not written again.
+    #[test]
+    fn the_old_device_list_is_read_but_never_written_again() {
+        let saved = toml::to_string_pretty(&ticked_before(&[MIC])).unwrap();
+        assert!(!saved.contains("selected_audio_device_ids"), "{saved}");
+        let old_file = format!("selected_audio_device_ids = [\"{MIC}\"]\n{saved}");
+        let parsed: Config = toml::from_str(&old_file).unwrap();
+        assert!(parsed.records_default_input());
+    }
+
+    #[test]
+    fn the_ticks_survive_a_save() {
         let original = Config {
-            selected_audio_device_ids: Some(Vec::new()),
+            record_default_output: Some(false),
+            record_default_input: Some(true),
             ..Config::default()
         };
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.selected_audio_device_ids, Some(Vec::new()));
+        assert_eq!(parsed.record_default_output, Some(false));
+        assert_eq!(parsed.record_default_input, Some(true));
     }
 
     #[test]

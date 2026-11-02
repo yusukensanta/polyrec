@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Switching Windows' default speakers or microphone to another device (a headset, for a while) no longer unticks it in PolyRec's Audio list. The list shows whatever Windows' default output and microphone are, but PolyRec remembered the tick against the device before, so the new one showed unticked and wasn't recorded — your voice could drop out of recordings with nothing to say so. Ticking it then also left the original device unticked once you switched back. The ticks now mean "record the default speakers" and "record the default microphone", whichever devices those are. What you had ticked carries over, and volume levels are still remembered per device.
+
 ## [v0.5.144] - 2026-11-02
 
 ### Fixed
