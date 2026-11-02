@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.140] - 2026-11-02
+
 ### Fixed
 
 - Pressing the start/stop hotkey twice quickly (while a game keeps the dashboard from catching up) could start a second recording over the first, leaving the first one capturing with no way to stop it, or lose the "Recording saved" panel and any disk-full notice of the recording just stopped. Each press now acts on what the one before it did.
