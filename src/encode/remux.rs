@@ -197,8 +197,50 @@ pub fn remux(
     output: &Path,
     audio_track_indices: &[usize],
 ) -> Result<PathBuf, AppError> {
-    let _mf = MfSession::start_mta()?;
-    unsafe { do_remux(input, output, audio_track_indices) }
+    export_to(input, output, |output| {
+        let _mf = MfSession::start_mta()?;
+        unsafe { do_remux(input, output, audio_track_indices) }.map(drop)
+    })
+}
+
+/// Whether `a` and `b` name the same existing file, however they spell it
+/// (case, `.` and `..`, a different route to the same folder).
+pub fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Runs `export`, which writes an export of `input` to the path it's given:
+/// a temporary file beside `output` (`<name>.tmp.mp4`, so Media Foundation
+/// still sees an .mp4), moved into place only once it's complete. An export
+/// that fails leaves nothing half-written under the chosen name, and a file
+/// the user chose to replace stays as it was.
+///
+/// Refuses an `output` that is `input` itself: Media Foundation would
+/// truncate the recording while still reading it.
+fn export_to(
+    input: &Path,
+    output: &Path,
+    export: impl FnOnce(&Path) -> Result<(), AppError>,
+) -> Result<PathBuf, AppError> {
+    if is_same_file(input, output) {
+        return Err(AppError::Encode(format!(
+            "can't export {} over itself",
+            input.display()
+        )));
+    }
+    let partial = output.with_extension("tmp.mp4");
+    export(&partial)
+        .and_then(|()| {
+            std::fs::rename(&partial, output)
+                .encode_ctx(format_args!("moving the export to {}", output.display()))
+        })
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&partial);
+        })?;
+    Ok(output.to_path_buf())
 }
 
 /// How many audio streams a finished recording actually contains -- read
@@ -255,8 +297,10 @@ pub fn export_grouped(
         let flat: Vec<usize> = groups.iter().flatten().copied().collect();
         return remux(input, output, &flat);
     }
-    let _mf = MfSession::start_mta()?;
-    unsafe { do_export_grouped(input, output, groups) }
+    export_to(input, output, |output| {
+        let _mf = MfSession::start_mta()?;
+        unsafe { do_export_grouped(input, output, groups) }.map(drop)
+    })
 }
 
 /// Frames mixed (and written) at a time: 100 ms at `TARGET_SAMPLE_RATE`.
@@ -1121,6 +1165,77 @@ mod tests {
                 .expect("write_audio");
         }
         writer.finalize().expect("finalize")
+    }
+
+    fn failing_export(output: &Path) -> Result<(), AppError> {
+        std::fs::write(output, b"half an mp4").unwrap();
+        Err(AppError::Encode(
+            "ReadSample: stream 1 reported error".into(),
+        ))
+    }
+
+    /// An export that failed partway used to leave its half-written file
+    /// under the name the user chose.
+    #[test]
+    fn a_failed_export_leaves_nothing_under_the_chosen_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("recording.mp4");
+        let dest = dir.path().join("export.mp4");
+        assert!(export_to(&src, &dest, failing_export).is_err());
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// A file the user chose to replace stays as it was when the export
+    /// that was to replace it fails.
+    #[test]
+    fn a_failed_export_keeps_the_file_it_was_to_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("recording.mp4");
+        let dest = dir.path().join("export.mp4");
+        std::fs::write(&dest, b"last week's export").unwrap();
+        assert!(export_to(&src, &dest, failing_export).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"last week's export");
+    }
+
+    #[test]
+    fn a_finished_export_lands_under_the_chosen_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("recording.mp4");
+        let dest = dir.path().join("export.mp4");
+        std::fs::write(&dest, b"last week's export").unwrap();
+        let written = export_to(&src, &dest, |output| {
+            std::fs::write(output, b"the export").unwrap();
+            Ok(())
+        });
+        assert_eq!(written.unwrap(), dest);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the export");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// Picking the recording itself in the Save dialog -- Windows' own
+    /// "replace it?" agreed to -- had Media Foundation truncate it while
+    /// still reading it.
+    #[test]
+    fn exporting_a_recording_over_itself_is_refused_and_leaves_it_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = make_test_mp4(dir.path());
+        let before = std::fs::read(&src).unwrap();
+        let same = dir.path().join(".").join("SOURCE.MP4");
+        assert!(is_same_file(&src, &same));
+        assert!(export_grouped(&src, &same, &[vec![0]]).is_err());
+        assert_eq!(std::fs::read(&src).unwrap(), before);
+    }
+
+    #[test]
+    fn different_files_and_a_file_not_there_are_not_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.mp4");
+        let b = dir.path().join("b.mp4");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        assert!(!is_same_file(&a, &b));
+        assert!(!is_same_file(&a, &dir.path().join("c.mp4")));
     }
 
     #[test]

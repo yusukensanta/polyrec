@@ -43,22 +43,28 @@ pub fn spawn_recording_actor(
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let (writer, settled_fps) = RecordingWriter::start(&temp_path, &params)?;
+        // Creating the writer creates its file, so one that didn't start
+        // leaves an empty file behind otherwise.
+        let (writer, settled_fps) =
+            RecordingWriter::start(&temp_path, &params).inspect_err(|_| {
+                let _ = std::fs::remove_file(&temp_path);
+            })?;
         fps.set(settled_fps);
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);
+        let mut wrote_any = false;
 
         while let Some(cmd) = rx.blocking_recv() {
             match cmd {
-                RecordingCommand::WriteVideo(frame, _slot) => {
-                    if let Err(e) = writer.write_video(frame) {
-                        tracing::error!("write_video error: {e}");
-                    }
-                }
+                RecordingCommand::WriteVideo(frame, _slot) => match writer.write_video(frame) {
+                    Ok(()) => wrote_any = true,
+                    Err(e) => tracing::error!("write_video error: {e}"),
+                },
                 RecordingCommand::WriteAudio(samples) => {
                     let track_idx = samples.track_id.0 as usize;
-                    if let Err(e) = writer.write_audio(track_idx, samples) {
-                        tracing::error!("write_audio error: {e}");
+                    match writer.write_audio(track_idx, samples) {
+                        Ok(()) => wrote_any = true,
+                        Err(e) => tracing::error!("write_audio error: {e}"),
                     }
                 }
                 RecordingCommand::Stop => break,
@@ -70,7 +76,14 @@ pub fn spawn_recording_actor(
         }
 
         tracing::info!("recorded video: {}", writer.video_stats());
-        let finished_temp_path = writer.finalize()?;
+        // Media Foundation won't finish a file with nothing written to it (a
+        // recording stopped as soon as it started); nothing is lost with it.
+        // One that holds something stays, under its temporary name.
+        let finished_temp_path = writer.finalize().inspect_err(|_| {
+            if !wrote_any {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+        })?;
         let final_path =
             reserve_finished_recording_path(&naming, &app_name, &output_dir).encode_ctx(
                 format_args!("no name to save {} as", finished_temp_path.display()),
@@ -185,8 +198,31 @@ pub fn spawn_audio_pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Codec;
     use crate::types::TrackId;
     use std::time::Duration;
+
+    /// A recording stopped before anything reached it can't be finalized
+    /// (Media Foundation won't finish a file with nothing in it), and that
+    /// used to leave its `.tmp.mp4` behind for good: hidden from Recent,
+    /// never cleaned up.
+    #[tokio::test]
+    async fn a_recording_stopped_before_anything_was_written_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, handle) = spawn_recording_actor(
+            dir.path().join("game_recording_1.tmp.mp4"),
+            dir.path().to_path_buf(),
+            "game".into(),
+            RecordingNaming::ProcessName,
+            EncoderParams::tiny_test(Codec::H264, &[]),
+            Arc::new(AtomicBool::new(false)),
+            LiveFps::new(30),
+        );
+        tx.send(RecordingCommand::Stop).await.unwrap();
+        assert!(handle.await.unwrap().is_err());
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
 
     #[tokio::test]
     async fn pump_forwards_video_and_increments_counter() {

@@ -52,13 +52,9 @@ fn main() -> eframe::Result<()> {
     // per-recording/per-export sessions the rest of the app opens and closes.
     let _mf = encode::mf::MfSession::start().expect("MFStartup failed — requires Windows 7+");
 
-    let config = config::Config::load().unwrap_or_else(|e| {
-        // load() only errors when config.toml exists but fails to parse (a
-        // missing file is Ok(default) already) -- falling back silently would
-        // leave a user wondering why their settings reset with no clue why.
-        tracing::warn!("failed to load config.toml, using defaults: {e}");
-        config::Config::default()
-    });
+    // A config.toml that couldn't be read is moved aside, and the dashboard
+    // says so -- see `Config::load_or_set_aside`.
+    let (config, config_set_aside) = config::Config::load_or_set_aside();
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-1024.png"))
         .expect("failed to decode app icon");
     let mut viewport = egui::ViewportBuilder::default()
@@ -123,6 +119,7 @@ fn main() -> eframe::Result<()> {
                     show_requested,
                     Arc::clone(&closed_for_lost_graphics),
                     restarted,
+                    config_set_aside,
                 )))
             }),
         )
