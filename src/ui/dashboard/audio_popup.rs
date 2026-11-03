@@ -1,5 +1,6 @@
 use super::App;
 use super::icons::Icon;
+use super::state::Popup;
 use super::theme::{POPUP_WIDTH, pal};
 use super::widgets::{
     RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, popup_window,
@@ -44,7 +45,7 @@ impl AddAppCandidate {
 
 impl App {
     pub(super) fn render_audio_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        if !self.show_audio_popup {
+        if self.popup != Popup::Audio {
             return;
         }
         let mut close = false;
@@ -76,9 +77,8 @@ impl App {
                     close = true;
                 }
             });
-        // Escape as an emergency exit -- same effect as clicking Close.
-        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.show_audio_popup = false;
+        if close {
+            self.close_popup(s);
         }
     }
 
@@ -302,7 +302,7 @@ impl App {
                 .add(accent_button(s.add_app_browse_button, pal().link))
                 .clicked()
                 && let Some(path) = FileDialog::new()
-                    .add_filter("Executable", &["exe"])
+                    .add_filter(s.exe_file_type, &["exe"])
                     .pick_file()
                 && let Some(exe_name) = path
                     .file_name()

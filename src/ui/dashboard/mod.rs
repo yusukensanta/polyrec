@@ -36,8 +36,8 @@ use eframe::egui;
 use fps_support::FpsSupportProbe;
 use hotkeys_popup::HotkeySlot;
 use state::{
-    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, LastRecording,
-    RecordingStatusCache, SelfUpdate,
+    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, LastRecording, Notices,
+    Popup, RecordingStatusCache, SelfUpdate,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -74,17 +74,15 @@ pub struct App {
     /// Whether Windows' own colored capture-border indicator shows around
     /// the recorded window/monitor during a manual recording -- see
     /// `Config::show_recording_border`'s doc comment. Toggled via the menu
-    /// bar button next to Overlay; persisted the same lazy, on-exit-only way.
+    /// bar button next to Overlay, and saved at once, like it.
     show_recording_border: bool,
-    show_quality_popup: bool,
+    /// The settings pop-up that's open -- see `Popup`.
+    popup: Popup,
     /// What the Quality popup knows about the fps the selected source can
     /// really be recorded at -- see `FpsSupportProbe`.
     fps_support: FpsSupportProbe,
-    show_hotkeys_popup: bool,
-    show_audio_popup: bool,
     source_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     frame_count: Arc<AtomicU64>,
-    recording_start: Option<Instant>,
     /// Set once per recording after the achieved fps (frame_count / elapsed)
     /// has been checked against the configured target and found persistently
     /// short -- the "frames" counter next to "tracks" is a real throughput
@@ -134,7 +132,7 @@ pub struct App {
     /// the top of the Status panel (`render_notice`) rather than a modal that
     /// has to be clicked away, which is what all of these used to be. Cleared
     /// when a new recording starts.
-    notice: Option<String>,
+    notices: Notices,
     /// The acknowledgement for the last global hotkey, shown briefly while
     /// the dashboard isn't focused -- see `toast`.
     toast: Option<toast::Toast>,
@@ -223,10 +221,10 @@ impl App {
             s.notice_config_set_aside
                 .replace("{path}", &path.to_string_lossy())
         });
-        let notice = match (restarted_notice, config_notice) {
-            (Some(restarted), Some(config)) => Some(format!("{restarted}\n{config}")),
-            (restarted, config) => restarted.or(config),
-        };
+        let mut notices = Notices::default();
+        for notice in [restarted_notice, config_notice].into_iter().flatten() {
+            notices.push(notice);
+        }
         if restarted.is_some() {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -261,14 +259,7 @@ impl App {
         let app_audio_sources = actions::build_app_audio_sources(&mut config);
         let selected_app_audio = vec![true; app_audio_sources.len()];
         let initial_track_selection = vec![true; n];
-        let wake_ctx = cc.egui_ctx.clone();
-        let hotkey_listener = HotkeyListener::spawn(
-            &config.hotkeys.start_stop,
-            &config.hotkeys.pause,
-            &config.hotkeys.toggle_overlay,
-            &config.hotkeys.save_highlight,
-            move || wake_ctx.request_repaint(),
-        );
+        let hotkey_listener = hotkeys_popup::spawn_hotkey_listener(&config.hotkeys, &cc.egui_ctx);
         let wake_ctx = cc.egui_ctx.clone();
         let tray = tray::Tray::new(move || wake_ctx.request_repaint())
             .inspect_err(|e| tracing::warn!("no tray icon: {e}"))
@@ -305,13 +296,10 @@ impl App {
             app_audio_only,
             overlay_enabled,
             show_recording_border,
-            show_quality_popup: false,
+            popup: Popup::None,
             fps_support: FpsSupportProbe::default(),
-            show_hotkeys_popup: false,
-            show_audio_popup: false,
             source_icon_textures: std::collections::HashMap::new(),
             frame_count: Arc::new(AtomicU64::new(0)),
-            recording_start: None,
             fps_shortfall_warned: false,
             rate_estimate: checks::RateEstimate::default(),
             recording_checks: checks::RecordingChecks::default(),
@@ -327,7 +315,7 @@ impl App {
             update_available: None,
             update_check_rx: Some(update_check_rx),
             error_message: None,
-            notice,
+            notices,
             toast: None,
             overlay_window: Default::default(),
             toast_window: Default::default(),
@@ -465,6 +453,7 @@ impl eframe::App for App {
         self.render_menu_bar(ui, s);
         self.render_source_panel(ui, s);
         self.render_center_panel(ui, s);
+        self.handle_escape(ctx, s);
         self.render_audio_popup(ctx, s);
         self.render_quality_popup(ctx, s);
         self.render_hotkeys_popup(ctx, s);

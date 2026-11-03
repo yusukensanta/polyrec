@@ -1,7 +1,7 @@
 use super::App;
 use super::actions::{TrackKind, TrackLabel};
 use super::icons::{Icon, add_named, icon_button};
-use super::state::{ExportState, HighlightSaveState, RecordingStatusCache};
+use super::state::{ExportState, HighlightSaveState, Popup, RecordingStatusCache};
 use super::theme::{
     CORNER_CONTROL, ROUNDING_PRIMARY_BTN, SPACE_GROUP, SPACE_NORMAL, SPACE_SECTION, SPACE_TIGHT,
     TEXT_BODY, TEXT_BUTTON, TEXT_CAPTION, TEXT_DISPLAY, motion, pal, text_px,
@@ -16,7 +16,7 @@ use crate::i18n::Strings;
 use crate::types::{AudioLevel, SessionState};
 use eframe::egui;
 use rfd::FileDialog;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
@@ -42,9 +42,9 @@ impl App {
     }
 
     /// The dismissible notice strip at the top of the Status panel -- see
-    /// `notice`. The text wraps beside a ✕ that clears it.
+    /// `notices`. The text wraps beside a ✕ that clears it.
     fn render_notice(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
-        let Some(text) = &self.notice else {
+        let Some(text) = self.notices.text() else {
             return;
         };
         let mut dismissed = false;
@@ -75,7 +75,7 @@ impl App {
                 });
             });
         if dismissed {
-            self.notice = None;
+            self.notices.clear();
         }
         ui.add_space(SPACE_NORMAL);
     }
@@ -323,7 +323,7 @@ impl App {
             .on_hover_text(s.quality_tooltip)
             .clicked()
             {
-                self.show_quality_popup = true;
+                self.open_popup(Popup::Quality, s);
             }
             if add_named(
                 ui,
@@ -334,7 +334,7 @@ impl App {
             .on_hover_text(s.hotkeys_tooltip)
             .clicked()
             {
-                self.show_hotkeys_popup = true;
+                self.open_popup(Popup::Hotkeys, s);
             }
             if add_named(
                 ui,
@@ -345,7 +345,7 @@ impl App {
             .on_hover_text(s.audio_tooltip)
             .clicked()
             {
-                self.show_audio_popup = true;
+                self.open_popup(Popup::Audio, s);
             }
         });
         // Current audio selection at a glance, since it now lives behind
@@ -388,8 +388,11 @@ impl App {
             self.output_dir_input = path.to_string_lossy().into_owned();
             self.set_output_dir(path, s);
         }
-        if row.field.lost_focus() && !self.output_dir_input.trim().is_empty() {
-            self.set_output_dir(PathBuf::from(&self.output_dir_input), s);
+        if row.field.lost_focus()
+            && let Some(dir) = typed_output_dir(&self.output_dir_input, &self.config.output_dir)
+        {
+            self.output_dir_input = dir.to_string_lossy().into_owned();
+            self.set_output_dir(dir, s);
         }
         if let Some(problem) = self.output_dir_problem {
             ui.label(caption(output_dir_problem_text(problem, s), pal().warn));
@@ -654,7 +657,7 @@ impl App {
         let default_name =
             default_export_file_name(&self.last_recording.app_name, chrono::Local::now());
         if let Some(dest) = rfd::FileDialog::new()
-            .add_filter("MP4 video", &["mp4"])
+            .add_filter(self.config.lang().strings().mp4_file_type, &["mp4"])
             .set_directory(&default_dir)
             .set_file_name(&default_name)
             .save_file()
@@ -737,58 +740,91 @@ impl App {
 
         ui.add_space(8.0);
 
-        let done_path = if let ExportState::Done(p) = &self.export.state {
-            Some(p.clone())
-        } else {
-            None
-        };
-        let failed_msg = if let ExportState::Failed(m) = &self.export.state {
-            Some(m.clone())
-        } else {
-            None
-        };
-        let is_idle = matches!(self.export.state, ExportState::Idle);
-        let is_running = matches!(self.export.state, ExportState::Running);
+        match export_status_and_actions(ui, s, &self.export.state, path) {
+            ExportClick::Export => self.start_export(path, &track_groups),
+            ExportClick::OpenFolder(of) => open_folder(&of),
+            ExportClick::Nothing => {}
+        }
+    }
+}
 
-        if is_idle {
-            ui.horizontal(|ui| {
-                if ui
-                    .add(primary_button(s.export_button))
-                    .on_hover_text(s.export_tooltip)
-                    .clicked()
-                {
-                    self.start_export(path, &track_groups);
-                }
-                if ui
-                    .add(accent_button(s.open_folder_button, pal().link))
-                    .on_hover_text(s.open_folder_tooltip)
-                    .clicked()
-                {
-                    open_folder(path);
-                }
-            });
-        } else if is_running {
+/// What was clicked under an export's status (`export_status_and_actions`).
+#[derive(Debug, PartialEq, Eq)]
+enum ExportClick {
+    Nothing,
+    Export,
+    /// Open the folder holding this file.
+    OpenFolder(PathBuf),
+}
+
+/// How the last export went, if there's been one, then Export and Open
+/// Folder -- for `recording`, or the export once it's done. Export used to
+/// be there only before the first export: after one failed (picking the
+/// recording itself says "Choose another name") or finished, there was no
+/// trying again, or exporting other tracks, until the next recording.
+fn export_status_and_actions(
+    ui: &mut egui::Ui,
+    s: &'static Strings,
+    state: &ExportState,
+    recording: &std::path::Path,
+) -> ExportClick {
+    let mut folder_of = recording;
+    match state {
+        ExportState::Running => {
             section_header(ui, s.exporting_header);
             ui.label(caption(s.please_wait, pal().text_muted));
-        } else if let Some(export_path) = done_path {
+            return ExportClick::Nothing;
+        }
+        ExportState::Done(export_path) => {
             section_header(ui, s.export_complete_header);
             ui.label(caption(
                 export_path.to_string_lossy().as_ref(),
                 pal().text_primary,
             ));
             ui.add_space(4.0);
-            if ui
-                .add(accent_button(s.open_folder_button, pal().link))
-                .on_hover_text(s.open_folder_tooltip)
-                .clicked()
-            {
-                open_folder(&export_path);
-            }
-        } else if let Some(msg) = failed_msg {
-            section_header(ui, s.export_failed_header);
-            ui.label(caption(&msg, pal().danger));
+            folder_of = export_path;
         }
+        ExportState::Failed(msg) => {
+            section_header(ui, s.export_failed_header);
+            ui.label(caption(msg.as_str(), pal().danger));
+            ui.add_space(4.0);
+        }
+        ExportState::Idle => {}
     }
+    let mut click = ExportClick::Nothing;
+    ui.horizontal(|ui| {
+        if ui
+            .add(primary_button(s.export_button))
+            .on_hover_text(s.export_tooltip)
+            .clicked()
+        {
+            click = ExportClick::Export;
+        }
+        if ui
+            .add(accent_button(s.open_folder_button, pal().link))
+            .on_hover_text(s.open_folder_tooltip)
+            .clicked()
+        {
+            click = ExportClick::OpenFolder(folder_of.to_path_buf());
+        }
+    });
+    click
+}
+
+/// The folder typed into the output folder field, once it loses focus, if
+/// it's a change from `current`. Explorer's "Copy as path" puts quotes
+/// round the path, which used to be taken literally -- the "drive" `"E:`
+/// then wasn't there -- and every Tab or click away from the field saved
+/// the settings and re-read the folder, whether anything was typed or not.
+fn typed_output_dir(typed: &str, current: &Path) -> Option<PathBuf> {
+    let typed = typed.trim();
+    let typed = typed
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .unwrap_or(typed)
+        .trim();
+    let dir = PathBuf::from(typed);
+    (!typed.is_empty() && dir != current).then_some(dir)
 }
 
 /// The message for an unusable output folder, shown under the folder and on
@@ -1084,6 +1120,24 @@ mod folder_row_tests {
     use super::*;
     use crate::i18n::Lang;
 
+    #[test]
+    fn a_typed_folder_counts_once_it_changes_and_without_its_quotes() {
+        let current = Path::new(r"E:\Videos");
+        assert_eq!(
+            typed_output_dir(r#""E:\Recordings""#, current),
+            Some(PathBuf::from(r"E:\Recordings"))
+        );
+        assert_eq!(
+            typed_output_dir(" \tD:\\Clips  ", current),
+            Some(PathBuf::from(r"D:\Clips"))
+        );
+        // Tabbing through the field changed nothing.
+        assert_eq!(typed_output_dir(r"E:\Videos", current), None);
+        assert_eq!(typed_output_dir(r#" "E:\Videos" "#, current), None);
+        assert_eq!(typed_output_dir("", current), None);
+        assert_eq!(typed_output_dir(r#""""#, current), None);
+    }
+
     /// The folder field sat a few pixels below Browse... and Open: it was
     /// given a fixed 22 px, centred in the row, and grew down past that.
     #[test]
@@ -1290,5 +1344,64 @@ mod group_tracks_by_label_tests {
     #[test]
     fn empty_input_produces_no_groups() {
         assert!(group_tracks_by_label::<String>(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    fn flatten(shapes: Vec<egui::Shape>) -> Vec<egui::Shape> {
+        shapes
+            .into_iter()
+            .flat_map(|shape| match shape {
+                egui::Shape::Vec(inner) => flatten(inner),
+                shape => vec![shape],
+            })
+            .collect()
+    }
+
+    /// The text `state`'s status and actions paint.
+    fn painted_text(state: &ExportState) -> Vec<String> {
+        let s = Lang::En.strings();
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                export_status_and_actions(ui, s, state, std::path::Path::new(r"E:\rec.mp4"));
+            });
+            output.textures_delta.clear();
+            texts = flatten(output.shapes.into_iter().map(|c| c.shape).collect())
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+        }
+        texts
+    }
+
+    #[test]
+    fn an_export_can_be_tried_again_once_the_last_one_is_over() {
+        let s = Lang::En.strings();
+        let over_itself = ExportState::Failed(s.export_over_itself.to_owned());
+        let done = ExportState::Done(PathBuf::from(r"E:\export.mp4"));
+        for state in [&ExportState::Idle, &over_itself, &done] {
+            let texts = painted_text(state);
+            assert!(texts.iter().any(|t| t == s.export_button), "{texts:?}");
+            assert!(texts.iter().any(|t| t == s.open_folder_button), "{texts:?}");
+        }
+        assert!(
+            painted_text(&over_itself)
+                .iter()
+                .any(|t| t == s.export_over_itself)
+        );
+        assert!(
+            !painted_text(&ExportState::Running)
+                .iter()
+                .any(|t| t == s.export_button)
+        );
     }
 }

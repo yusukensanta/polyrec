@@ -36,6 +36,14 @@ jobs:
       - name: Build
         run: cargo build --locked --all-targets
 
+      # The installer is otherwise only built for a release, so a mistake in
+      # installer/polyrec.iss would first show as a failed release. Inno
+      # Setup is preinstalled on windows-latest; this compiles the script
+      # against the debug build and throws the result away.
+      - name: Installer compiles
+        shell: pwsh
+        run: iscc /Q /DMyAppVersion=0.0.0 "/DAppExe=..\target\debug\polyrec.exe" "/O$env:RUNNER_TEMP" installer\polyrec.iss
+
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
