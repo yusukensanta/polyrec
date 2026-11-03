@@ -461,15 +461,7 @@ impl CapturePipeline {
                                 .await
                         }
                         None => {
-                            run_audio_capture(
-                                dev.id,
-                                track_id,
-                                dev.is_loopback,
-                                ctrl,
-                                audio_tx,
-                                gain,
-                            )
-                            .await
+                            run_audio_capture(track_id, dev.is_loopback, ctrl, audio_tx, gain).await
                         }
                     }
                 },
