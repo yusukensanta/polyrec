@@ -34,9 +34,10 @@ impl App {
                     {
                         self.overlay_enabled = !self.overlay_enabled;
                         self.config.overlay.enabled = self.overlay_enabled;
+                        // Saved at once: it used to be saved only on the
+                        // way out, so a crash forgot it.
+                        self.save_config_or_report(s);
                     }
-                    // Same lazy on-exit persistence as the Overlay toggle
-                    // above -- no immediate config.save() here either.
                     let border_label = if self.show_recording_border {
                         s.border_on
                     } else {
@@ -49,6 +50,7 @@ impl App {
                     {
                         self.show_recording_border = !self.show_recording_border;
                         self.config.show_recording_border = self.show_recording_border;
+                        self.save_config_or_report(s);
                     }
                     // Saved at once, like the language: it decides what the
                     // next close does, and a close that hides doesn't save.
@@ -107,14 +109,13 @@ impl App {
                             // for why `config.highlight.enabled` also gets
                             // cleared, not just the running session).
                             if self.session.is_recording() || self.session.is_paused() {
-                                self.notice = Some(s.update_blocked_while_recording.to_string());
+                                self.notices.push(s.update_blocked_while_recording);
                             } else {
                                 if self.session.is_highlighting() {
                                     self.session.stop_highlight_buffering(true);
                                     self.config.highlight.enabled = false;
                                     self.save_config_or_report(s);
-                                    self.notice =
-                                        Some(s.update_highlight_disabled_notice.to_string());
+                                    self.notices.push(s.update_highlight_disabled_notice);
                                 }
                                 self.self_update.state = SelfUpdateState::Confirming(update);
                             }

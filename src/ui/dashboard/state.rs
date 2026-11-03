@@ -230,9 +230,159 @@ impl Default for SelfUpdate {
     }
 }
 
+/// The things worth knowing that don't stop anything, shown together in
+/// the Status panel's strip (`render_notice`) until dismissed or a new
+/// recording starts. One slot used to keep only the latest: the frame-rate
+/// warning, 10 s in, replaced the silent-microphone one from the same moment.
+#[derive(Default)]
+pub(super) struct Notices(Vec<String>);
+
+impl Notices {
+    /// Adds `message`, unless it's already showing.
+    pub fn push(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if !self.0.contains(&message) {
+            self.0.push(message);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Everything showing, a line each; `None` while there's nothing.
+    pub fn text(&self) -> Option<String> {
+        (!self.0.is_empty()).then(|| {
+            self.0.join(
+                "
+",
+            )
+        })
+    }
+}
+
+/// The settings pop-up that's open. One at a time: they all sit at the
+/// window's centre, so a second used to land exactly on the first, and it
+/// took a Close per pop-up to get back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum Popup {
+    #[default]
+    None,
+    Quality,
+    Hotkeys,
+    Audio,
+}
+
+/// What Esc does (`escape_target`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Escape {
+    Nothing,
+    /// The error pop-up's Close.
+    CloseError,
+    /// The update pop-up's Not Now, or its Close after a failure.
+    DismissUpdate,
+    /// Back out of choosing a hotkey, the Hotkeys pop-up left open.
+    CancelHotkeyCapture,
+    /// The settings pop-up's Close.
+    ClosePopup,
+}
+
+/// What Esc does: it closes the pop-up on top, and only that one. Each
+/// pop-up used to check for Esc itself, so one press closed an error and the
+/// Quality and Audio pop-ups under it together.
+pub(super) fn escape_target(
+    error_shown: bool,
+    update: &SelfUpdateState,
+    choosing_hotkey: bool,
+    popup: Popup,
+) -> Escape {
+    if error_shown {
+        return Escape::CloseError;
+    }
+    match update {
+        SelfUpdateState::Confirming(_) | SelfUpdateState::Failed(_) => {
+            return Escape::DismissUpdate;
+        }
+        SelfUpdateState::Working => return Escape::Nothing,
+        SelfUpdateState::Idle => {}
+    }
+    if choosing_hotkey {
+        Escape::CancelHotkeyCapture
+    } else if popup == Popup::None {
+        Escape::Nothing
+    } else {
+        Escape::ClosePopup
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The silent-microphone check and the frame-rate check both speak up
+    /// 10 s into a recording; only the second used to be seen.
+    #[test]
+    fn every_notice_shows_until_dismissed() {
+        let mut notices = Notices::default();
+        assert_eq!(notices.text(), None);
+        notices.push("The microphone is silent.");
+        notices.push("Only 20 of 60 frames a second.");
+        notices.push("The microphone is silent.");
+        assert_eq!(
+            notices.text().as_deref(),
+            Some("The microphone is silent.\nOnly 20 of 60 frames a second.")
+        );
+        notices.clear();
+        assert_eq!(notices.text(), None);
+    }
+
+    #[test]
+    fn esc_closes_only_the_pop_up_on_top() {
+        use Escape::*;
+        let idle = SelfUpdateState::Idle;
+        let confirming = SelfUpdateState::Confirming(crate::update_check::AvailableUpdate {
+            version: "9.9.9".into(),
+            url: String::new(),
+        });
+        let failed = SelfUpdateState::Failed("offline".into());
+
+        assert_eq!(escape_target(false, &idle, false, Popup::None), Nothing);
+        assert_eq!(
+            escape_target(false, &idle, false, Popup::Quality),
+            ClosePopup
+        );
+        // An error sits over a settings pop-up; the update pop-up waits for
+        // it (`render_self_update_popup`).
+        assert_eq!(
+            escape_target(true, &idle, false, Popup::Quality),
+            CloseError
+        );
+        assert_eq!(
+            escape_target(true, &confirming, false, Popup::None),
+            CloseError
+        );
+        assert_eq!(
+            escape_target(false, &confirming, false, Popup::Audio),
+            DismissUpdate
+        );
+        assert_eq!(
+            escape_target(false, &failed, false, Popup::None),
+            DismissUpdate
+        );
+        // Nothing interrupts an update that's under way, or reaches past it.
+        assert_eq!(
+            escape_target(false, &SelfUpdateState::Working, false, Popup::Hotkeys),
+            Nothing
+        );
+        assert_eq!(
+            escape_target(false, &idle, true, Popup::Hotkeys),
+            CancelHotkeyCapture
+        );
+        assert_eq!(
+            escape_target(false, &idle, false, Popup::Hotkeys),
+            ClosePopup
+        );
+    }
 
     /// The last recording's file stayed the one reported on through a new
     /// recording: if that one failed, the old file still showed as just

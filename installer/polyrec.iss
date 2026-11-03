@@ -16,6 +16,12 @@
   #define MyAppVersion "0.0.0"
 #endif
 
+; The exe to install. CI's pull-request check compiles this script against
+; the debug build instead (ci.yml).
+#ifndef AppExe
+  #define AppExe "..\target\release\polyrec.exe"
+#endif
+
 [Setup]
 ; Fixed GUID -- must never change across versions, it's how Windows/Inno Setup
 ; recognize "this is an upgrade of the same app" rather than a separate install.
@@ -45,8 +51,9 @@ LicenseFile=..\LICENSE
 ; download reputation over time, see SECURITY.md.
 ; Supports the in-app self-updater (src/self_update.rs): it launches this
 ; installer silently while PolyRec is (about to be) still running, so the
-; installer needs to be able to close/reopen it around the file replace
-; rather than just failing on a locked polyrec.exe.
+; installer needs to be able to close it around the file replace rather than
+; just failing on a locked polyrec.exe. PolyRec usually has closed itself by
+; then, which RestartApplications doesn't reopen -- see RelaunchAfterUpdate.
 CloseApplications=yes
 RestartApplications=yes
 
@@ -58,7 +65,7 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\target\release\polyrec.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#AppExe}"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\fonts\OFL.txt"; DestDir: "{app}"; DestName: "LICENSE-IBM-Plex.txt"; Flags: ignoreversion
@@ -70,3 +77,15 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; After an in-app update, as the user (not elevated), waiting for the old copy
+; to be gone (--after-update, src/single_instance.rs).
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--after-update"; Flags: nowait runasoriginaluser; Check: RelaunchAfterUpdate
+
+[Code]
+// The in-app updater runs this installer silently with /RELAUNCH=1 after
+// closing PolyRec (INSTALLER_ARGS in src/self_update.rs), to have it open
+// again once its files are replaced.
+function RelaunchAfterUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;

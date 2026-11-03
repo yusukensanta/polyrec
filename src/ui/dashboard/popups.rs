@@ -1,5 +1,5 @@
 use super::App;
-use super::state::SelfUpdateState;
+use super::state::{Escape, Popup, SelfUpdateState, escape_target};
 use super::theme::{POPUP_WIDTH, TEXT_BODY, pal, text_px};
 use super::util::{open_url, take_if_finished};
 use super::widgets::{
@@ -172,7 +172,7 @@ impl App {
     }
 
     pub(super) fn render_quality_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        if !self.show_quality_popup {
+        if self.popup != Popup::Quality {
             return;
         }
         let mut close = false;
@@ -211,10 +211,47 @@ impl App {
                     close = true;
                 }
             });
-        // Escape as an emergency exit -- same effect as clicking Close.
-        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.show_quality_popup = false;
-            self.save_config_or_report(s);
+        if close {
+            self.close_popup(s);
+        }
+    }
+
+    /// Esc, once, for the pop-up on top -- see `escape_target`.
+    pub(super) fn handle_escape(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        if !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            return;
+        }
+        match escape_target(
+            self.error_message.is_some(),
+            &self.self_update.state,
+            self.recording_hotkey.is_some(),
+            self.popup,
+        ) {
+            Escape::Nothing => {}
+            Escape::CloseError => self.error_message = None,
+            Escape::DismissUpdate => self.self_update.state = SelfUpdateState::Idle,
+            Escape::CancelHotkeyCapture => self.recording_hotkey = None,
+            Escape::ClosePopup => self.close_popup(s),
+        }
+    }
+
+    /// Opens the settings pop-up `popup`, closing the one open, if any, as
+    /// its Close would.
+    pub(super) fn open_popup(&mut self, popup: Popup, s: &'static Strings) {
+        self.close_popup(s);
+        self.popup = popup;
+    }
+
+    /// The open settings pop-up's Close: Quality saves what was changed in
+    /// it, and Hotkeys stops waiting for a key.
+    pub(super) fn close_popup(&mut self, s: &'static Strings) {
+        match std::mem::take(&mut self.popup) {
+            Popup::Quality => self.save_config_or_report(s),
+            Popup::Hotkeys => {
+                self.recording_hotkey = None;
+                self.hotkey_capture_warning = None;
+            }
+            Popup::Audio | Popup::None => {}
         }
     }
 
@@ -234,7 +271,7 @@ impl App {
                 close = true;
             }
         });
-        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if close {
             self.error_message = None;
         }
     }
@@ -280,13 +317,6 @@ impl App {
                         open_url(&update.url);
                     }
                 });
-                // Escape == "Not Now" here, but deliberately not wired into the
-                // Working/Failed branches below -- Working shouldn't let Escape
-                // interrupt an in-flight update, and Failed already has its own
-                // Escape handling.
-                if action.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    action = Some("not_now");
-                }
                 match action {
                     Some("now") => {
                         let version = update.version;

@@ -513,6 +513,21 @@ async fn update_portable(version_tag: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// How an update runs the installer. /VERYSILENT+/SUPPRESSMSGBOXES suppress
+/// Inno's own wizard UI; they do NOT suppress the OS-level UAC elevation
+/// prompt (independent, driven by the installer's manifest) -- that prompt
+/// is expected. /NORESTART since a PolyRec update never needs a reboot.
+/// /RELAUNCH=1 has installer/polyrec.iss open PolyRec again once it's done.
+/// Its `RestartApplications` doesn't: that's for apps the installer itself
+/// closed, and PolyRec closes itself first -- so after an installed update
+/// PolyRec just didn't come back.
+const INSTALLER_ARGS: [&str; 4] = [
+    "/VERYSILENT",
+    "/SUPPRESSMSGBOXES",
+    "/NORESTART",
+    "/RELAUNCH=1",
+];
+
 async fn update_installed(version_tag: &str) -> Result<(), AppError> {
     let setup_filename = format!("polyrec-{version_tag}-windows-x64-setup.exe");
     let setup_bytes = download_and_verify(version_tag, &setup_filename).await?;
@@ -522,16 +537,12 @@ async fn update_installed(version_tag: &str) -> Result<(), AppError> {
     // under way -- the UAC prompt it brings up says it's PolyRec's.
     let _held = staged.open_verified()?;
 
-    // /VERYSILENT+/SUPPRESSMSGBOXES suppress Inno's own wizard UI; they do
-    // NOT suppress the OS-level UAC elevation prompt (independent, driven by
-    // the installer's manifest, not something these flags touch) -- that
-    // prompt is expected. /NORESTART since a PolyRec update never needs a
-    // reboot. We deliberately don't wait for this to finish or track/relaunch
-    // the app ourselves -- installer/polyrec.iss's RestartApplications=yes
-    // handles reopening PolyRec once the (possibly UAC-delayed) install
-    // completes, since we can't reliably wait through an elevation prompt.
+    // We deliberately don't wait for this to finish -- we can't reliably
+    // wait through its elevation prompt, and PolyRec has to have closed for
+    // its files to be replaced -- so the installer reopens it
+    // (`INSTALLER_ARGS`).
     std::process::Command::new(&staged.path)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        .args(INSTALLER_ARGS)
         .spawn()
         .update_ctx("launching installer")?;
     // The running installer keeps its file (and so the folder) from being
@@ -542,6 +553,17 @@ async fn update_installed(version_tag: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After an installed update, PolyRec didn't come back: the installer's
+    /// `RestartApplications` only reopens what it closed itself, and PolyRec
+    /// closes itself first.
+    #[test]
+    fn the_installer_reopens_polyrec_after_an_update() {
+        const ISS: &str = include_str!("../installer/polyrec.iss");
+        assert!(INSTALLER_ARGS.contains(&"/RELAUNCH=1"));
+        assert!(ISS.contains("ExpandConstant('{param:RELAUNCH|0}') = '1'"));
+        assert!(ISS.contains("Check: RelaunchAfterUpdate"));
+    }
 
     /// The GitHub API's real answer for v0.5.139's zip: GitHub's own
     /// release attestation, then the build provenance `release.yml` made.

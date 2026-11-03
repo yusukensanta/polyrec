@@ -190,7 +190,7 @@ impl App {
             let silent = silent_microphones(&self.last_recording.audio_labels, &loudest);
             if !silent.is_empty() {
                 let message = silent_microphones_message(s, &silent);
-                self.notice = Some(message.clone());
+                self.notices.push(message.clone());
                 say.push(message);
             }
         }
