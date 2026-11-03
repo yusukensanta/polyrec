@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The release build is harder to tamper with. It refuses a tag that isn't a plain version number (a crafted tag name could run commands in it), no longer leaves its write access on disk while third-party build code runs, and CI runs with read-only access. Release tags can now be created, moved or deleted only by the repository's admins. The app itself doesn't change.
+
 ## [v0.5.148] - 2026-11-04
 
 ### Fixed

@@ -38,6 +38,11 @@ jobs:
       # way. Comment notes the version the SHA corresponds to, for humans and
       # for Dependabot to track updates against.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Nothing here pushes with git (the release is made through the
+        # API), so the contents: write token isn't left in .git/config for
+        # the ~250 crates' build scripts that run after this to find.
+        with:
+          persist-credentials: false
 
       - name: Resolve tag
         id: tag
@@ -57,6 +62,14 @@ jobs:
             $env:RESOLVE_RELEASE_TAG
           } else {
             $env:RESOLVE_REF_NAME
+          }
+          # The trigger's v*.*.* glob also matches names like
+          # v1.2.3$(...) -- git allows $ ( ) ' | in a ref. Only a plain
+          # vX.Y.Z goes on: it becomes file names, and the steps below get
+          # it as $env:TAG, never spliced into their scripts.
+          if ($tag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+\z') {
+            Write-Error "Not a release tag: '$tag' -- expected vX.Y.Z"
+            exit 1
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
@@ -85,9 +98,11 @@ jobs:
 
       - name: Verify tag matches Cargo.toml version
         shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $tagVersion = "${{ steps.tag.outputs.tag }}".TrimStart('v')
+          $tagVersion = $env:TAG.TrimStart('v')
           if ($cargoVersion -ne $tagVersion) {
             Write-Error "Tag v$tagVersion does not match Cargo.toml's version ($cargoVersion) -- bump Cargo.toml and retag."
             exit 1
@@ -120,18 +135,21 @@ jobs:
         continue-on-error: true
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           . .github/scripts/Submit-SignPathRequest.ps1
           Submit-SignPathRequest `
             -ArtifactPath target/release/polyrec.exe `
             -ArtifactConfigurationSlug polyrec-exe `
-            -Description "${{ steps.tag.outputs.tag }} polyrec.exe" `
+            -Description "$env:TAG polyrec.exe" `
             -OutputPath target/release/polyrec.exe
 
       - name: Package zip
         shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          $ver = "${{ steps.tag.outputs.tag }}"
+          $ver = $env:TAG
           $stagingDir = "polyrec-$ver-windows-x64"
           New-Item -ItemType Directory -Path $stagingDir | Out-Null
           Copy-Item target/release/polyrec.exe $stagingDir/
@@ -148,8 +166,10 @@ jobs:
       # style package managers expect.
       - name: Build installer (Inno Setup)
         shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          $ver = "${{ steps.tag.outputs.tag }}"
+          $ver = $env:TAG
           iscc "/DMyAppVersion=$ver" installer\polyrec.iss
           "installerPath=polyrec-$ver-windows-x64-setup.exe" >> $env:GITHUB_OUTPUT
         id: installer
@@ -165,13 +185,15 @@ jobs:
         continue-on-error: true
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.installerPath }}
         run: |
           . .github/scripts/Submit-SignPathRequest.ps1
           Submit-SignPathRequest `
-            -ArtifactPath "${{ steps.installer.outputs.installerPath }}" `
+            -ArtifactPath $env:INSTALLER_PATH `
             -ArtifactConfigurationSlug polyrec-installer `
-            -Description "${{ steps.tag.outputs.tag }} installer" `
-            -OutputPath "${{ steps.installer.outputs.installerPath }}"
+            -Description "$env:TAG installer" `
+            -OutputPath $env:INSTALLER_PATH
 
       # Surfaces a signing failure in the workflow run summary -- easy to
       # miss otherwise, since continue-on-error only shows as a small
