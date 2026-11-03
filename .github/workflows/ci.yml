@@ -10,11 +10,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Builds, lints and tests only: the token needs to read the repo, nothing
+# more (caches go through the Actions runtime, not this token).
+permissions:
+  contents: read
+
 jobs:
   build-test-lint:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Nothing here pushes, so the token isn't left in .git/config for
+        # every build script and test that runs after this to find.
+        with:
+          persist-credentials: false
 
       # No `toolchain:` input -- reads rust-toolchain.toml at repo root, so CI
       # and local dev always build with the exact same pinned version instead
@@ -90,6 +99,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Nothing here pushes, so the token isn't left in .git/config for
+        # every build script and test that runs after this to find.
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
 
