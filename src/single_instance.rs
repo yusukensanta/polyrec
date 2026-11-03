@@ -48,11 +48,23 @@ pub struct Instance {
     released: Arc<AtomicBool>,
 }
 
+/// Why this process isn't the running copy (`claim`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotClaimed {
+    /// Another copy has it, and was asked to show its window.
+    BroughtUp,
+    /// Something has it that this copy can't open, so it can't be asked to
+    /// show itself: a copy running elevated, from a PolyRec that left its
+    /// claim to Windows' default access, or another program holding the
+    /// name. This launch used to just end, with nothing to say why.
+    Unreachable,
+}
+
 /// Claims the running copy for this process. If another process has it,
-/// asks that one to show its window and returns `None`; with
-/// `after_update` (see `AFTER_UPDATE_ARG`), waits for it to exit instead.
-/// Call it on the main thread.
-pub fn claim(after_update: bool) -> Option<Instance> {
+/// asks that one to show its window; with `after_update` (see
+/// `AFTER_UPDATE_ARG`), waits for it to exit instead. Call it on the main
+/// thread.
+pub fn claim(after_update: bool) -> Result<Instance, NotClaimed> {
     let timeout = if after_update {
         PREVIOUS_EXIT_TIMEOUT_MS
     } else {
@@ -61,7 +73,7 @@ pub fn claim(after_update: bool) -> Option<Instance> {
     claim_named(&instance_name(), timeout)
 }
 
-fn claim_named(name: &str, timeout_ms: u32) -> Option<Instance> {
+fn claim_named(name: &str, timeout_ms: u32) -> Result<Instance, NotClaimed> {
     let security = for_this_user()
         .inspect_err(|e| tracing::warn!("the claim gets Windows' default access: {e}"))
         .ok();
@@ -89,16 +101,16 @@ fn claim_named(name: &str, timeout_ms: u32) -> Option<Instance> {
             // PolyRec that left its claim to Windows' default access.
             Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => {
                 tracing::info!("another copy holds the claim, closed to this one: {e}");
-                return None;
+                return Err(NotClaimed::Unreachable);
             }
             Err(e) => {
                 tracing::warn!("can't tell whether PolyRec is already running: {e}");
-                return Some(instance);
+                return Ok(instance);
             }
         };
         if owned(WaitForSingleObject(mutex, timeout_ms)) {
             instance.mutex = Some(mutex.0 as usize);
-            return Some(instance);
+            return Ok(instance);
         }
         // The user just started this process, so it may hand the right to
         // come to the front over to the running copy.
@@ -106,7 +118,22 @@ fn claim_named(name: &str, timeout_ms: u32) -> Option<Instance> {
             let _ = AllowSetForegroundWindow(ASFW_ANY);
             let _ = SetEvent(event);
         }
-        None
+        Err(NotClaimed::BroughtUp)
+    }
+}
+
+/// Tells the user, in `lang`, that PolyRec is running but couldn't be
+/// brought up (`NotClaimed::Unreachable`). Waits until they've read it.
+pub fn say_unreachable(lang: crate::i18n::Lang) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+    let text = HSTRING::from(lang.strings().already_running_unreachable);
+    unsafe {
+        MessageBoxW(
+            None,
+            &text,
+            &HSTRING::from("PolyRec"),
+            MB_OK | MB_ICONINFORMATION,
+        );
     }
 }
 
@@ -296,14 +323,14 @@ mod tests {
         let name = name.to_owned();
         let thread = std::thread::spawn(move || {
             let instance = claim_named(&name, timeout_ms);
-            if let Some(instance) = &instance {
+            if let Ok(instance) = &instance {
                 instance.listen(move || {
                     shows.fetch_add(1, Ordering::SeqCst);
                 });
             }
-            claimed_tx.send(instance.is_some()).unwrap();
+            claimed_tx.send(instance.is_ok()).unwrap();
             while let Ok(true) = release_rx.recv() {
-                if let Some(instance) = &instance {
+                if let Ok(instance) = &instance {
                     instance.release();
                 }
             }
@@ -375,7 +402,11 @@ mod tests {
         let attributes = system_only.attributes();
         let theirs = unsafe { CreateMutexW(Some(&attributes), false, &HSTRING::from(&name)) }
             .expect("made the claim");
-        assert!(claim_named(&name, 0).is_none(), "a second copy ran");
+        assert_eq!(
+            claim_named(&name, 0).err(),
+            Some(NotClaimed::Unreachable),
+            "a second copy ran, or said nothing"
+        );
         unsafe { CloseHandle(theirs) }.unwrap();
     }
 

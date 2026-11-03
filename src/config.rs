@@ -16,6 +16,11 @@ pub const MIN_WINDOW_SIZE: (f32, f32) = (620.0, 450.0);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    /// config.toml couldn't be read or moved aside
+    /// (`ConfigTrouble::LeftAlone`), so `save` leaves it alone this time
+    /// rather than replace it with these defaults. Not saved itself.
+    #[serde(skip)]
+    pub saves_blocked: bool,
     pub output_dir: PathBuf,
     pub hotkeys: HotkeyConfig,
     pub overlay: OverlayConfig,
@@ -346,6 +351,7 @@ const INPUT_ENDPOINT: &str = "{0.0.1.";
 impl Default for Config {
     fn default() -> Self {
         Self {
+            saves_blocked: false,
             output_dir: dirs::video_dir().unwrap_or_else(|| PathBuf::from(".")),
             hotkeys: HotkeyConfig::default(),
             overlay: OverlayConfig::default(),
@@ -513,20 +519,36 @@ impl Config {
     }
 
     /// The settings in config.toml, or the defaults if there's none yet. One
-    /// PolyRec can't read -- a hand edit gone wrong, or one from a newer
-    /// version -- is moved aside to `config.toml.bad` and the defaults used
+    /// PolyRec can't understand -- a hand edit gone wrong, or one from a newer
+    /// version -- is moved aside (`set_aside_path`) and the defaults used
     /// instead: left where it was, the defaults would overwrite it at the next
-    /// save. Also says where it went, if it was moved.
-    pub fn load_or_set_aside() -> (Self, Option<PathBuf>) {
+    /// save. One that can't be read at all, or moved aside, is left as it is,
+    /// and not saved over this time (`saves_blocked`). Also says which, if
+    /// either.
+    pub fn load_or_set_aside() -> (Self, Option<ConfigTrouble>) {
         Self::load_or_set_aside_at(&Self::config_path())
     }
 
-    fn load_or_set_aside_at(path: &Path) -> (Self, Option<PathBuf>) {
-        let e = match Self::load_from(path) {
+    fn load_or_set_aside_at(path: &Path) -> (Self, Option<ConfigTrouble>) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), None),
+            // Not a bad file, just one that couldn't be read right now --
+            // held open by a backup or sync tool, say. It used to be moved
+            // aside like a bad one.
+            Err(e) => {
+                tracing::warn!(
+                    "couldn't read {} ({e}); started with the defaults and left it as it is",
+                    path.display()
+                );
+                return Self::left_alone(path);
+            }
+        };
+        let e = match toml::from_str(&text) {
             Ok(config) => return (config, None),
             Err(e) => e,
         };
-        let aside = path.with_file_name("config.toml.bad");
+        let aside = set_aside_path(path);
         match std::fs::rename(path, &aside) {
             Ok(()) => {
                 tracing::warn!(
@@ -534,28 +556,55 @@ impl Config {
                     path.display(),
                     aside.display()
                 );
-                (Self::default(), Some(aside))
+                (Self::default(), Some(ConfigTrouble::SetAside(aside)))
             }
             Err(move_err) => {
                 tracing::warn!(
-                    "couldn't read {} ({e}) or move it aside ({move_err}); started with the defaults",
+                    "couldn't read {} ({e}) or move it aside ({move_err}); started with the defaults and left it as it is",
                     path.display()
                 );
-                (Self::default(), None)
+                Self::left_alone(path)
             }
         }
     }
 
-    fn load_from(path: &Path) -> Result<Self, AppError> {
-        if !path.exists() {
-            return Ok(Self::default());
+    /// The language in config.toml, read without loading the rest -- or
+    /// setting anything aside: for what's said before PolyRec is running
+    /// (`single_instance::say_unreachable`).
+    pub fn saved_language() -> Lang {
+        Self::saved_language_at(&Self::config_path())
+    }
+
+    fn saved_language_at(path: &Path) -> Lang {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct LanguageOnly {
+            language: Lang,
         }
-        let text = std::fs::read_to_string(path)?;
-        toml::from_str(&text).map_err(|e| AppError::Config(e.to_string()))
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| toml::from_str::<LanguageOnly>(&text).ok())
+            .unwrap_or_default()
+            .language
+    }
+
+    /// The defaults, for a config.toml at `path` that's left as it is.
+    fn left_alone(path: &Path) -> (Self, Option<ConfigTrouble>) {
+        let config = Self {
+            saves_blocked: true,
+            ..Self::default()
+        };
+        (config, Some(ConfigTrouble::LeftAlone(path.to_path_buf())))
     }
 
     pub fn save(&self) -> Result<(), AppError> {
-        let path = Self::config_path();
+        self.save_to(&Self::config_path())
+    }
+
+    fn save_to(&self, path: &Path) -> Result<(), AppError> {
+        if self.saves_blocked {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -567,11 +616,53 @@ impl Config {
         // parse error up). The temp file lives in the same directory, so the
         // rename is a same-volume move: config.toml is always either the old
         // complete file or the new complete file, never a partial write.
-        let tmp_path = path.with_file_name("config.toml.tmp");
-        std::fs::write(&tmp_path, text)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(())
+        // The temp file is this save's own -- two copies of PolyRec sharing
+        // these settings (an installed one and one built from source)
+        // saving at once used to write the one config.toml.tmp together --
+        // and is on disk before it replaces config.toml, or a power cut
+        // could leave the rename done and the contents not.
+        static SAVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let tmp_path = path.with_file_name(format!(
+            "config.toml.{}-{}.tmp",
+            std::process::id(),
+            SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let saved = write_synced(&tmp_path, text.as_bytes())
+            .and_then(|()| std::fs::rename(&tmp_path, path));
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        Ok(saved?)
     }
+}
+
+/// Writes `bytes` to a new file at `path`, and waits until they're on disk.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create_new(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Where a config.toml at `path` that couldn't be understood is moved:
+/// config.toml.bad, or config.toml.bad.2, .3 and so on -- never over one set
+/// aside before, which holds the settings as they were before the first.
+fn set_aside_path(path: &Path) -> PathBuf {
+    std::iter::once(path.with_file_name("config.toml.bad"))
+        .chain((2u32..).map(|n| path.with_file_name(format!("config.toml.bad.{n}"))))
+        .find(|candidate| !candidate.exists())
+        .expect("a free name")
+}
+
+/// Why the settings PolyRec started with aren't the ones in config.toml.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigTrouble {
+    /// It couldn't be understood, and was moved here.
+    SetAside(PathBuf),
+    /// It couldn't be read, or moved aside: it's left as it was (at this
+    /// path), and nothing is saved over it this time
+    /// (`Config::saves_blocked`).
+    LeftAlone(PathBuf),
 }
 
 #[cfg(test)]
@@ -822,10 +913,114 @@ mod tests {
         let (config, aside) = Config::load_or_set_aside_at(&path);
 
         assert_eq!(config.encode.fps, Config::default().encode.fps);
-        let aside = aside.expect("set aside");
+        let Some(ConfigTrouble::SetAside(aside)) = aside else {
+            panic!("not set aside: {aside:?}");
+        };
         assert_eq!(aside, dir.path().join("config.toml.bad"));
         assert_eq!(std::fs::read_to_string(&aside).unwrap(), text);
         assert!(!path.exists());
+    }
+
+    /// Something else holding config.toml at startup (a backup or sync
+    /// tool, say) made reading it fail, and that was taken for a bad file:
+    /// a perfectly good config was moved aside and replaced with defaults.
+    #[test]
+    fn a_config_that_cant_be_read_at_all_is_left_where_it_is() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Reading a folder fails, as a file held open by another program does.
+        std::fs::create_dir(&path).unwrap();
+
+        let (config, trouble) = Config::load_or_set_aside_at(&path);
+
+        assert_eq!(trouble, Some(ConfigTrouble::LeftAlone(path.clone())));
+        assert!(config.saves_blocked);
+        assert!(path.is_dir());
+        assert!(!dir.path().join("config.toml.bad").exists());
+    }
+
+    /// The second time a config couldn't be understood, it was moved over
+    /// the first one set aside -- the one with the user's real settings.
+    #[test]
+    fn a_second_bad_config_keeps_the_first_one_set_aside() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "fps = [").unwrap();
+        let (_, first) = Config::load_or_set_aside_at(&path);
+        std::fs::write(&path, "language = {").unwrap();
+        let (_, second) = Config::load_or_set_aside_at(&path);
+
+        let first_path = dir.path().join("config.toml.bad");
+        let second_path = dir.path().join("config.toml.bad.2");
+        assert_eq!(first, Some(ConfigTrouble::SetAside(first_path.clone())));
+        assert_eq!(second, Some(ConfigTrouble::SetAside(second_path.clone())));
+        assert_eq!(std::fs::read_to_string(first_path).unwrap(), "fps = [");
+        assert_eq!(
+            std::fs::read_to_string(second_path).unwrap(),
+            "language = {"
+        );
+    }
+
+    /// A bad config that couldn't be moved aside (another program has it
+    /// open) was still saved over with the defaults at the first change.
+    #[test]
+    fn a_bad_config_that_cant_be_moved_aside_is_never_saved_over() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "fps = [").unwrap();
+        // Readable, but not movable while this is open.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+
+        let (config, trouble) = Config::load_or_set_aside_at(&path);
+        drop(held);
+
+        assert_eq!(trouble, Some(ConfigTrouble::LeftAlone(path.clone())));
+        assert!(config.saves_blocked);
+        config.save_to(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fps = [");
+    }
+
+    #[test]
+    fn the_saved_language_is_read_without_the_rest() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(Config::saved_language_at(&path), Lang::En);
+        // A wrong value elsewhere doesn't hide the language...
+        std::fs::write(&path, "language = \"ja\"\n[encode]\nfps = \"sixty\"\n").unwrap();
+        assert_eq!(Config::saved_language_at(&path), Lang::Ja);
+        // ...but a file that isn't TOML at all reads as the default.
+        std::fs::write(&path, "language = \"ja\"\nfps = [").unwrap();
+        assert_eq!(Config::saved_language_at(&path), Lang::En);
+        std::fs::write(&path, "output_dir = 'E:\\\\videos'\nlanguage = \"ja\"\n").unwrap();
+        assert_eq!(Config::saved_language_at(&path), Lang::Ja);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_save_leaves_only_config_toml_behind() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mine = Config {
+            output_dir: dir.path().join("videos"),
+            ..Config::default()
+        };
+        mine.save_to(&path).unwrap();
+        mine.save_to(&path).unwrap();
+
+        let (loaded, trouble) = Config::load_or_set_aside_at(&path);
+        assert_eq!(trouble, None);
+        assert_eq!(loaded, mine);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["config.toml"]);
     }
 
     #[test]

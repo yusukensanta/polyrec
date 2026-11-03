@@ -35,9 +35,16 @@ fn main() -> eframe::Result<()> {
 
     // Before anything registers a hotkey or a tray icon.
     let after_update = std::env::args().any(|arg| arg == single_instance::AFTER_UPDATE_ARG);
-    let Some(instance) = single_instance::claim(after_update) else {
-        tracing::info!("PolyRec is already running; brought that one up instead");
-        return Ok(());
+    let instance = match single_instance::claim(after_update) {
+        Ok(instance) => instance,
+        Err(single_instance::NotClaimed::BroughtUp) => {
+            tracing::info!("PolyRec is already running; brought that one up instead");
+            return Ok(());
+        }
+        Err(single_instance::NotClaimed::Unreachable) => {
+            single_instance::say_unreachable(config::Config::saved_language());
+            return Ok(());
+        }
     };
 
     // Build a multi-thread runtime so tokio::task::spawn_blocking and mpsc channels
@@ -53,9 +60,9 @@ fn main() -> eframe::Result<()> {
     // per-recording/per-export sessions the rest of the app opens and closes.
     let _mf = encode::mf::MfSession::start().expect("MFStartup failed — requires Windows 7+");
 
-    // A config.toml that couldn't be read is moved aside, and the dashboard
-    // says so -- see `Config::load_or_set_aside`.
-    let (config, config_set_aside) = config::Config::load_or_set_aside();
+    // A config.toml that couldn't be read is moved aside or left alone, and
+    // the dashboard says so -- see `Config::load_or_set_aside`.
+    let (config, config_trouble) = config::Config::load_or_set_aside();
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-1024.png"))
         .expect("failed to decode app icon");
     let mut viewport = egui::ViewportBuilder::default()
@@ -120,7 +127,7 @@ fn main() -> eframe::Result<()> {
                     show_requested,
                     Arc::clone(&closed_for_lost_graphics),
                     restarted,
-                    config_set_aside,
+                    config_trouble,
                 )))
             }),
         )

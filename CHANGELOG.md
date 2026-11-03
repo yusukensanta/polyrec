@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.150] - 2026-11-04
+
+### Security
+
+- A portable copy of PolyRec no longer loads DLLs from its own folder. The C runtime is built in now, and the Windows DLLs it uses load from System32 only. Unzipped into a folder that already held a planted DLL (Downloads, say), it would have loaded that DLL inside PolyRec.
+
+### Fixed
+
+- If your settings file couldn't be read at startup (another program had it open, say), it was moved aside as if it were broken, and PolyRec started with its defaults. It's left as it is now, and isn't saved over until PolyRec starts again.
+- A settings file that couldn't be understood a second time was moved over the first one set aside, which held your settings. Each one is kept now: config.toml.bad, config.toml.bad.2, and so on.
+- A settings file that couldn't be understood and couldn't be moved aside was saved over with the defaults at the first change. It's left alone now.
+- Two copies of PolyRec saving settings at the same moment could mix their writes, and a power cut right after a save could leave the file empty.
+- Starting PolyRec while a copy run as administrator was open did nothing at all. It says so now.
+
 ## [v0.5.149] - 2026-11-04
 
 ### Fixed
