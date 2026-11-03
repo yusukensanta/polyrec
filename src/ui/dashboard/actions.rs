@@ -344,15 +344,19 @@ impl App {
     /// manual source-list selection. It captures whatever window is currently in the
     /// foreground instead, so "press hotkey, record what I'm doing right now" works
     /// while alt-tabbed into a game with the dashboard never brought to front.
-    pub(super) fn handle_hotkey_start_stop(&mut self) {
+    /// With the dashboard itself in front, it does what REC would.
+    pub(super) fn handle_hotkey_start_stop(&mut self, s: &'static Strings) {
         if self.has_recording() {
             self.stop_recording();
-        } else if let Some(source) = foreground_capture_source() {
-            self.start_recording_with_source(source);
-        } else {
-            tracing::warn!(
-                "start/stop hotkey pressed but the foreground window isn't capturable (or it's PolyRec itself)"
-            );
+            return;
+        }
+        match hotkey_start(foreground(), self.rec_blocked_reason(s)) {
+            HotkeyStart::Record(source) => self.start_recording_with_source(source),
+            HotkeyStart::RecordSelected => self.handle_rec_button(),
+            HotkeyStart::Explain(why) => self.notices.push(why),
+            HotkeyStart::Nothing => {
+                tracing::warn!("start/stop hotkey pressed with no window in front");
+            }
         }
     }
 
@@ -514,7 +518,6 @@ impl App {
         if !self.finalizing.stop(&mut self.session) {
             return;
         }
-        self.recording_start = None;
         self.frame_count.store(0, Ordering::Relaxed);
         // export.track_selection/export.available_tracks are set once finalize
         // actually succeeds and the file can be probed (poll_background_work) --
@@ -620,7 +623,6 @@ impl App {
                     "recording started: source={source_title:?} audio_tracks={track_count} output={}",
                     path.display()
                 );
-                self.recording_start = Some(Instant::now());
                 self.fps_shortfall_warned = false;
                 self.recording_checks = Default::default();
                 // Otherwise the previous recording's cached preview -- keyed
@@ -631,7 +633,7 @@ impl App {
                 self.meter_levels.clear();
                 // A notice about the previous recording would read as being
                 // about this one.
-                self.notice = None;
+                self.notices.clear();
                 self.last_recording.started(audio_labels, app_name);
             }
             Err(e) => {
@@ -656,7 +658,7 @@ impl App {
             self.session.stop_highlight_buffering(true);
             if disk_full {
                 let strings = self.config.lang().strings();
-                self.notice = Some(strings.highlight_disk_full_message.to_string());
+                self.notices.push(strings.highlight_disk_full_message);
             }
         }
 
@@ -735,7 +737,7 @@ impl App {
     /// export-UI convention) if Highlight buffering isn't currently active.
     pub(super) fn handle_save_highlight_hotkey(&mut self, s: &'static Strings) {
         let Some(hwnd) = self.session.highlight_hwnd() else {
-            self.notice = Some(s.highlight_save_not_active.to_string());
+            self.notices.push(s.highlight_save_not_active);
             return;
         };
         if matches!(self.highlight_save.state, HighlightSaveState::Saving) {
@@ -765,17 +767,56 @@ impl App {
 /// windows), which would otherwise let a hotkey press while focused on our own
 /// window "record" it instead of whatever the user actually meant to capture.
 fn foreground_capture_source() -> Option<CaptureSource> {
+    match foreground() {
+        Foreground::Window(source) => Some(source),
+        Foreground::Dashboard | Foreground::Nothing => None,
+    }
+}
+
+/// What's in front.
+enum Foreground {
+    /// Another app's window, to record.
+    Window(CaptureSource),
+    /// One of PolyRec's own windows.
+    Dashboard,
+    Nothing,
+}
+
+fn foreground() -> Foreground {
     unsafe {
         let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
         if hwnd.0.is_null() {
-            return None;
+            return Foreground::Nothing;
         }
         let mut pid = 0u32;
         windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == std::process::id() {
-            return None;
+            return Foreground::Dashboard;
         }
-        Some(crate::sources::capture_source_for_hwnd(hwnd))
+        Foreground::Window(crate::sources::capture_source_for_hwnd(hwnd))
+    }
+}
+
+/// What the start/stop hotkey starts, with nothing recording.
+enum HotkeyStart {
+    Record(CaptureSource),
+    /// What REC would: the source picked on the dashboard.
+    RecordSelected,
+    /// Why REC can't start, as its tooltip says.
+    Explain(&'static str),
+    Nothing,
+}
+
+/// The hotkey records the window in front. With the dashboard in front it
+/// used to do nothing at all -- a warning in a log release builds don't
+/// show, and the "not started" toast is kept off the focused dashboard -- so
+/// now it does what REC would, or says why REC can't (`rec_blocked`).
+fn hotkey_start(front: Foreground, rec_blocked: Option<&'static str>) -> HotkeyStart {
+    match (front, rec_blocked) {
+        (Foreground::Window(source), _) => HotkeyStart::Record(source),
+        (Foreground::Dashboard, None) => HotkeyStart::RecordSelected,
+        (Foreground::Dashboard, Some(why)) => HotkeyStart::Explain(why),
+        (Foreground::Nothing, _) => HotkeyStart::Nothing,
     }
 }
 
@@ -864,6 +905,27 @@ mod tests {
             labels.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["🎙 Mic", "Live App"]
         );
+    }
+
+    #[test]
+    fn the_start_hotkey_over_the_dashboard_does_what_rec_would() {
+        let why = "Select a window or display to record first.";
+        assert!(matches!(
+            hotkey_start(Foreground::Window(window(1, "Game")), Some(why)),
+            HotkeyStart::Record(source) if source.window_title == "Game"
+        ));
+        assert!(matches!(
+            hotkey_start(Foreground::Dashboard, None),
+            HotkeyStart::RecordSelected
+        ));
+        assert!(matches!(
+            hotkey_start(Foreground::Dashboard, Some(why)),
+            HotkeyStart::Explain(said) if said == why
+        ));
+        assert!(matches!(
+            hotkey_start(Foreground::Nothing, None),
+            HotkeyStart::Nothing
+        ));
     }
 
     fn window(hwnd: usize, title: &str) -> CaptureSource {

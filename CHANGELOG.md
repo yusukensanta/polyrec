@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The release build is harder to tamper with. It refuses a tag that isn't a plain version number (a crafted tag name could run commands in it), no longer leaves its write access on disk while third-party build code runs, and CI runs with read-only access. Release tags can now be created, moved or deleted only by the repository's admins. The app itself doesn't change.
 
+## [v0.5.149] - 2026-11-04
+
+### Fixed
+
+- After an export failed (picking the recording itself says to choose another name) or finished, the Export button was gone until the next recording. It stays now, so you can try again or export other tracks.
+- Changing a hotkey to a key that was already bound did that key's action instead: with Start/Stop on F9, choosing F9 for Pause started a recording. Hotkeys are off while you choose one now, and a new one works as soon as it's chosen, not only after Close.
+- Esc closed every pop-up at once, such as an error and the Quality and Audio pop-ups under it. It closes only the one on top now, and while you choose a hotkey it cancels only that. Opening a settings pop-up closes the one already open instead of stacking them, and Esc also closes a failed update's message.
+- Resuming a paused recording could warn that the frame rate fell short ("Only 5 of the 60 frames…"), counting the pause as frames missed.
+- Two notices at once, such as a silent microphone and a low frame rate 10 s into a recording, showed only the second. Every notice shows now, until you dismiss them.
+- The start/stop hotkey did nothing with PolyRec's own window in front. It starts what REC would now, or says why REC can't.
+- A folder pasted into the output folder field with quotes, as Explorer's "Copy as path" gives it, was taken literally and reported as unavailable. Leaving the field without changing it also saved the settings every time.
+- After an update through the installer, PolyRec didn't open again. It does now.
+- The Overlay and Border settings were saved only when PolyRec closed, so a crash forgot them.
+- In Japanese, the prompt to start now names the 録画 button as it's labelled. The Hotkeys button's tooltip mentions Save Highlight, and the file types in the Save and Browse dialogs follow the language.
+
 ## [v0.5.148] - 2026-11-04
 
 ### Fixed

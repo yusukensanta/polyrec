@@ -51,11 +51,12 @@ impl App {
         while let Some(event) = self.hotkey_listener.as_ref().and_then(|h| h.try_recv()) {
             let before = self.session.state().clone();
             match event {
-                HotkeyEvent::StartStop => self.handle_hotkey_start_stop(),
+                HotkeyEvent::StartStop => self.handle_hotkey_start_stop(s),
                 HotkeyEvent::Pause => self.handle_pause_button(),
                 HotkeyEvent::ToggleOverlay => {
                     self.overlay_enabled = !self.overlay_enabled;
                     self.config.overlay.enabled = self.overlay_enabled;
+                    self.save_config_or_report(s);
                 }
                 HotkeyEvent::SaveHighlight => self.handle_save_highlight_hotkey(s),
             }
@@ -117,19 +118,19 @@ impl App {
                     self.refresh_recent();
                     let lost = std::mem::take(&mut self.finalizing.lost_sources);
                     if let Some(why) = gave_up {
-                        self.notice = Some(recording_gave_up_message(s, &why));
+                        self.notices.push(recording_gave_up_message(s, &why));
                     } else if disk_full {
-                        self.notice = Some(s.disk_full_mid_recording.to_string());
+                        self.notices.push(s.disk_full_mid_recording);
                     } else if let Some(msg) =
                         lost_sources_message(s, &lost, &self.last_recording.audio_labels)
                     {
-                        self.notice = Some(msg);
+                        self.notices.push(msg);
                     } else if let Some(msg) = audio_tracks_missing_message(
                         s,
                         self.export.available_tracks,
                         self.last_recording.audio_labels.len(),
                     ) {
-                        self.notice = Some(msg);
+                        self.notices.push(msg);
                     }
                 }
                 Ok(Err(e)) => {
@@ -231,29 +232,23 @@ impl App {
     /// recording, where elapsed is small enough for count/elapsed to be
     /// noisy) doesn't false-positive.
     fn check_fps_shortfall(&mut self, s: &Strings) {
-        const WARMUP_SECS: f64 = 10.0;
-        const SHORTFALL_THRESHOLD: f64 = 0.75;
-
         if self.fps_shortfall_warned || !self.session.is_recording() {
             return;
         }
-        let Some(start) = self.recording_start else {
+        let Some(active) = self.session.active() else {
             return;
         };
-        let elapsed_secs = start.elapsed().as_secs_f64();
-        if elapsed_secs < WARMUP_SECS {
-            return;
-        }
-        let achieved_fps = self.frame_count.load(Ordering::Relaxed) as f64 / elapsed_secs;
         // The rate this recording really runs at, which can be below the
         // setting when the display refreshes slower or the encoder turns the
         // rate down -- see `LiveFps`.
-        let Some(target_fps) = self.session.active().map(|a| f64::from(a.fps.get())) else {
-            return;
-        };
-        if achieved_fps < target_fps * SHORTFALL_THRESHOLD {
+        let target_fps = f64::from(active.fps.get());
+        if let Some(achieved_fps) = fps_shortfall(
+            self.frame_count.load(Ordering::Relaxed),
+            active.elapsed(),
+            target_fps,
+        ) {
             self.fps_shortfall_warned = true;
-            self.notice = Some(
+            self.notices.push(
                 s.fps_shortfall_template
                     .replace("{achieved}", &format!("{achieved_fps:.0}"))
                     .replace("{target}", &format!("{target_fps:.0}")),
@@ -325,6 +320,22 @@ fn lost_sources_message(
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+/// The frame rate a recording achieved over `elapsed` of recording (pauses
+/// left out: no frames come then) if it's persistently short of
+/// `target_fps`. Judged only past a warm-up, when `frames / elapsed` is no
+/// longer noise. The time since Start used to be the measure, so a pause
+/// counted as frames missed: 5 s recorded, a minute paused, and resuming
+/// said the PC managed 5 of 60 frames a second.
+fn fps_shortfall(frames: u64, elapsed: std::time::Duration, target_fps: f64) -> Option<f64> {
+    const WARMUP: std::time::Duration = std::time::Duration::from_secs(10);
+    const SHORTFALL_THRESHOLD: f64 = 0.75;
+    if elapsed < WARMUP {
+        return None;
+    }
+    let achieved = frames as f64 / elapsed.as_secs_f64();
+    (achieved < target_fps * SHORTFALL_THRESHOLD).then_some(achieved)
+}
+
 fn audio_tracks_missing_message(s: &Strings, actual: usize, expected: usize) -> Option<String> {
     if actual >= expected {
         return None;
@@ -392,6 +403,18 @@ mod tests {
             [true, true],
             [false, false]
         ));
+    }
+
+    #[test]
+    fn a_frame_rate_is_judged_on_the_time_spent_recording() {
+        let secs = std::time::Duration::from_secs;
+        // Too early to tell.
+        assert_eq!(fps_shortfall(90, secs(9), 60.0), None);
+        // 60 a second over 10 s recorded -- however long it was paused for.
+        assert_eq!(fps_shortfall(600, secs(10), 60.0), None);
+        assert_eq!(fps_shortfall(400, secs(10), 60.0), Some(40.0));
+        // Under three quarters is short; three quarters isn't.
+        assert_eq!(fps_shortfall(450, secs(10), 60.0), None);
     }
 
     #[test]

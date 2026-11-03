@@ -1,6 +1,8 @@
 use super::App;
+use super::state::Popup;
 use super::theme::{POPUP_WIDTH, pal};
 use super::widgets::{accent_button, caption, grid_section_header, popup_window};
+use crate::config::HotkeyConfig;
 use crate::hotkeys::HotkeyListener;
 use crate::i18n::Strings;
 use eframe::egui;
@@ -18,10 +20,11 @@ pub(super) enum HotkeySlot {
 impl App {
     /// While waiting for a keypress, consume this frame's key events
     /// directly rather than via any widget -- capture works no matter
-    /// where focus happens to be in the popup. Escape cancels; anything
-    /// else not registerable as a global hotkey (a bare modifier, or a key
-    /// the egui/hotkeys mapping doesn't cover) is ignored so the prompt
-    /// keeps waiting instead of silently eating the keypress.
+    /// where focus happens to be in the popup. Escape cancels (see
+    /// `handle_escape`); anything else not registerable as a global hotkey
+    /// (a bare modifier, or a key the egui/hotkeys mapping doesn't cover) is
+    /// ignored so the prompt keeps waiting instead of silently eating the
+    /// keypress.
     fn capture_pending_hotkey(&mut self, ctx: &egui::Context, s: &'static Strings) {
         if let Some(slot) = self.recording_hotkey {
             ctx.input(|i| {
@@ -34,10 +37,6 @@ impl App {
                         ..
                     } = event
                     {
-                        if *key == egui::Key::Escape {
-                            self.recording_hotkey = None;
-                            return;
-                        }
                         let Some(combo) = hotkey_combo(*key, *modifiers) else {
                             continue;
                         };
@@ -74,7 +73,8 @@ impl App {
     }
 
     pub(super) fn render_hotkeys_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
-        if !self.show_hotkeys_popup {
+        self.sync_hotkey_listener(ctx, s);
+        if self.popup != Popup::Hotkeys {
             return;
         }
 
@@ -165,25 +165,32 @@ impl App {
                 }
             });
         if close {
-            self.show_hotkeys_popup = false;
-            self.recording_hotkey = None;
-            self.hotkey_capture_warning = None;
-            self.save_config_or_report(s);
-            // The listener registers its hotkeys once at spawn time, so a rebind
-            // needs a fresh thread — stop() unregisters the old bindings before
-            // the new listener registers the (possibly changed) ones, avoiding a
-            // stuck registration on a key the user just reassigned elsewhere.
-            if let Some(old) = self.hotkey_listener.take() {
-                old.stop();
+            self.close_popup(s);
+        }
+    }
+
+    /// The keyboard hook takes bound keys before any window sees them, so
+    /// it's off while a hotkey is being chosen: a key that was already bound
+    /// couldn't be picked, and did its action instead (Start/Stop's F9
+    /// started a recording). Once a key is chosen, or choosing is cancelled,
+    /// the hook is back with the bindings as they are then, saved: a new
+    /// binding works straight away, not only after Close. The hook reads its
+    /// bindings once, so that's a new one (`spawn_hotkey_listener`).
+    fn sync_hotkey_listener(&mut self, ctx: &egui::Context, s: &'static Strings) {
+        match hook_change(
+            self.hotkey_listener.is_some(),
+            self.recording_hotkey.is_some(),
+        ) {
+            Some(HookChange::Off) => {
+                if let Some(listener) = self.hotkey_listener.take() {
+                    listener.stop();
+                }
             }
-            let wake_ctx = ctx.clone();
-            self.hotkey_listener = Some(HotkeyListener::spawn(
-                &self.config.hotkeys.start_stop,
-                &self.config.hotkeys.pause,
-                &self.config.hotkeys.toggle_overlay,
-                &self.config.hotkeys.save_highlight,
-                move || wake_ctx.request_repaint(),
-            ));
+            Some(HookChange::On) => {
+                self.save_config_or_report(s);
+                self.hotkey_listener = Some(spawn_hotkey_listener(&self.config.hotkeys, ctx));
+            }
+            None => {}
         }
     }
 
@@ -238,6 +245,35 @@ impl App {
         }
         ui.end_row();
     }
+}
+
+/// What `sync_hotkey_listener` does to the keyboard hook.
+#[derive(Debug, PartialEq, Eq)]
+enum HookChange {
+    Off,
+    On,
+}
+
+/// The hook should be off exactly while a hotkey is being chosen.
+fn hook_change(hook_on: bool, choosing: bool) -> Option<HookChange> {
+    match (hook_on, choosing) {
+        (true, true) => Some(HookChange::Off),
+        (false, false) => Some(HookChange::On),
+        _ => None,
+    }
+}
+
+/// The global hotkey listener for `hotkeys`, waking the dashboard (`ctx`)
+/// when one is pressed.
+pub(super) fn spawn_hotkey_listener(hotkeys: &HotkeyConfig, ctx: &egui::Context) -> HotkeyListener {
+    let wake_ctx = ctx.clone();
+    HotkeyListener::spawn(
+        &hotkeys.start_stop,
+        &hotkeys.pause,
+        &hotkeys.toggle_overlay,
+        &hotkeys.save_highlight,
+        move || wake_ctx.request_repaint(),
+    )
 }
 
 /// The hotkey string for `key` with `modifiers` held, modifiers in canonical
@@ -355,6 +391,16 @@ fn egui_key_to_hotkey_string(key: egui::Key) -> Option<&'static str> {
 #[cfg(test)]
 mod hotkey_capture_tests {
     use super::*;
+
+    /// Choosing a key for Pause with Start/Stop on F9 and pressing F9 used
+    /// to start a recording: the hook stayed on and took the key.
+    #[test]
+    fn the_hook_is_off_exactly_while_a_hotkey_is_being_chosen() {
+        assert_eq!(hook_change(true, true), Some(HookChange::Off));
+        assert_eq!(hook_change(false, true), None);
+        assert_eq!(hook_change(false, false), Some(HookChange::On));
+        assert_eq!(hook_change(true, false), None);
+    }
 
     #[test]
     fn egui_key_to_hotkey_string_covers_common_keys() {
