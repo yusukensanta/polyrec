@@ -203,7 +203,7 @@ impl App {
         show_requested: Arc<AtomicBool>,
         closed_for_lost_graphics: Arc<AtomicBool>,
         restarted: Option<crate::restart::Reason>,
-        config_set_aside: Option<std::path::PathBuf>,
+        config_trouble: Option<crate::config::ConfigTrouble>,
     ) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
@@ -217,9 +217,12 @@ impl App {
                 .notice_restarted_error
                 .replace("{path}", &crate::crash_log::path().to_string_lossy()),
         });
-        let config_notice = config_set_aside.map(|path| {
-            s.notice_config_set_aside
-                .replace("{path}", &path.to_string_lossy())
+        let config_notice = config_trouble.map(|trouble| {
+            let (template, path) = match trouble {
+                crate::config::ConfigTrouble::SetAside(path) => (s.notice_config_set_aside, path),
+                crate::config::ConfigTrouble::LeftAlone(path) => (s.notice_config_left_alone, path),
+            };
+            template.replace("{path}", &path.to_string_lossy())
         });
         let mut notices = Notices::default();
         for notice in [restarted_notice, config_notice].into_iter().flatten() {

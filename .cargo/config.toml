@@ -1,0 +1,7 @@
+# The C runtime is linked into polyrec.exe rather than loaded from
+# VCRUNTIME140.dll. Windows looks for a DLL like that in the exe's own folder
+# first, so a portable copy unzipped into Downloads would load whatever
+# VCRUNTIME140.dll was already sitting there, inside PolyRec (which holds a
+# keyboard hook and captures the screen). See build.rs for the system DLLs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
