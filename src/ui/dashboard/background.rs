@@ -296,24 +296,31 @@ fn lost_sources_message(
     lost: &crate::capture::LostSources,
     labels: &[impl std::fmt::Display],
 ) -> Option<String> {
-    let mut parts = Vec::new();
-    if lost.video {
-        parts.push(s.notice_video_source_lost.to_owned());
-    }
-    if !lost.audio.is_empty() {
-        let tracks: Vec<String> = lost
-            .audio
+    let names = |tracks: &[crate::types::TrackId]| {
+        tracks
             .iter()
             .map(|track| {
                 labels
                     .get(track.0 as usize)
                     .map_or_else(|| format!("#{}", track.0 + 1), ToString::to_string)
             })
-            .collect();
-        parts.push(
-            s.notice_audio_source_lost_template
-                .replace("{tracks}", &tracks.join(", ")),
-        );
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    if lost.video {
+        parts.push(s.notice_video_source_lost.to_owned());
+    }
+    for (tracks, template) in [
+        (&lost.audio, s.notice_audio_source_lost_template),
+        (
+            &lost.audio_interrupted,
+            s.notice_audio_source_interrupted_template,
+        ),
+    ] {
+        if !tracks.is_empty() {
+            parts.push(template.replace("{tracks}", &names(tracks)));
+        }
     }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
@@ -405,6 +412,7 @@ mod tests {
         let audio = LostSources {
             video: false,
             audio: vec![TrackId::new(1), TrackId::new(2)],
+            audio_interrupted: vec![],
         };
         assert_eq!(
             lost_sources_message(s, &audio, &labels).unwrap(),
@@ -415,6 +423,7 @@ mod tests {
         let both = LostSources {
             video: true,
             audio: vec![TrackId::new(7)],
+            audio_interrupted: vec![],
         };
         assert_eq!(
             lost_sources_message(s, &both, &labels).unwrap(),
@@ -424,6 +433,17 @@ mod tests {
                 s.notice_audio_source_lost_template
                     .replace("{tracks}", "#8")
             )
+        );
+
+        let back = LostSources {
+            video: false,
+            audio: vec![],
+            audio_interrupted: vec![TrackId::new(0)],
+        };
+        assert_eq!(
+            lost_sources_message(s, &back, &labels).unwrap(),
+            s.notice_audio_source_interrupted_template
+                .replace("{tracks}", "🔊 Speakers")
         );
     }
 

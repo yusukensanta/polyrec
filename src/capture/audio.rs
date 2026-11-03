@@ -7,10 +7,11 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
     AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    ActivateAudioInterfaceAsync, AudioSessionStateExpired, IActivateAudioInterfaceAsyncOperation,
-    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
-    IAudioCaptureClient, IAudioClient, IAudioSessionControl2, IAudioSessionManager2,
-    IMMDeviceEnumerator, MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    ActivateAudioInterfaceAsync, AudioSessionStateExpired, EDataFlow, ERole,
+    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+    IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
+    IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
     PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
     WAVEFORMATEX, eCapture, eConsole, eMultimedia, eRender,
 };
@@ -132,21 +133,12 @@ impl LinearResampler {
 pub fn enumerate_audio_devices() -> Result<Vec<AudioDevice>, AppError> {
     let enumerator = device_enumerator()?;
     let mut devices = Vec::new();
-    // Default render endpoint (loopback capture), then default capture
-    // endpoint (microphone).
-    for (flow, role, fallback_name, is_loopback) in [
-        (eRender, eMultimedia, "Default Output", true),
-        (eCapture, eConsole, "Default Input", false),
-    ] {
+    for (endpoint, fallback_name, is_loopback) in LISTED_DEFAULTS {
         unsafe {
-            let Ok(dev) = enumerator.GetDefaultAudioEndpoint(flow, role) else {
+            let Ok(dev) = endpoint.device(&enumerator) else {
                 continue;
             };
-            // Ours to free: this runs on every refresh, every ~2 s.
-            let id = dev
-                .GetId()
-                .map(|p| CoTaskMem(p.0).text())
-                .unwrap_or_default();
+            let id = endpoint_id(&dev);
             let name = get_device_friendly_name(&dev).unwrap_or_else(|| fallback_name.to_string());
             devices.push(AudioDevice {
                 id,
@@ -370,7 +362,7 @@ fn canonical_root_pid_with(
 
 /// Read PKEY_Device_FriendlyName from the device property store.
 /// GUID: {A45C254E-DF1C-4EFD-8020-67D146A850E0}, pid = 14
-fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Option<String> {
+fn get_device_friendly_name(device: &IMMDevice) -> Option<String> {
     unsafe {
         let store = device.OpenPropertyStore(STGM_READ).ok()?;
 
@@ -394,13 +386,12 @@ fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) ->
     }
 }
 
-/// Capture audio from a WASAPI endpoint and forward PCM f32 samples to `tx`.
-///
-/// `device_id` — empty string selects the system default endpoint.
-/// `is_loopback` — when true the stream uses `AUDCLNT_STREAMFLAGS_LOOPBACK`
-///                 (system audio mix) on the render endpoint.
+/// Records a device track -- Windows' default output as loopback (the
+/// system mix), or its default input -- and forwards PCM f32 samples to
+/// `tx`. It follows the default (see `DefaultEndpoint`): when Windows moves
+/// it, or the device goes away, the track carries on from whatever the
+/// default is then, as silence while there's none (`reopen`).
 pub async fn run_audio_capture(
-    device_id: String,
     track_id: TrackId,
     is_loopback: bool,
     ctrl: CaptureControl,
@@ -408,69 +399,43 @@ pub async fn run_audio_capture(
     gain: f32,
 ) -> Result<(), AppError> {
     let enumerator = device_enumerator()?;
-    unsafe {
-        let device = if device_id.is_empty() {
-            let flow = if is_loopback { eRender } else { eCapture };
-            enumerator
-                .GetDefaultAudioEndpoint(flow, eMultimedia)
-                .windows_ctx("GetDefaultAudioEndpoint")?
-        } else {
-            let id: windows::core::HSTRING = device_id.as_str().into();
-            enumerator.GetDevice(&id).windows_ctx("GetDevice")?
+    let endpoint = DefaultEndpoint::for_track(is_loopback);
+    let open = || unsafe { endpoint.open(&enumerator) };
+    let mut coverage = TrackCoverage::new(track_id, ctrl.clock.elapsed());
+    // Failing here is the track failing to start, as it always was.
+    let mut stream = open()?;
+    loop {
+        let options = TrackOptions {
+            gain,
+            watch_pid: None,
+            fill_silence: is_loopback,
+            follow: Some(FollowDefault::new(enumerator.clone(), endpoint, stream.id)),
         };
-
-        let audio_client: IAudioClient = device
-            .Activate(CLSCTX_ALL, None)
-            .windows_ctx("Activate IAudioClient")?;
-
-        // GetMixFormat hands back a CoTaskMemAlloc'd WAVEFORMATEX the caller
-        // owns -- previously never freed, leaking one allocation per device
-        // track per recording. Initialize copies what it needs, so it's safe
-        // to release as soon as this function returns, on every path.
-        let mix_format = CoTaskMem(audio_client.GetMixFormat().windows_ctx("GetMixFormat")?);
-
-        let stream_flags: u32 = if is_loopback {
-            AUDCLNT_STREAMFLAGS_LOOPBACK
-        } else {
-            0u32
-        };
-
-        // 100 ms buffer; hnsperiodicity = 0 for shared mode
-        audio_client
-            .Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                stream_flags,
-                1_000_000i64,
-                0i64,
-                mix_format.0,
-                None,
+        let end = unsafe {
+            run_capture_loop(
+                stream.client,
+                stream.format,
+                track_id,
+                &ctrl,
+                &tx,
+                options,
+                &mut coverage,
             )
-            .windows_ctx("IAudioClient::Initialize")?;
-
-        let sample_rate = (*mix_format.0).nSamplesPerSec;
-        let channels = (*mix_format.0).nChannels;
-        if channels == 0 {
-            return Err(AppError::Windows("WASAPI mix format has 0 channels".into()));
+            .await?
+        };
+        match end {
+            StreamEnd::Done => return Ok(()),
+            StreamEnd::Moved => tracing::info!(
+                "AudioCapture[{track_id:?}]: Windows' default device changed; recording from the new one"
+            ),
+            StreamEnd::Lost => {
+                tracing::info!("AudioCapture[{track_id:?}]: opening Windows' default device again")
+            }
         }
-        let bytes_per_frame = (*mix_format.0).nBlockAlign as usize;
-
-        run_capture_loop(
-            audio_client,
-            StreamFormat {
-                sample_rate,
-                channels,
-                bytes_per_frame,
-            },
-            track_id,
-            ctrl,
-            tx,
-            TrackOptions {
-                gain,
-                watch_pid: None,
-                fill_silence: is_loopback,
-            },
-        )
-        .await
+        match reopen(&open, &REOPEN, track_id, &ctrl, &tx, &mut coverage).await {
+            Some(next) => stream = next,
+            None => return Ok(()),
+        }
     }
 }
 
@@ -536,6 +501,7 @@ pub async fn run_process_loopback_capture(
             )
             .windows_ctx("IAudioClient::Initialize (process loopback)")?;
 
+        let mut coverage = TrackCoverage::new(track_id, ctrl.clock.elapsed());
         run_capture_loop(
             audio_client,
             StreamFormat {
@@ -544,15 +510,19 @@ pub async fn run_process_loopback_capture(
                 bytes_per_frame: block_align as usize,
             },
             track_id,
-            ctrl,
-            tx,
+            &ctrl,
+            &tx,
             TrackOptions {
                 gain,
                 watch_pid: Some(target_pid),
                 fill_silence: true,
+                follow: None,
             },
+            &mut coverage,
         )
         .await
+        // However it ended, the track has: its pump goes on as silence.
+        .map(|_| ())
     }
 }
 
@@ -585,7 +555,25 @@ struct TrackOptions {
     watch_pid: Option<u32>,
     /// Fill stretches without packets with silence -- see `SilenceFill`.
     fill_silence: bool,
+    /// End the stream once Windows' default moves elsewhere (device tracks).
+    follow: Option<FollowDefault>,
 }
+
+/// Why `run_capture_loop` returned.
+enum StreamEnd {
+    /// Stop, the recording no longer taking samples, or the watched process
+    /// exiting.
+    Done,
+    /// The endpoint went away (unplugged, disabled), or `GetBuffer` kept
+    /// failing on it.
+    Lost,
+    /// Windows' default moved to another endpoint (see `FollowDefault`).
+    Moved,
+}
+
+/// How often the capture loop looks for a packet while there's none, and
+/// `reopen` for silence to send -- about as often as WASAPI hands them out.
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// How long a loopback track may go without packets before it gets silence.
 /// WASAPI hands out a packet about every 10 ms while audio flows, so this is
@@ -679,6 +667,266 @@ impl TrackCoverage {
             sample_rate: TARGET_SAMPLE_RATE,
             channels: TARGET_CHANNELS,
         })
+    }
+}
+
+/// Windows' default endpoint a device track records: the default output (as
+/// loopback) or the default input. They're the two devices the dashboard
+/// lists (`enumerate_audio_devices`), and a recording follows them: plug a
+/// headset in mid-recording and the track moves to it (`run_audio_capture`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DefaultEndpoint {
+    flow: EDataFlow,
+    role: ERole,
+}
+
+impl DefaultEndpoint {
+    const OUTPUT: Self = Self {
+        flow: eRender,
+        role: eMultimedia,
+    };
+    const INPUT: Self = Self {
+        flow: eCapture,
+        role: eConsole,
+    };
+
+    fn for_track(is_loopback: bool) -> Self {
+        if is_loopback {
+            Self::OUTPUT
+        } else {
+            Self::INPUT
+        }
+    }
+
+    /// The endpoint Windows has as this default now.
+    unsafe fn device(self, enumerator: &IMMDeviceEnumerator) -> Result<IMMDevice, AppError> {
+        unsafe {
+            enumerator
+                .GetDefaultAudioEndpoint(self.flow, self.role)
+                .windows_ctx("GetDefaultAudioEndpoint")
+        }
+    }
+
+    /// Opens a stream on the endpoint Windows has as this default now: as
+    /// loopback for the output.
+    unsafe fn open(self, enumerator: &IMMDeviceEnumerator) -> Result<EndpointStream, AppError> {
+        unsafe {
+            let device = self.device(enumerator)?;
+            let id = endpoint_id(&device);
+            let audio_client: IAudioClient = device
+                .Activate(CLSCTX_ALL, None)
+                .windows_ctx("Activate IAudioClient")?;
+
+            // GetMixFormat hands back a CoTaskMemAlloc'd WAVEFORMATEX the
+            // caller owns. Initialize copies what it needs, so it's freed as
+            // soon as this returns, on every path.
+            let mix_format = CoTaskMem(audio_client.GetMixFormat().windows_ctx("GetMixFormat")?);
+
+            let stream_flags: u32 = if self == Self::OUTPUT {
+                AUDCLNT_STREAMFLAGS_LOOPBACK
+            } else {
+                0u32
+            };
+
+            // 100 ms buffer; hnsperiodicity = 0 for shared mode
+            audio_client
+                .Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    stream_flags,
+                    1_000_000i64,
+                    0i64,
+                    mix_format.0,
+                    None,
+                )
+                .windows_ctx("IAudioClient::Initialize")?;
+
+            let channels = (*mix_format.0).nChannels;
+            if channels == 0 {
+                return Err(AppError::Windows("WASAPI mix format has 0 channels".into()));
+            }
+            Ok(EndpointStream {
+                client: audio_client,
+                format: StreamFormat {
+                    sample_rate: (*mix_format.0).nSamplesPerSec,
+                    channels,
+                    bytes_per_frame: (*mix_format.0).nBlockAlign as usize,
+                },
+                id,
+            })
+        }
+    }
+}
+
+/// A device track's stream, ready to `run_capture_loop`, and the endpoint
+/// it's on.
+struct EndpointStream {
+    client: IAudioClient,
+    format: StreamFormat,
+    id: String,
+}
+
+/// `device`'s endpoint id, or "" if it can't say.
+unsafe fn endpoint_id(device: &IMMDevice) -> String {
+    // Ours to free: the dashboard asks every ~2 s, and so does each device
+    // track (`FollowDefault`).
+    unsafe {
+        device
+            .GetId()
+            .map(|p| CoTaskMem(p.0).text())
+            .unwrap_or_default()
+    }
+}
+
+/// How often a device track checks where Windows' default is.
+const DEFAULT_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Notices Windows' default moving off the endpoint a device track records
+/// -- a headset plugged in, or another default picked in Sound settings.
+/// The old endpoint stays open and valid, it just gets no audio any more: a
+/// loopback track used to record silence from there to the end, with
+/// nothing to say so.
+struct FollowDefault {
+    enumerator: IMMDeviceEnumerator,
+    endpoint: DefaultEndpoint,
+    bound_id: String,
+    checked_at: std::time::Instant,
+}
+
+impl FollowDefault {
+    fn new(enumerator: IMMDeviceEnumerator, endpoint: DefaultEndpoint, bound_id: String) -> Self {
+        Self {
+            enumerator,
+            endpoint,
+            bound_id,
+            checked_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Whether the default has moved; it's looked up every
+    /// `DEFAULT_CHECK_EVERY`.
+    fn moved(&mut self) -> bool {
+        if !due(
+            &mut self.checked_at,
+            std::time::Instant::now(),
+            DEFAULT_CHECK_EVERY,
+        ) {
+            return false;
+        }
+        let current = unsafe { self.endpoint.device(&self.enumerator) }
+            .map(|device| unsafe { endpoint_id(&device) });
+        default_moved(&self.bound_id, current.ok().as_deref())
+    }
+}
+
+/// The devices the dashboard lists, in order: the default each one is, the
+/// name to show if it has none, and whether it records as loopback.
+const LISTED_DEFAULTS: [(DefaultEndpoint, &str, bool); 2] = [
+    (DefaultEndpoint::OUTPUT, "Default Output", true),
+    (DefaultEndpoint::INPUT, "Default Input", false),
+];
+
+/// Whether Windows' default, now `current` (`None`: there's none at all), is
+/// another endpoint than the `bound` one a track records.
+fn default_moved(bound: &str, current: Option<&str>) -> bool {
+    current.is_some_and(|id| !id.is_empty() && id != bound)
+}
+
+/// Whether `every` has passed since `last` at `now`; if so, `last` becomes
+/// `now`.
+fn due(last: &mut std::time::Instant, now: std::time::Instant, every: std::time::Duration) -> bool {
+    if now.saturating_duration_since(*last) < every {
+        return false;
+    }
+    *last = now;
+    true
+}
+
+/// A device track's time without an endpoint to record from (see `reopen`).
+#[derive(Default)]
+struct Outage {
+    since: Option<std::time::Instant>,
+    reported: bool,
+}
+
+impl Outage {
+    /// There's no endpoint at `now`. True once, when that has lasted
+    /// `report_after`.
+    fn no_endpoint(&mut self, now: std::time::Instant, report_after: std::time::Duration) -> bool {
+        let since = *self.since.get_or_insert(now);
+        if self.reported || now.saturating_duration_since(since) < report_after {
+            return false;
+        }
+        self.reported = true;
+        true
+    }
+
+    /// There's an endpoint again. True if the outage had been reported.
+    fn ended(&mut self) -> bool {
+        std::mem::take(self).reported
+    }
+}
+
+/// How `reopen` paces itself.
+struct ReopenTiming {
+    /// How often it looks for an endpoint.
+    every: std::time::Duration,
+    /// How long it goes without one before telling the recording.
+    report_after: std::time::Duration,
+}
+
+const REOPEN: ReopenTiming = ReopenTiming {
+    every: std::time::Duration::from_millis(500),
+    report_after: std::time::Duration::from_secs(2),
+};
+
+/// Opens a device track's stream again (`open`) after its endpoint went
+/// away or Windows' default moved. While there's no endpoint at all -- the
+/// only mic unplugged, say -- it keeps looking, sending silence meanwhile
+/// so the recording isn't held up (see `SilenceFill`). Once that has lasted
+/// (`Outage`), the recording hears the track was lost
+/// (`CaptureControl::audio_source_lost`), and if a device comes back, that
+/// it was only interrupted (`audio_source_back`). `None`: stopped, or the
+/// recording no longer takes samples, first.
+async fn reopen<S>(
+    mut open: impl FnMut() -> Result<S, AppError>,
+    timing: &ReopenTiming,
+    track_id: TrackId,
+    ctrl: &CaptureControl,
+    tx: &mpsc::Sender<AudioSamples>,
+    coverage: &mut TrackCoverage,
+) -> Option<S> {
+    let mut outage = Outage::default();
+    loop {
+        match open() {
+            Ok(stream) => {
+                if outage.ended() {
+                    tracing::info!("AudioCapture[{track_id:?}]: a device is back; recording again");
+                    ctrl.audio_source_back(track_id);
+                }
+                return Some(stream);
+            }
+            Err(e) => {
+                if outage.no_endpoint(std::time::Instant::now(), timing.report_after) {
+                    tracing::warn!(
+                        "AudioCapture[{track_id:?}]: no device to record from ({e}); silent until one is back"
+                    );
+                    ctrl.audio_source_lost(track_id);
+                }
+            }
+        }
+        let retry_at = std::time::Instant::now() + timing.every;
+        while std::time::Instant::now() < retry_at {
+            if ctrl.is_stopped() {
+                return None;
+            }
+            if !ctrl.is_paused()
+                && let Some(silence) = coverage.silence_due(ctrl.clock.elapsed())
+                && tx.send(silence).await.is_err()
+            {
+                return None;
+            }
+            tokio::time::sleep(IDLE_POLL).await;
+        }
     }
 }
 
@@ -798,7 +1046,9 @@ impl PacketDiagnostics {
 /// Shared buffer-read loop: starts the (already-initialized) client, unpacks each
 /// buffer at its native `sample_rate`/`channels`, downmixes + resamples to the fixed
 /// encoder target, and forwards `AudioSamples` until the receiver drops, the
-/// stop signal is set, or the device/target process goes away.
+/// stop signal is set, or the device/target process goes away or Windows'
+/// default moves (`StreamEnd` says which). `coverage` is the track's, kept
+/// across the streams a device track goes through.
 ///
 /// `watch_pid` is `Some` only for process-loopback capture -- a target
 /// process simply exiting mid-recording isn't a WASAPI device error (unlike
@@ -814,10 +1064,11 @@ async unsafe fn run_capture_loop(
         bytes_per_frame,
     }: StreamFormat,
     track_id: TrackId,
-    ctrl: CaptureControl,
-    tx: mpsc::Sender<AudioSamples>,
-    options: TrackOptions,
-) -> Result<(), AppError> {
+    ctrl: &CaptureControl,
+    tx: &mpsc::Sender<AudioSamples>,
+    mut options: TrackOptions,
+    coverage: &mut TrackCoverage,
+) -> Result<StreamEnd, AppError> {
     unsafe {
         let capture_client: IAudioCaptureClient = audio_client
             .GetService()
@@ -829,7 +1080,6 @@ async unsafe fn run_capture_loop(
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
         let mut diagnostics = PacketDiagnostics::new();
-        let mut coverage = TrackCoverage::new(track_id, ctrl.clock.elapsed());
         // Since when `GetBuffer` has been failing, if it is -- see
         // `GET_BUFFER_FAILING_FOR`.
         let mut failing_since: Option<std::time::Instant> = None;
@@ -845,9 +1095,14 @@ async unsafe fn run_capture_loop(
         // every packet.
         let mut warned_unrecognized_bit_depth = false;
 
-        loop {
+        let end = loop {
             if ctrl.is_stopped() {
-                break;
+                break StreamEnd::Done;
+            }
+            if let Some(follow) = &mut options.follow
+                && follow.moved()
+            {
+                break StreamEnd::Moved;
             }
 
             let mut data: *mut u8 = std::ptr::null_mut();
@@ -911,7 +1166,7 @@ async unsafe fn run_capture_loop(
 
                     if tx.send(audio).await.is_err() {
                         // Receiver dropped — stop gracefully
-                        break;
+                        break StreamEnd::Done;
                     }
                 }
                 Ok(()) => {
@@ -921,51 +1176,53 @@ async unsafe fn run_capture_loop(
                         && let Some(audio) = coverage.silence_due(ctrl.clock.elapsed())
                         && tx.send(audio).await.is_err()
                     {
-                        break;
+                        break StreamEnd::Done;
                     }
                     if let Some(pid) = options.watch_pid
-                        && last_pid_check.elapsed() >= std::time::Duration::from_secs(1)
+                        && due(
+                            &mut last_pid_check,
+                            std::time::Instant::now(),
+                            std::time::Duration::from_secs(1),
+                        )
+                        && !process_is_alive(pid)
                     {
-                        last_pid_check = std::time::Instant::now();
-                        if !process_is_alive(pid) {
-                            tracing::info!(
-                                "AudioCapture[{track_id:?}]: target process {pid} exited, stopping this track"
-                            );
-                            break;
-                        }
+                        tracing::info!(
+                            "AudioCapture[{track_id:?}]: target process {pid} exited, stopping this track"
+                        );
+                        break StreamEnd::Done;
                     }
 
                     // No data yet; yield to the async runtime
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    tokio::time::sleep(IDLE_POLL).await;
                 }
                 Err(e) if e.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
                     // The endpoint was unplugged/disabled mid-capture -- retrying
                     // GetBuffer on it forever just spins and spams the warning
                     // below every 10ms, since the device is never coming back on
-                    // this handle. Log once at error level and end the capture
-                    // (other tracks/video are unaffected); the track's pump
-                    // keeps it going as silence.
-                    tracing::error!(
-                        "audio device invalidated (unplugged/disabled), stopping this track: {e}"
+                    // this handle. A device track goes on from Windows' default
+                    // (`run_audio_capture`); otherwise the track's pump keeps it
+                    // going as silence.
+                    tracing::warn!(
+                        "AudioCapture[{track_id:?}]: its device went away (unplugged or disabled): {e}"
                     );
-                    break;
+                    break StreamEnd::Lost;
                 }
                 Err(e) => {
                     let since = *failing_since.get_or_insert_with(std::time::Instant::now);
                     if since.elapsed() >= GET_BUFFER_FAILING_FOR {
                         tracing::error!(
-                            "AudioCapture[{track_id:?}]: GetBuffer kept failing ({e}), stopping this track"
+                            "AudioCapture[{track_id:?}]: GetBuffer kept failing ({e}), giving up on this stream"
                         );
-                        break;
+                        break StreamEnd::Lost;
                     }
                     tracing::warn!("GetBuffer error: {e}");
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    tokio::time::sleep(IDLE_POLL).await;
                 }
             }
-        }
+        };
 
         let _ = audio_client.Stop();
-        Ok(())
+        Ok(end)
     }
 }
 
@@ -1123,6 +1380,132 @@ mod tests {
         Duration::from_millis(n)
     }
 
+    /// The dashboard lists Windows' default output and input; a track
+    /// records the default it was picked as, by the same role, so the
+    /// device it names is the one it records.
+    #[test]
+    fn a_device_track_records_the_default_it_was_listed_as() {
+        for (endpoint, _, is_loopback) in LISTED_DEFAULTS {
+            assert_eq!(DefaultEndpoint::for_track(is_loopback), endpoint);
+        }
+        assert_ne!(LISTED_DEFAULTS[0].0, LISTED_DEFAULTS[1].0);
+    }
+
+    #[test]
+    fn a_track_follows_a_new_default_but_not_the_lack_of_one() {
+        assert!(!default_moved("{headset}", Some("{headset}")));
+        assert!(default_moved("{headset}", Some("{speakers}")));
+        // Nothing to move to: the stream on hand either still works, or
+        // goes away and the track looks for one (`reopen`).
+        assert!(!default_moved("{headset}", None));
+        assert!(!default_moved("{headset}", Some("")));
+    }
+
+    #[test]
+    fn a_check_comes_round_no_more_often_than_asked() {
+        let t0 = std::time::Instant::now();
+        let mut last = t0;
+        assert!(!due(&mut last, t0 + ms(1999), ms(2000)));
+        assert!(due(&mut last, t0 + ms(2000), ms(2000)));
+        assert!(!due(&mut last, t0 + ms(3000), ms(2000)));
+        assert!(due(&mut last, t0 + ms(4000), ms(2000)));
+    }
+
+    /// Windows takes a moment to move its default once the old device has
+    /// gone. A gap that short isn't worth a notice; a longer one is, once.
+    #[test]
+    fn only_an_outage_that_lasts_is_reported_and_only_once() {
+        let t0 = std::time::Instant::now();
+        let after = ms(2000);
+        let mut outage = Outage::default();
+        assert!(!outage.no_endpoint(t0, after));
+        assert!(!outage.no_endpoint(t0 + ms(1500), after));
+        assert!(!outage.ended());
+
+        assert!(!outage.no_endpoint(t0 + ms(3000), after));
+        assert!(outage.no_endpoint(t0 + ms(5000), after));
+        assert!(!outage.no_endpoint(t0 + ms(6000), after));
+        assert!(outage.ended());
+        assert!(!outage.ended());
+    }
+
+    const QUICK: ReopenTiming = ReopenTiming {
+        every: Duration::from_millis(20),
+        report_after: Duration::from_millis(150),
+    };
+
+    /// Stands in for `DefaultEndpoint::open`: no endpoint `failures` times,
+    /// then one.
+    fn opener(failures: usize) -> impl FnMut() -> Result<&'static str, AppError> {
+        let mut left = failures;
+        move || {
+            if left == 0 {
+                Ok("stream")
+            } else {
+                left -= 1;
+                Err(AppError::Windows(
+                    "GetDefaultAudioEndpoint: not found".into(),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_default_that_is_there_is_opened_straight_away_without_a_notice() {
+        let ctrl = CaptureControl::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        let track = TrackId::new(0);
+        let mut coverage = TrackCoverage::new(track, ctrl.clock.elapsed());
+        let opened = reopen(opener(0), &QUICK, track, &ctrl, &tx, &mut coverage).await;
+        assert_eq!(opened, Some("stream"));
+        assert_eq!(ctrl.lost_sources(), crate::capture::LostSources::default());
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The only mic unplugged, then plugged back in: meanwhile the track is
+    /// silence rather than nothing (which holds the whole recording up, see
+    /// `SilenceFill`), and the recording hears it was interrupted.
+    #[tokio::test]
+    async fn a_track_waits_for_a_device_in_silence_and_reports_the_gap() {
+        let ctrl = CaptureControl::new();
+        let (tx, mut rx) = mpsc::channel(64);
+        let track = TrackId::new(1);
+        let mut coverage = TrackCoverage::new(track, ctrl.clock.elapsed());
+        let opened = reopen(opener(15), &QUICK, track, &ctrl, &tx, &mut coverage).await;
+        assert_eq!(opened, Some("stream"));
+        assert_eq!(
+            ctrl.lost_sources(),
+            crate::capture::LostSources {
+                video: false,
+                audio: vec![],
+                audio_interrupted: vec![track],
+            }
+        );
+        let mut silent = Duration::ZERO;
+        while let Ok(samples) = rx.try_recv() {
+            assert_eq!(samples.track_id, track);
+            assert!(samples.samples.iter().all(|&x| x == 0.0));
+            silent += frames_duration(samples.samples.len() / usize::from(TARGET_CHANNELS));
+        }
+        assert!(silent >= SILENCE_FILL_AFTER, "silence sent: {silent:?}");
+    }
+
+    #[tokio::test]
+    async fn stopping_while_there_is_no_device_leaves_the_track_lost() {
+        let ctrl = CaptureControl::new();
+        let (tx, _rx) = mpsc::channel(64);
+        let track = TrackId::new(0);
+        let mut coverage = TrackCoverage::new(track, ctrl.clock.elapsed());
+        let stopper = ctrl.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(ms(300)).await;
+            stopper.request_stop();
+        });
+        let opened = reopen(opener(usize::MAX), &QUICK, track, &ctrl, &tx, &mut coverage).await;
+        assert_eq!(opened, None);
+        assert_eq!(ctrl.lost_sources().audio, vec![track]);
+    }
+
     /// Feeds `SilenceFill` an idle stretch, polled every 10 ms like the
     /// capture loop does, and returns the fills it asked for.
     fn idle_fills(fill: &mut SilenceFill, from: Duration, to: Duration) -> Vec<(Duration, usize)> {
@@ -1214,6 +1597,106 @@ mod tests {
         handle.abort();
     }
 
+    /// A default-output track on the real audio stack, past its first check
+    /// of where the default is (`FollowDefault`): it keeps the track covered
+    /// -- packets, or silence while nothing plays -- notes nothing lost, and
+    /// ends soon after Stop. Plays nothing. Needs an audio device, so it's
+    /// ignored by default -- run with
+    /// `--ignored a_default_output_track_records_until_stopped`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn a_default_output_track_records_until_stopped() {
+        let (tx, mut rx) = mpsc::channel::<AudioSamples>(256);
+        let ctrl = CaptureControl::new();
+        let track_ctrl = ctrl.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("capture runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(
+                &rt,
+                run_audio_capture(TrackId::new(0), true, track_ctrl, tx, 1.0),
+            )
+        });
+
+        let deadline = tokio::time::Instant::now() + DEFAULT_CHECK_EVERY + ms(1000);
+        let mut covered_until = Duration::ZERO;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(samples)) = tokio::time::timeout(ms(200), rx.recv()).await {
+                let frames = samples.samples.len() / usize::from(samples.channels);
+                covered_until = covered_until.max(samples.pts + frames_duration(frames));
+            }
+        }
+        let elapsed = ctrl.clock.elapsed();
+        assert!(
+            elapsed.saturating_sub(covered_until) < ms(500),
+            "track covers {covered_until:?} of {elapsed:?}"
+        );
+
+        ctrl.request_stop();
+        let ended = tokio::time::timeout(ms(1000), handle)
+            .await
+            .expect("the track didn't end within 1 s of Stop");
+        ended.expect("capture thread").expect("capture result");
+        assert_eq!(ctrl.lost_sources(), crate::capture::LostSources::default());
+    }
+
+    /// Windows' default moving, as the capture loop sees it: a stream on an
+    /// endpoint that isn't the default any more ends as `Moved` at its next
+    /// check, for `run_audio_capture` to go on from the new one. (The test
+    /// can't move the user's default; it binds the check to an id that
+    /// isn't it.) Plays nothing; run with
+    /// `--ignored a_stream_off_the_default_endpoint_ends_as_moved`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn a_stream_off_the_default_endpoint_ends_as_moved() {
+        let handle = tokio::task::spawn_blocking(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("capture runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async {
+                let enumerator = device_enumerator().expect("enumerator");
+                let stream = unsafe { DefaultEndpoint::OUTPUT.open(&enumerator) }.expect("open");
+                let ctrl = CaptureControl::new();
+                let (tx, _rx) = mpsc::channel(256);
+                let track = TrackId::new(0);
+                let mut coverage = TrackCoverage::new(track, ctrl.clock.elapsed());
+                let options = TrackOptions {
+                    gain: 1.0,
+                    watch_pid: None,
+                    fill_silence: true,
+                    follow: Some(FollowDefault::new(
+                        enumerator,
+                        DefaultEndpoint::OUTPUT,
+                        "{the endpoint that was the default}".into(),
+                    )),
+                };
+                unsafe {
+                    run_capture_loop(
+                        stream.client,
+                        stream.format,
+                        track,
+                        &ctrl,
+                        &tx,
+                        options,
+                        &mut coverage,
+                    )
+                    .await
+                }
+            })
+        });
+        let end = tokio::time::timeout(DEFAULT_CHECK_EVERY + ms(1000), handle)
+            .await
+            .expect("the stream didn't end at its check")
+            .expect("capture thread")
+            .expect("capture result");
+        assert!(matches!(end, StreamEnd::Moved));
+    }
+
     /// DIAGNOSTIC (temporary): captures the default loopback device for ~3s while a
     /// system WAV plays, and reports the peak sample magnitude actually received.
     /// Run: cargo test --lib diag_default_loopback -- --ignored --nocapture
@@ -1230,8 +1713,7 @@ mod tests {
                 .expect("capture runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let _ =
-                    run_audio_capture(String::new(), TrackId::new(0), true, ctrl, tx, 1.0).await;
+                let _ = run_audio_capture(TrackId::new(0), true, ctrl, tx, 1.0).await;
             });
         });
 

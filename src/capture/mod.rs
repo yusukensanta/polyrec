@@ -32,7 +32,10 @@ pub struct CaptureControl {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LostSources {
     pub video: bool,
+    /// Silent from when their source went away to the end.
     pub audio: Vec<TrackId>,
+    /// Silent for a while: their device went away and one came back.
+    pub audio_interrupted: Vec<TrackId>,
 }
 
 impl CaptureControl {
@@ -53,8 +56,19 @@ impl CaptureControl {
     /// Notes that `track`'s device or app went away -- see `LostSources`.
     pub fn audio_source_lost(&self, track: TrackId) {
         let mut lost = self.lost_sources_mut();
+        lost.audio_interrupted.retain(|&t| t != track);
         if !lost.audio.contains(&track) {
             lost.audio.push(track);
+        }
+    }
+
+    /// Notes that `track` has a device again after `audio_source_lost`: it
+    /// was silent for a while, not to the end.
+    pub fn audio_source_back(&self, track: TrackId) {
+        let mut lost = self.lost_sources_mut();
+        lost.audio.retain(|&t| t != track);
+        if !lost.audio_interrupted.contains(&track) {
+            lost.audio_interrupted.push(track);
         }
     }
 
@@ -136,6 +150,36 @@ mod tests {
             LostSources {
                 video: true,
                 audio: vec![TrackId::new(1)],
+                audio_interrupted: vec![],
+            }
+        );
+    }
+
+    /// Unplug a headset mid-recording and plug it back in: that track was
+    /// silent for a while, not from there to the end. Lose it again and
+    /// leave it unplugged, and it is.
+    #[test]
+    fn a_track_whose_device_comes_back_was_interrupted_not_lost() {
+        let ctrl = CaptureControl::new();
+        let track = TrackId::new(0);
+        ctrl.audio_source_lost(track);
+        ctrl.audio_source_back(track);
+        assert_eq!(
+            ctrl.lost_sources(),
+            LostSources {
+                video: false,
+                audio: vec![],
+                audio_interrupted: vec![track],
+            }
+        );
+
+        ctrl.audio_source_lost(track);
+        assert_eq!(
+            ctrl.lost_sources(),
+            LostSources {
+                video: false,
+                audio: vec![track],
+                audio_interrupted: vec![],
             }
         );
     }

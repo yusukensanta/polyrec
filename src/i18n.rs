@@ -259,6 +259,8 @@ pub struct Strings {
     /// `capture::LostSources`. `{tracks}` names the audio tracks.
     pub notice_video_source_lost: &'static str,
     pub notice_audio_source_lost_template: &'static str,
+    /// The same for tracks whose device came back (`LostSources::audio_interrupted`).
+    pub notice_audio_source_interrupted_template: &'static str,
 
     // Notification-area icon (see `ui::dashboard::tray`)
     pub tray_show: &'static str,
@@ -499,6 +501,7 @@ pub static EN: Strings = Strings {
     export_over_itself: "That's the recording being exported. Choose another name to save the export as.",
     notice_video_source_lost: "The video stopped before you did: the recorded window closed, its display was disconnected, or capturing it failed. From there on, the video doesn't change.",
     notice_audio_source_lost_template: "Audio from {tracks} stopped partway through (a device was unplugged, or an app closed). From there on, that audio is silent.",
+    notice_audio_source_interrupted_template: "Audio from {tracks} went silent for a while partway through (its device was unplugged or turned off) and carried on once a device was back.",
 
     tray_show: "Show PolyRec",
     tray_hide: "Hide PolyRec",
@@ -695,6 +698,7 @@ pub static JA: Strings = Strings {
     export_over_itself: "エクスポート元の録画と同じファイルです。別の名前を指定してください。",
     notice_video_source_lost: "停止する前に映像が止まりました（録画中のウィンドウが閉じられた、ディスプレイが切断された、またはキャプチャに失敗しました）。それ以降の映像は変化しません。",
     notice_audio_source_lost_template: "{tracks} の音声が途中で止まりました（デバイスが外されたか、アプリが終了しました）。それ以降の音声は無音です。",
+    notice_audio_source_interrupted_template: "{tracks} の音声が途中でしばらく無音になりました（デバイスが外されたか、オフになりました）。デバイスが戻ってからは録音を続けています。",
 
     tray_show: "PolyRec を表示",
     tray_hide: "PolyRec を隠す",

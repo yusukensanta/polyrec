@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.148] - 2026-11-04
+
+### Fixed
+
+- Switching Windows' default speakers or microphone during a recording (plugging in a headset, or picking another device in Sound settings) left that audio track on the old device. System audio went silent from there to the end, with nothing to say so, and unplugging the device did the same. A recording now follows the default device: within about two seconds it carries on from the new one. If there's no device at all for a while (the only microphone unplugged), that track is silent until one is back, and PolyRec says so once the recording is saved.
+
 ## [v0.5.147] - 2026-11-02
 
 ### Fixed
