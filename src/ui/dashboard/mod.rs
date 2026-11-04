@@ -120,6 +120,8 @@ pub struct App {
     hotkey_listener: Option<HotkeyListener>,
     update_available: Option<crate::update_check::AvailableUpdate>,
     update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
+    /// The recordings cut off last time, once saved -- see `start_recovery`.
+    recovery_rx: Option<mpsc::Receiver<Vec<std::path::PathBuf>>>,
     /// A real error, shown as a modal (a recording that couldn't start or
     /// finalize, a config that couldn't be saved) — cleared by the "Close"
     /// button in its popup. Things worth knowing that don't stop anything go
@@ -286,6 +288,8 @@ impl App {
             let _ = update_tx.send(result);
         });
 
+        let recovery_rx = start_recovery(&config.output_dir);
+
         Self {
             config,
             session: SessionManager::new(),
@@ -318,6 +322,7 @@ impl App {
             hotkey_listener: Some(hotkey_listener),
             update_available: None,
             update_check_rx: Some(update_check_rx),
+            recovery_rx,
             error_message: None,
             notices,
             toast: None,
@@ -364,6 +369,27 @@ impl App {
 /// of quitting: the user asked for that (`close_to_tray`), there's a tray
 /// icon to bring it back from, and PolyRec isn't closing its own window to
 /// quit (`App::quit`) -- egui reports that as a close request too.
+/// Saves the recordings cut off last time -- PolyRec killed, a crash, a
+/// power cut -- in `output_dir`'s `polyrec` folder (see
+/// `session::recovery`), on a thread of its own: each is remuxed, which
+/// takes a while for a long one. The receiver gets what they're saved as.
+fn start_recovery(output_dir: &std::path::Path) -> Option<mpsc::Receiver<Vec<std::path::PathBuf>>> {
+    let dir = output_dir.join("polyrec");
+    // Only those begun before now: one begun from here on is being written.
+    let before = std::time::SystemTime::now();
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("recovery".into())
+        .spawn(move || {
+            let _ = tx.send(crate::session::recovery::recover_cut_off_recordings(
+                &dir, before,
+            ));
+        })
+        .inspect_err(|e| tracing::warn!("couldn't look for recordings to recover: {e}"))
+        .ok()?;
+    Some(rx)
+}
+
 fn close_button_hides(close_to_tray: bool, has_tray: bool, quitting: bool) -> bool {
     close_to_tray && has_tray && !quitting
 }

@@ -1,11 +1,12 @@
 pub mod actor;
 pub(crate) mod cfr;
+pub mod fmp4;
 pub mod gpu;
 pub mod highlight_export;
 pub(crate) mod mf;
 pub mod remux;
 pub mod writer;
-pub use writer::{EncoderParams, RecordingWriter};
+pub use writer::{Container, EncoderParams, RecordingWriter};
 
 use crate::types::{AudioSamples, VideoFrame};
 use tokio::sync::OwnedSemaphorePermit;

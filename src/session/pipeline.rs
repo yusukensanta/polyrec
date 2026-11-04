@@ -21,7 +21,7 @@ use crate::config::{BitrateMode, EncoderMode, ResolutionMode};
 use crate::encode::actor::{spawn_audio_pump, spawn_video_pump};
 use crate::encode::gpu::{GpuFrames, GpuInput};
 use crate::encode::writer::{AUDIO_BITRATE_BPS, video_bitrate_bps, video_encoder_accepts};
-use crate::encode::{EncoderParams, RecordingCommand};
+use crate::encode::{Container, EncoderParams, RecordingCommand};
 use crate::error::AppError;
 use crate::types::{AppAudioSource, AudioDevice, AudioLevel, CaptureKind, CaptureSource, TrackId};
 use std::future::Future;
@@ -259,6 +259,7 @@ fn video_params(
         audio_tracks: Vec::new(),
         allow_hardware_encode: matches!(encode.encoder_mode, EncoderMode::Hardware),
         gpu: None,
+        container: Container::Mp4,
     }
 }
 

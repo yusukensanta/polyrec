@@ -255,6 +255,8 @@ pub struct Strings {
     /// Shown when config.toml couldn't be read, or moved aside
     /// (`ConfigTrouble::LeftAlone`). `{path}` is where it is.
     pub notice_config_left_alone: &'static str,
+    /// `{files}`: what the recordings cut off last time are saved as.
+    pub notice_recovered_template: &'static str,
     /// A message box, for a launch that finds PolyRec running but can't
     /// bring it up (`single_instance::NotClaimed::Unreachable`).
     pub already_running_unreachable: &'static str,
@@ -512,6 +514,7 @@ pub static EN: Strings = Strings {
     notice_config_set_aside: "Your settings file couldn't be read, so PolyRec started with its default settings. The old file is kept as {path}.",
     already_running_unreachable: "PolyRec is already running, but it can't be brought up from here. It may have been started as administrator. Open it from the notification area, or close it and start PolyRec again.",
     notice_config_left_alone: "Your settings file couldn't be read, so PolyRec started with its default settings. It won't save over the file this time, so nothing in it is lost. Another program may have had it open: close PolyRec and start it again to read {path}.",
+    notice_recovered_template: "PolyRec closed partway through a recording last time. What was recorded up to then is saved as {files}.",
     export_over_itself: "That's the recording being exported. Choose another name to save the export as.",
     notice_video_source_lost: "The video stopped before you did: the recorded window closed, its display was disconnected, or capturing it failed. From there on, the video doesn't change.",
     notice_audio_source_lost_template: "Audio from {tracks} stopped partway through (a device was unplugged, or an app closed). From there on, that audio is silent.",
@@ -714,6 +717,7 @@ pub static JA: Strings = Strings {
     notice_config_set_aside: "設定ファイルを読み込めなかったため、既定の設定で起動しました。元のファイルは {path} に残してあります。",
     already_running_unreachable: "PolyRec はすでに起動していますが、ここから表示できません。管理者として起動されている可能性があります。通知領域から開くか、終了してから PolyRec を起動し直してください。",
     notice_config_left_alone: "設定ファイルを読み込めなかったため、既定の設定で起動しました。今回はこのファイルに上書き保存しないので、内容は失われません。他のプログラムが開いていた可能性があります。PolyRec を起動し直すと {path} を読み込みます。",
+    notice_recovered_template: "前回、録画の途中で PolyRec が終了しました。そこまでの録画を {files} として保存しました。",
     export_over_itself: "エクスポート元の録画と同じファイルです。別の名前を指定してください。",
     notice_video_source_lost: "停止する前に映像が止まりました（録画中のウィンドウが閉じられた、ディスプレイが切断された、またはキャプチャに失敗しました）。それ以降の映像は変化しません。",
     notice_audio_source_lost_template: "{tracks} の音声が途中で止まりました（デバイスが外されたか、アプリが終了しました）。それ以降の音声は無音です。",

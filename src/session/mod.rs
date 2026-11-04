@@ -1,5 +1,6 @@
 pub mod clock;
 mod pipeline;
+pub mod recovery;
 pub mod state;
 
 pub use pipeline::{CaptureInputs, FpsSupport, estimated_bytes_per_sec, probe_fps_support};
@@ -868,11 +869,26 @@ mod tests {
                 }
             }
             let video_type = video_type.expect("no video stream found");
-            let packed = video_type
-                .GetUINT64(&MF_MT_FRAME_SIZE)
-                .expect("GetUINT64 frame_size");
-            let actual_w = (packed >> 32) as u32;
-            let actual_h = (packed & 0xFFFF_FFFF) as u32;
+            // What a player shows: the display aperture, when the encoded
+            // size isn't it -- HEVC rounds a 1392-row picture up to 1408
+            // coded rows and says so there.
+            let mut aperture = [0u8; 16];
+            let (actual_w, actual_h) = match video_type.GetBlob(
+                &windows::Win32::Media::MediaFoundation::MF_MT_MINIMUM_DISPLAY_APERTURE,
+                &mut aperture,
+                None,
+            ) {
+                Ok(()) => (
+                    i32::from_le_bytes(aperture[8..12].try_into().unwrap()) as u32,
+                    i32::from_le_bytes(aperture[12..16].try_into().unwrap()) as u32,
+                ),
+                Err(_) => {
+                    let packed = video_type
+                        .GetUINT64(&MF_MT_FRAME_SIZE)
+                        .expect("GetUINT64 frame_size");
+                    ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32)
+                }
+            };
             println!("window: {expected_w}x{expected_h}, encoded: {actual_w}x{actual_h}");
             assert_eq!(actual_w, expected_w.max(2) & !1);
             assert_eq!(actual_h, expected_h.max(2) & !1);
