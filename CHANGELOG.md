@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Stopping a recording takes a little longer: the recording is turned into a normal MP4, about a third of a second per minute recorded (around 40 seconds for two hours at 20 Mbps). If that can't be done (the disk is full, say), the fragmented file is kept under the recording's name; it plays all the same.
+- Stopping a recording takes a little longer: the recording is turned into a normal MP4, about a third of a second per minute recorded (around 40 seconds for two hours at 20 Mbps). That writes a second copy before the first is deleted, so it's done only if the drive has room for the copy and 500 MB more. Otherwise, or if it fails, the fragmented file is kept under the recording's name, at once; it plays all the same.
 
 ## [v0.5.151] - 2026-11-05
 

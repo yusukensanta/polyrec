@@ -19,10 +19,22 @@ use std::path::Path;
 
 /// Makes the fragmented recording at `fragmented` (with `audio_tracks`
 /// tracks of audio) the plain MP4 at `dest`, removing it. If remuxing
-/// fails -- the disk full, say -- it's moved to `dest` as it is: a
-/// fragmented MP4 plays all the same.
+/// fails -- or there's no room on the drive for the second copy it writes
+/// -- it's moved to `dest` as it is: a fragmented MP4 plays all the same.
 pub fn finish(fragmented: &Path, dest: &Path, audio_tracks: usize) -> Result<(), AppError> {
-    use crate::error::ResultExt;
+    let size = std::fs::metadata(fragmented).map_or(0, |m| m.len());
+    let free = dest
+        .parent()
+        .and_then(|dir| crate::disk_space::free_bytes(dir).ok());
+    if let Some(free) = free.filter(|&free| !room_to_remux(free, size)) {
+        tracing::warn!(
+            "{} MB free, {} MB to remux: keeping {} fragmented",
+            free >> 20,
+            size >> 20,
+            fragmented.display()
+        );
+        return keep_fragmented(fragmented, dest);
+    }
     let tracks: Vec<usize> = (0..audio_tracks).collect();
     match crate::encode::remux::remux(fragmented, dest, &tracks) {
         Ok(_) => {
@@ -34,13 +46,26 @@ pub fn finish(fragmented: &Path, dest: &Path, audio_tracks: usize) -> Result<(),
                 "couldn't remux {} ({e}); keeping it fragmented",
                 fragmented.display()
             );
-            std::fs::rename(fragmented, dest).encode_ctx(format_args!(
-                "moving {} to {}",
-                fragmented.display(),
-                dest.display()
-            ))
+            keep_fragmented(fragmented, dest)
         }
     }
+}
+
+fn keep_fragmented(fragmented: &Path, dest: &Path) -> Result<(), AppError> {
+    use crate::error::ResultExt;
+    std::fs::rename(fragmented, dest).encode_ctx(format_args!(
+        "moving {} to {}",
+        fragmented.display(),
+        dest.display()
+    ))
+}
+
+/// Whether a remux of a `size`-byte recording, with `free` bytes free on
+/// its drive, would leave what recording itself does
+/// (`disk_space::MIN_FREE_BYTES`): it writes a second copy before the
+/// first goes.
+fn room_to_remux(free: u64, size: u64) -> bool {
+    free >= size.saturating_add(crate::disk_space::MIN_FREE_BYTES)
 }
 
 #[cfg(test)]
@@ -251,6 +276,19 @@ pub(crate) mod tests {
             top_level(&dest)
         );
         assert_holds_three_seconds_of_everything(&read_back(&dest));
+    }
+
+    /// A remux writes a whole second copy before deleting the first: on a
+    /// nearly full drive it would fill the disk to nothing, then fail.
+    #[test]
+    fn a_remux_needs_room_for_a_copy_and_what_recording_keeps_free() {
+        use crate::disk_space::MIN_FREE_BYTES;
+        const GB: u64 = 1 << 30;
+        assert!(super::room_to_remux(20 * GB, 15 * GB));
+        assert!(super::room_to_remux(15 * GB + MIN_FREE_BYTES, 15 * GB));
+        assert!(!super::room_to_remux(15 * GB + MIN_FREE_BYTES - 1, 15 * GB));
+        assert!(!super::room_to_remux(10 * GB, 15 * GB));
+        assert!(!super::room_to_remux(0, u64::MAX), "no overflow");
     }
 
     /// Remuxing failed (here: a track it hasn't): the recording is kept
