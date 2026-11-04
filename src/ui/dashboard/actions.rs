@@ -1,11 +1,11 @@
 use super::App;
 use super::icons::Icon;
-use super::state::HighlightSaveState;
+use super::state::{HighlightRetry, HighlightSaveState};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
 use crate::recording_naming::RecordingNaming;
-use crate::session::{CaptureInputs, EncodeSettings};
+use crate::session::{CaptureInputs, EncodeSettings, HighlightStopped};
 use crate::sources::enumerate_sources;
 use crate::types::{AppAudioSource, AudioDevice, CaptureSource};
 use eframe::egui;
@@ -650,59 +650,29 @@ impl App {
     /// frame; every check here is a cheap comparison against already-known
     /// state, not an unconditional capture-thread spawn.
     pub(super) fn refresh_highlight_buffering(&mut self) {
-        // The highlight actor stopped itself early (e.g. disk ran low) --
-        // mirrors how poll_background_work detects manual recording's
-        // recorder stopping itself early via `recorder_handle.is_finished()`.
-        if self.session.highlight_actor_finished() {
-            let disk_full = self.session.highlight_stopped_for_disk_space();
-            self.session.stop_highlight_buffering(true);
-            if disk_full {
-                let strings = self.config.lang().strings();
-                self.notices.push(strings.highlight_disk_full_message);
-            }
+        let saving = matches!(self.highlight_save.state, HighlightSaveState::Saving);
+        // The highlight actor stopped itself early (disk ran low, or its
+        // writer couldn't start or gave out) -- mirrors how
+        // poll_background_work detects manual recording's recorder stopping
+        // itself early via `recorder_handle.is_finished()`. Not while a save
+        // reads the buffer: this discards it.
+        if !saving {
+            self.note_highlight_stopped_itself();
         }
-
         if !self.config.highlight.enabled {
-            if self.session.is_highlighting() {
-                self.session.stop_highlight_buffering(true);
-            }
-            return;
+            // Turned back on, it tries at once.
+            self.highlight_retry = HighlightRetry::default();
+        } else if self.highlight_retry.is_failing() && self.session.highlight_buffered() {
+            self.highlight_retry.working();
         }
 
-        // Highlight buffering and manual recording never run at once --
-        // doubling GPU/encode load for no benefit while the thing the user
-        // actually pressed record for is what matters. `discard: false` here
-        // (not `true`) is just about not wastefully deleting files that are
-        // about to get cleaned up anyway the moment buffering resumes for
-        // whatever's foreground once the recording stops (see
-        // `start_highlight_buffering`'s stale-file cleanup) -- buffering
-        // effectively restarts fresh after a manual recording, it does not
-        // carry the pre-recording buffer forward.
-        if self.session.is_recording() || self.session.is_paused() {
-            if self.session.is_highlighting() {
-                self.session.stop_highlight_buffering(false);
-            }
-            return;
-        }
-
-        let Some(source) = foreground_capture_source() else {
-            // Not a real switch away -- e.g. focus is briefly on PolyRec's
-            // own window while the user changes a setting. Leave whatever's
-            // already running (if anything) alone; WGC keeps capturing a
-            // window that isn't foreground just fine.
-            return;
+        // Just the handle, and only with Highlight on: the window's details
+        // (its icon read from its exe among them) used to be fetched on every
+        // pass, to compare handles.
+        let front = match self.config.highlight.enabled.then(front_window) {
+            Some(Foreground::Window(hwnd)) => Some(hwnd.0 as usize),
+            _ => None,
         };
-
-        let following_different_window = self
-            .session
-            .highlight_hwnd()
-            .is_some_and(|hwnd| hwnd != source.hwnd);
-        if following_different_window {
-            // Different app/resolution -- can't concatenate across the
-            // switch (see encode::highlight_export), so start over.
-            self.session.stop_highlight_buffering(true);
-        }
-
         // Re-using the already-throttled free-space reading (refreshed a few
         // lines earlier in poll_background_work) instead of a fresh syscall
         // every frame -- also naturally rate-limits retrying after a
@@ -711,8 +681,60 @@ impl App {
             .free_space
             .bytes
             .is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
-        if !self.session.is_highlighting() && has_room {
-            self.start_highlight_buffering_for(&source);
+        let now = Instant::now();
+        let view = HighlightView {
+            enabled: self.config.highlight.enabled,
+            recording: self.session.is_recording() || self.session.is_paused(),
+            saving,
+            following: self.session.highlight_hwnd(),
+            front,
+            may_start: front
+                .is_some_and(|hwnd| has_room && self.highlight_retry.may_start(hwnd, now)),
+        };
+        match highlight_step(&view) {
+            HighlightStep::Leave => {}
+            HighlightStep::Pause => {
+                self.session.stop_highlight_buffering(false);
+            }
+            HighlightStep::Discard => {
+                self.session.stop_highlight_buffering(true);
+            }
+            HighlightStep::Start(hwnd) => {
+                if view.following.is_some() {
+                    self.session.stop_highlight_buffering(true);
+                }
+                let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+                self.start_highlight_buffering_for(&crate::sources::capture_source_for_hwnd(hwnd));
+            }
+        }
+    }
+
+    /// Once Highlight buffering has stopped by itself: says why, and holds
+    /// off starting it again for that window if it failed (see
+    /// `HighlightRetry`).
+    fn note_highlight_stopped_itself(&mut self) {
+        let hwnd = self.session.highlight_hwnd();
+        let Some(stopped) = self.session.highlight_stopped_itself() else {
+            return;
+        };
+        match (stopped, hwnd) {
+            (HighlightStopped::DiskFull, _) => {
+                let strings = self.config.lang().strings();
+                self.notices.push(strings.highlight_disk_full_message);
+            }
+            (HighlightStopped::Failed(why), Some(hwnd)) => self.highlight_failed(hwnd, &why),
+            (HighlightStopped::Failed(_), None) => {}
+        }
+    }
+
+    /// Buffering `hwnd` failed: said once in a row, and not tried again for
+    /// that window for a while.
+    fn highlight_failed(&mut self, hwnd: usize, why: &str) {
+        tracing::warn!("Highlight buffering failed: {why}");
+        if self.highlight_retry.failed(hwnd, Instant::now()) {
+            let strings = self.config.lang().strings();
+            self.notices
+                .push(strings.highlight_failed_template.replace("{why}", why));
         }
     }
 
@@ -728,7 +750,7 @@ impl App {
             &self.config.output_dir,
             buffer_seconds,
         ) {
-            tracing::warn!("failed to start Highlight buffering: {e}");
+            self.highlight_failed(source.hwnd, &e.to_string());
         }
     }
 
@@ -762,27 +784,21 @@ impl App {
     }
 }
 
-/// The window currently in the foreground, as a `CaptureSource` — or `None` if
-/// there isn't one, or it belongs to this process (PolyRec's own dashboard/overlay
-/// windows), which would otherwise let a hotkey press while focused on our own
-/// window "record" it instead of whatever the user actually meant to capture.
-fn foreground_capture_source() -> Option<CaptureSource> {
-    match foreground() {
-        Foreground::Window(source) => Some(source),
-        Foreground::Dashboard | Foreground::Nothing => None,
-    }
-}
-
-/// What's in front.
-enum Foreground {
+/// What's in front: another app's window -- `W`, as a `CaptureSource` to
+/// record, or just its handle -- or one of PolyRec's own windows (its
+/// dashboard or overlay), which would otherwise let a hotkey press while
+/// focused on our own window "record" it instead of whatever the user
+/// actually meant to capture.
+enum Foreground<W = CaptureSource> {
     /// Another app's window, to record.
-    Window(CaptureSource),
+    Window(W),
     /// One of PolyRec's own windows.
     Dashboard,
     Nothing,
 }
 
-fn foreground() -> Foreground {
+/// What's in front, another app's window by its handle alone.
+fn front_window() -> Foreground<windows::Win32::Foundation::HWND> {
     unsafe {
         let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
         if hwnd.0.is_null() {
@@ -793,7 +809,92 @@ fn foreground() -> Foreground {
         if pid == std::process::id() {
             return Foreground::Dashboard;
         }
-        Foreground::Window(crate::sources::capture_source_for_hwnd(hwnd))
+        Foreground::Window(hwnd)
+    }
+}
+
+fn foreground() -> Foreground {
+    match front_window() {
+        Foreground::Window(hwnd) => {
+            Foreground::Window(crate::sources::capture_source_for_hwnd(hwnd))
+        }
+        Foreground::Dashboard => Foreground::Dashboard,
+        Foreground::Nothing => Foreground::Nothing,
+    }
+}
+
+/// Where Highlight buffering stands, for `highlight_step`.
+struct HighlightView {
+    enabled: bool,
+    /// A manual recording is running or paused.
+    recording: bool,
+    /// A save is reading the buffer's files.
+    saving: bool,
+    /// The window buffering follows, while it runs.
+    following: Option<usize>,
+    /// Another app's window in front, if one is.
+    front: Option<usize>,
+    /// Whether buffering may start for `front`: there's room on the disk,
+    /// and no failure for it to wait out (`HighlightRetry`).
+    may_start: bool,
+}
+
+/// What `refresh_highlight_buffering` does this pass.
+#[derive(Debug, PartialEq)]
+enum HighlightStep {
+    Leave,
+    /// Stop, leaving the files: a manual recording runs.
+    Pause,
+    /// Stop and delete the buffer.
+    Discard,
+    /// Start for this window -- discarding first a buffer that follows
+    /// another.
+    Start(usize),
+}
+
+fn highlight_step(view: &HighlightView) -> HighlightStep {
+    let running = view.following.is_some();
+    // Highlight buffering and manual recording never run at once --
+    // doubling GPU/encode load for no benefit while the thing the user
+    // actually pressed record for is what matters. Pausing rather than
+    // discarding is just about not wastefully deleting files that are about
+    // to get cleaned up anyway the moment buffering resumes for whatever's
+    // foreground once the recording stops (see `start_highlight_buffering`'s
+    // stale-file cleanup) -- buffering effectively restarts fresh after a
+    // manual recording, it does not carry the pre-recording buffer forward.
+    if view.recording {
+        return if running {
+            HighlightStep::Pause
+        } else {
+            HighlightStep::Leave
+        };
+    }
+    // A save reads the buffer's segment files until it's done: discarding
+    // them, or a start clearing the folder, would delete them under it.
+    if view.saving {
+        return HighlightStep::Leave;
+    }
+    if !view.enabled {
+        return if running {
+            HighlightStep::Discard
+        } else {
+            HighlightStep::Leave
+        };
+    }
+    // Nothing else's in front -- e.g. focus is briefly on PolyRec's own
+    // window while the user changes a setting: not a real switch away.
+    // Leave whatever's already running (if anything) alone; WGC keeps
+    // capturing a window that isn't foreground just fine. A different
+    // window is a different app/resolution, which can't be concatenated
+    // across (see encode::highlight_export): start over for it.
+    let Some(front) = view.front else {
+        return HighlightStep::Leave;
+    };
+    match view.following {
+        Some(following) if following == front => HighlightStep::Leave,
+        _ if view.may_start => HighlightStep::Start(front),
+        Some(_) => HighlightStep::Discard,
+        None => HighlightStep::Leave,
     }
 }
 
@@ -1067,6 +1168,108 @@ mod tests {
         assert!(!audio_device_ids_changed(&old, &[device("b"), device("a")]));
         assert!(audio_device_ids_changed(&old, &[device("a")]));
         assert!(audio_device_ids_changed(&old, &[device("a"), device("c")]));
+    }
+
+    /// Buffering window 1, window 1 in front, nothing in the way.
+    fn buffering() -> HighlightView {
+        HighlightView {
+            enabled: true,
+            recording: false,
+            saving: false,
+            following: Some(1),
+            front: Some(1),
+            may_start: true,
+        }
+    }
+
+    /// A save reads the buffer's segment files. Switching windows
+    /// discarded them under it (and the start after cleared the folder);
+    /// so did turning Highlight off.
+    #[test]
+    fn a_save_in_flight_keeps_the_buffer_it_reads() {
+        let saving = HighlightView {
+            saving: true,
+            ..buffering()
+        };
+        for view in [
+            HighlightView {
+                front: Some(2),
+                ..saving
+            },
+            HighlightView {
+                enabled: false,
+                ..saving
+            },
+        ] {
+            assert_eq!(highlight_step(&view), HighlightStep::Leave);
+        }
+        let nothing_running = HighlightView {
+            following: None,
+            ..saving
+        };
+        assert_eq!(highlight_step(&nothing_running), HighlightStep::Leave);
+    }
+
+    /// Recording and buffering never run at once; pausing leaves the files.
+    #[test]
+    fn a_recording_pauses_buffering() {
+        let recording = HighlightView {
+            recording: true,
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&recording), HighlightStep::Pause);
+        let saving_too = HighlightView {
+            saving: true,
+            ..recording
+        };
+        assert_eq!(highlight_step(&saving_too), HighlightStep::Pause);
+    }
+
+    #[test]
+    fn turning_highlight_off_discards_the_buffer() {
+        let off = HighlightView {
+            enabled: false,
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&off), HighlightStep::Discard);
+    }
+
+    #[test]
+    fn buffering_follows_the_window_in_front() {
+        assert_eq!(highlight_step(&buffering()), HighlightStep::Leave);
+        let switched = HighlightView {
+            front: Some(2),
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&switched), HighlightStep::Start(2));
+        let not_running = HighlightView {
+            following: None,
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&not_running), HighlightStep::Start(1));
+        let dashboard_in_front = HighlightView {
+            front: None,
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&dashboard_in_front), HighlightStep::Leave);
+    }
+
+    /// No room on the disk, or a failure to wait out: it isn't started --
+    /// and a buffer for the window that was in front goes.
+    #[test]
+    fn a_window_that_may_not_start_isnt_started() {
+        let not_running = HighlightView {
+            following: None,
+            may_start: false,
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&not_running), HighlightStep::Leave);
+        let switched = HighlightView {
+            front: Some(2),
+            may_start: false,
+            ..buffering()
+        };
+        assert_eq!(highlight_step(&switched), HighlightStep::Discard);
     }
 
     #[test]

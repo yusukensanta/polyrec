@@ -11,7 +11,7 @@ use crate::encode::actor::{StoppedItself, spawn_recording_actor};
 use crate::encode::highlight_export;
 use crate::error::{AppError, ResultExt};
 use crate::highlight::{
-    HIGHLIGHT_SEGMENT_SECONDS, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
+    HIGHLIGHT_SEGMENT_SECONDS, Retention, SaveNowRequest, SegmentInfo, spawn_highlight_actor,
 };
 use crate::recording_naming::{RecordingNaming, reserve_finished_recording_path};
 use crate::types::{CaptureKind, CaptureSource, SessionState};
@@ -19,7 +19,7 @@ use pipeline::{CaptureDimensions, CapturePipeline};
 use state::{SessionAction, transition};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -125,10 +125,9 @@ pub struct ActiveHighlight {
     /// at start time since it's this buffering session's own setting, not
     /// necessarily whatever `config.highlight.buffer_seconds` reads right now.
     buffer_seconds: u32,
-    /// Set if the highlight actor stopped itself early because free disk
-    /// space on the segment directory's volume dropped too low -- see
-    /// `SessionManager::highlight_stopped_for_disk_space`.
-    disk_full_flag: Arc<AtomicBool>,
+    /// Why the highlight actor stopped itself, if it did -- see
+    /// `SessionManager::highlight_stopped_itself`.
+    stopped: StoppedItself,
     /// The window this buffer is currently following -- the dashboard's
     /// foreground-window poll compares against this to detect a switch and
     /// restart buffering for the new window (see lifecycle rule 2).
@@ -303,23 +302,40 @@ impl SessionManager {
         self.highlight.as_ref().map(|h| h.hwnd)
     }
 
-    /// True once the highlight actor's background thread has exited on its
-    /// own (e.g. the disk-full check inside it tripped) rather than via
-    /// `stop_highlight_buffering` -- mirrors how `poll_background_work`
-    /// detects manual recording stopping itself early via
+    /// Once the highlight actor's background thread has exited on its own
+    /// (its disk-full check tripped, or its writer gave out) rather than via
+    /// `stop_highlight_buffering`: why, with buffering stopped and its
+    /// segments discarded -- mirrors how `poll_background_work` detects
+    /// manual recording stopping itself early via
     /// `active.recorder_handle.is_finished()`.
-    pub fn highlight_actor_finished(&self) -> bool {
-        self.highlight
-            .as_ref()
-            .is_some_and(|h| h.highlight_handle.is_finished())
+    pub fn highlight_stopped_itself(&mut self) -> Option<HighlightStopped> {
+        let active = self.highlight.as_ref()?;
+        if !active.highlight_handle.is_finished() {
+            return None;
+        }
+        let why = if active.stopped.disk_full() {
+            HighlightStopped::DiskFull
+        } else {
+            HighlightStopped::Failed(
+                active
+                    .stopped
+                    .gave_up()
+                    .unwrap_or_else(|| "the Highlight writer stopped".into()),
+            )
+        };
+        self.stop_highlight_buffering(true);
+        Some(why)
     }
 
-    /// Whether the Highlight actor stopped itself because free disk space
-    /// on the segment directory's volume dropped too low.
-    pub fn highlight_stopped_for_disk_space(&self) -> bool {
-        self.highlight
-            .as_ref()
-            .is_some_and(|h| h.disk_full_flag.load(Ordering::Relaxed))
+    /// Whether the buffer holds anything yet: at least one segment has been
+    /// written and finalized.
+    pub fn highlight_buffered(&self) -> bool {
+        self.highlight.as_ref().is_some_and(|h| {
+            !h.segments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        })
     }
 
     /// Starts (or restarts, for a different window) the Highlight background
@@ -343,13 +359,9 @@ impl SessionManager {
         // recording, rather than stopped-and-discarded) would otherwise sit
         // in this directory forever: untracked by the new deque, so never
         // eligible for eviction or inclusion in a future save. Found via a
-        // real pause/resume run, not by inspection -- clear the directory
-        // instead of orphaning it.
-        if let Ok(entries) = std::fs::read_dir(&segment_dir) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+        // real pause/resume run, not by inspection -- clear them instead of
+        // orphaning them.
+        crate::highlight::clear_leftover_segments(&segment_dir)?;
 
         let free = crate::disk_space::free_bytes(&segment_dir)?;
         if free < crate::disk_space::MIN_FREE_BYTES {
@@ -357,19 +369,15 @@ impl SessionManager {
         }
 
         let dims = CaptureDimensions::resolve(source, &inputs.encode);
-        let max_segments = buffer_seconds
-            .max(1)
-            .div_ceil(HIGHLIGHT_SEGMENT_SECONDS)
-            .max(1) as usize;
         let segments: Arc<Mutex<VecDeque<SegmentInfo>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let disk_full_flag = Arc::new(AtomicBool::new(false));
+        let stopped = StoppedItself::default();
         let (highlight_tx, save_now_tx, highlight_handle) = spawn_highlight_actor(
             segment_dir,
             dims.encoder_params(&inputs),
             HIGHLIGHT_SEGMENT_SECONDS,
-            max_segments,
+            Retention::new(buffer_seconds, HIGHLIGHT_SEGMENT_SECONDS),
             Arc::clone(&segments),
-            Arc::clone(&disk_full_flag),
+            stopped.clone(),
             dims.fps.clone(),
         );
         let pipeline = CapturePipeline::spawn(
@@ -389,7 +397,7 @@ impl SessionManager {
             save_now_tx,
             segments,
             buffer_seconds,
-            disk_full_flag,
+            stopped,
             hwnd: source.hwnd,
         });
 
@@ -432,7 +440,11 @@ impl SessionManager {
             active.pipeline.shutdown().await;
             let _ = active.highlight_tx.send(RecordingCommand::Stop).await;
             if discard {
-                let _ = active.highlight_handle.await;
+                match active.highlight_handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::error!("Highlight buffering stopped: {e}"),
+                    Err(e) => tracing::error!("Highlight actor: {e}"),
+                }
                 crate::highlight::discard_segments(&active.segments);
             }
         }))
@@ -522,6 +534,16 @@ impl Default for SessionManager {
     }
 }
 
+/// Why Highlight buffering stopped by itself -- see
+/// `SessionManager::highlight_stopped_itself`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HighlightStopped {
+    /// Free disk space on the buffer's volume dropped too low.
+    DiskFull,
+    /// Its writer couldn't start, or gave out: the error.
+    Failed(String),
+}
+
 /// Derives a filesystem-safe app name from a window's exe name (e.g. "vivaldi.exe"
 /// -> "vivaldi"), used as the recording filename's prefix. Falls back to "recording"
 /// if the exe name is empty or sanitizes away to nothing. `pub(crate)` so the
@@ -571,6 +593,7 @@ fn prepare_recording_paths(base_dir: &std::path::Path, app_name: &str) -> (PathB
 mod tests {
     use super::*;
     use crate::types::{AppAudioSource, AudioDevice};
+    use std::sync::atomic::Ordering;
 
     /// Every device/app at unity gain with the default encode settings --
     /// what the e2e tests below record with.
@@ -648,6 +671,21 @@ mod tests {
                         && (rect.bottom - rect.top) >= 100
                 }
         })
+    }
+
+    /// What Highlight buffers in the app: the window in front -- a game
+    /// being played, say -- if it's big enough to encode; otherwise the
+    /// first window that is (see `pick_source_with_real_client_rect`).
+    fn highlight_source() -> CaptureSource {
+        let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let in_front = (!front.0.is_null())
+            .then(|| crate::sources::capture_source_for_hwnd(front))
+            .and_then(|source| pick_source_with_real_client_rect(vec![source]));
+        let source = in_front
+            .or_else(|| pick_source_with_real_client_rect(crate::sources::enumerate_sources()))
+            .expect("no usable capture source found");
+        println!("buffering {} ({})", source.exe_name, source.window_title);
+        source
     }
 
     #[test]
@@ -1493,11 +1531,8 @@ mod tests {
 
     async fn highlight_saves_a_playable_file(gpu_frames: bool) {
         use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
 
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source = highlight_source();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();
@@ -1562,6 +1597,61 @@ mod tests {
         );
     }
 
+    /// End to end through the real wiring: two saves in a row each hold the
+    /// whole 30 s buffer. Kept by count, a save's early-finalized short
+    /// segment pushed a full one out -- 35 s in, a save held 25 s, and one
+    /// 3 s after it 18 s. And no two frames of a save share a time, as each
+    /// segment's first used to overlap the last before it. Records speaker
+    /// loopback only, no microphone, and plays nothing. Ignored like the
+    /// others (~45 s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn back_to_back_highlight_saves_each_hold_the_whole_buffer() {
+        use crate::capture::audio::enumerate_audio_devices;
+
+        let source = highlight_source();
+        let speakers: Vec<_> = enumerate_audio_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.is_loopback)
+            .take(1)
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        sm.start_highlight_buffering(&source, inputs(speakers, vec![], false), dir.path(), 30)
+            .expect("start_highlight_buffering failed");
+        tokio::time::sleep(Duration::from_secs(35)).await;
+
+        for wait_before in [0, 3] {
+            tokio::time::sleep(Duration::from_secs(wait_before)).await;
+            let saved = sm
+                .save_highlight(dir.path(), "e2e_back_to_back", RecordingNaming::ProcessName)
+                .expect("save_highlight failed")
+                .await
+                .expect("save_highlight task panicked")
+                .expect("concat_and_trim failed");
+            let mut frames = highlight_export::video_sample_times(&saved);
+            frames.sort_unstable();
+            let (first, _) = frames.first().copied().expect("no frames");
+            let (last, last_duration) = frames.last().copied().unwrap();
+            let span = Duration::from_nanos((last + last_duration - first) as u64 * 100);
+            println!(
+                "save {}: {} frames over {span:?}",
+                saved.display(),
+                frames.len()
+            );
+            assert!(span >= Duration::from_secs(29), "only {span:?} saved");
+            let count = frames.len();
+            frames.dedup_by_key(|(ts, _)| *ts);
+            assert_eq!(frames.len(), count, "two frames at one time");
+        }
+
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true))
+            .expect("was buffering")
+            .await
+            .expect("stopping panicked");
+    }
+
     /// Regression test for a real bug caught via a live manual run: pausing
     /// Highlight buffering with `stop_highlight_buffering(false)` (e.g. so a
     /// manual recording can start) then resuming with a fresh
@@ -1574,11 +1664,8 @@ mod tests {
     #[ignore]
     async fn pausing_then_resuming_highlight_buffering_does_not_orphan_segment_files() {
         use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
 
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source = highlight_source();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();

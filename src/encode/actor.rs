@@ -22,7 +22,7 @@ const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// through, before the recorder gives up: an encoder or GPU that has given
 /// out (a driver reset, say) loses about this much video instead of the
 /// rest of the recording, with "Recording" showing all along.
-const GIVE_UP_AFTER: Duration = Duration::from_secs(2);
+pub(crate) const GIVE_UP_AFTER: Duration = Duration::from_secs(2);
 
 /// Why the recorder stopped itself before it was stopped, if it did --
 /// shared with the dashboard, which says so once the recording is saved
@@ -40,6 +40,11 @@ impl StoppedItself {
         self.disk_full.load(Ordering::Relaxed)
     }
 
+    /// The flag `DiskSpaceGuard::should_stop` sets.
+    pub(crate) fn disk_full_flag(&self) -> &AtomicBool {
+        &self.disk_full
+    }
+
     /// The last failed write's error, if writes kept failing until the
     /// recorder gave up.
     pub fn gave_up(&self) -> Option<String> {
@@ -49,7 +54,7 @@ impl StoppedItself {
             .clone()
     }
 
-    fn give_up(&self, why: String) {
+    pub(crate) fn give_up(&self, why: String) {
         *self
             .gave_up
             .lock()
@@ -96,7 +101,7 @@ impl FailingWrites {
 /// video encoder, while audio, with an encoder of its own, goes on being
 /// written -- 100 packets a second a track.
 #[derive(Default)]
-struct Writes {
+pub(crate) struct Writes {
     video: FailingWrites,
     audio: FailingWrites,
 }
@@ -105,15 +110,21 @@ impl Writes {
     /// Notes how a frame's write went, at `now`. Whether to give up: video
     /// writes have all failed for `GIVE_UP_AFTER`, whatever audio did
     /// meanwhile -- the recording is its video.
-    fn note_video(&mut self, result: Result<(), AppError>, now: Instant) -> bool {
+    pub(crate) fn note_video(&mut self, result: Result<(), AppError>, now: Instant) -> bool {
         self.video.note(result, "video", now)
     }
 
     /// Notes how an audio packet's write went, at `now`. Audio failing on
     /// its own, with the video still written, doesn't end the recording (it
     /// never did); it's logged, once a run.
-    fn note_audio(&mut self, result: Result<(), AppError>, now: Instant) {
+    pub(crate) fn note_audio(&mut self, result: Result<(), AppError>, now: Instant) {
         self.audio.note(result, "audio", now);
+    }
+
+    /// The last failed video write's error, once `note_video` has said to
+    /// give up.
+    pub(crate) fn video_failure(&mut self) -> String {
+        self.video.last.take().unwrap_or_default()
     }
 }
 
@@ -171,7 +182,7 @@ pub fn spawn_recording_actor(
                 RecordingCommand::Stop => break,
             };
             if gave_out {
-                let why = writes.video.last.take().unwrap_or_default();
+                let why = writes.video_failure();
                 tracing::error!(
                     "video writes have failed for {GIVE_UP_AFTER:?}; stopping the recording: {why}"
                 );

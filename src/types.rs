@@ -104,6 +104,17 @@ pub struct AudioSamples {
     pub channels: u16,
 }
 
+impl AudioSamples {
+    /// How long these samples play for.
+    pub fn duration(&self) -> Duration {
+        let frames = (self.samples.len() / usize::from(self.channels.max(1))) as u64;
+        match u64::from(self.sample_rate) {
+            0 => Duration::ZERO,
+            rate => Duration::from_nanos(frames * 1_000_000_000 / rate),
+        }
+    }
+}
+
 /// How loud an audio track has been, as linear amplitude (0.0 to 1.0):
 /// raised chunk by chunk by the track's pump, read by the dashboard. Clones
 /// share one value.
@@ -196,6 +207,26 @@ pub struct AppAudioSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_samples_last_as_long_as_their_frames_play() {
+        let samples = |count: usize, sample_rate: u32, channels: u16| AudioSamples {
+            track_id: TrackId::new(0),
+            pts: Duration::ZERO,
+            samples: vec![0.0; count],
+            sample_rate,
+            channels,
+        };
+        assert_eq!(
+            samples(480 * 2, 48_000, 2).duration(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            samples(441, 44_100, 1).duration(),
+            Duration::from_millis(10)
+        );
+        assert_eq!(samples(480, 0, 2).duration(), Duration::ZERO);
+    }
 
     #[test]
     fn audio_level_holds_the_loudest_chunk_until_it_is_read() {

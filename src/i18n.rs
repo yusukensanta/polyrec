@@ -398,6 +398,8 @@ pub struct Strings {
     pub highlight_saved_prefix: &'static str,
     pub highlight_save_failed_prefix: &'static str,
     pub highlight_disk_full_message: &'static str,
+    /// `{why}`: the error.
+    pub highlight_failed_template: &'static str,
 }
 
 pub static EN: Strings = Strings {
@@ -599,6 +601,7 @@ pub static EN: Strings = Strings {
     highlight_saved_prefix: "Highlight saved: ",
     highlight_save_failed_prefix: "Highlight save failed: ",
     highlight_disk_full_message: "Highlight buffering stopped automatically — your disk ran low on free space (below 500 MB).",
+    highlight_failed_template: "Highlight buffering stopped: {why}. It will try again shortly.",
 };
 
 pub static JA: Strings = Strings {
@@ -800,6 +803,7 @@ pub static JA: Strings = Strings {
     highlight_saved_prefix: "ハイライトを保存しました: ",
     highlight_save_failed_prefix: "ハイライトの保存に失敗しました: ",
     highlight_disk_full_message: "空き容量が不足したため、ハイライトバッファを自動停止しました（500MB未満）。",
+    highlight_failed_template: "ハイライトバッファが停止しました: {why}。しばらくしてから再開を試みます。",
 };
 
 #[cfg(test)]
