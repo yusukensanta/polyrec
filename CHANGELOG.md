@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.151] - 2026-11-05
+
 ### Fixed
 
 - A Highlight save could hold less than your buffer: with 30 seconds set, about 25 on average, and less after each save. Every save ends the segment being written early, and the buffer kept a set number of segments, so a short one pushed out a full one. It keeps as much as your buffer holds now.
