@@ -207,6 +207,25 @@ unsafe fn do_concat_and_trim(
     }
 }
 
+/// Every video sample in `path`: its time and how long it lasts, in 100 ns
+/// units -- for tests that check a save's timeline.
+#[cfg(test)]
+pub(crate) fn video_sample_times(path: &Path) -> Vec<(i64, i64)> {
+    let _mf = MfSession::start_mta().unwrap();
+    let mut times = Vec::new();
+    unsafe {
+        let (reader, layout, _, _) = open_passthrough_reader(path).unwrap();
+        for_each_sample(&reader, 1 + layout.audio.len(), None, |stream, s, ts| {
+            if stream == layout.video {
+                times.push((ts, s.GetSampleDuration().unwrap_or(0)));
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    times
+}
+
 /// `duration` in 100 ns units, Media Foundation's.
 fn hns(duration: Duration) -> i64 {
     (duration.as_nanos() / 100).min(i64::MAX as u128) as i64
@@ -333,18 +352,10 @@ mod tests {
         let output = dir.path().join("saved.mp4");
         concat_and_trim(&segments, 3600, &output).expect("concat_and_trim");
 
-        let _mf = MfSession::start_mta().unwrap();
-        let mut video = Vec::new();
-        unsafe {
-            let (reader, layout, _, _) = open_passthrough_reader(&output).unwrap();
-            for_each_sample(&reader, 1 + layout.audio.len(), None, |stream, _s, ts| {
-                if stream == layout.video {
-                    video.push(ts);
-                }
-                Ok(())
-            })
-            .unwrap();
-        }
+        let mut video: Vec<i64> = video_sample_times(&output)
+            .into_iter()
+            .map(|(ts, _)| ts)
+            .collect();
         for start_hns in [0, 5_000_000, 10_000_000] {
             assert!(
                 video.contains(&start_hns),

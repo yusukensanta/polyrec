@@ -673,6 +673,21 @@ mod tests {
         })
     }
 
+    /// What Highlight buffers in the app: the window in front -- a game
+    /// being played, say -- if it's big enough to encode; otherwise the
+    /// first window that is (see `pick_source_with_real_client_rect`).
+    fn highlight_source() -> CaptureSource {
+        let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let in_front = (!front.0.is_null())
+            .then(|| crate::sources::capture_source_for_hwnd(front))
+            .and_then(|source| pick_source_with_real_client_rect(vec![source]));
+        let source = in_front
+            .or_else(|| pick_source_with_real_client_rect(crate::sources::enumerate_sources()))
+            .expect("no usable capture source found");
+        println!("buffering {} ({})", source.exe_name, source.window_title);
+        source
+    }
+
     #[test]
     fn new_session_is_idle() {
         let sm = SessionManager::new();
@@ -1516,11 +1531,8 @@ mod tests {
 
     async fn highlight_saves_a_playable_file(gpu_frames: bool) {
         use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
 
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source = highlight_source();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();
@@ -1585,6 +1597,61 @@ mod tests {
         );
     }
 
+    /// End to end through the real wiring: two saves in a row each hold the
+    /// whole 30 s buffer. Kept by count, a save's early-finalized short
+    /// segment pushed a full one out -- 35 s in, a save held 25 s, and one
+    /// 3 s after it 18 s. And no two frames of a save share a time, as each
+    /// segment's first used to overlap the last before it. Records speaker
+    /// loopback only, no microphone, and plays nothing. Ignored like the
+    /// others (~45 s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn back_to_back_highlight_saves_each_hold_the_whole_buffer() {
+        use crate::capture::audio::enumerate_audio_devices;
+
+        let source = highlight_source();
+        let speakers: Vec<_> = enumerate_audio_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.is_loopback)
+            .take(1)
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = SessionManager::new();
+        sm.start_highlight_buffering(&source, inputs(speakers, vec![], false), dir.path(), 30)
+            .expect("start_highlight_buffering failed");
+        tokio::time::sleep(Duration::from_secs(35)).await;
+
+        for wait_before in [0, 3] {
+            tokio::time::sleep(Duration::from_secs(wait_before)).await;
+            let saved = sm
+                .save_highlight(dir.path(), "e2e_back_to_back", RecordingNaming::ProcessName)
+                .expect("save_highlight failed")
+                .await
+                .expect("save_highlight task panicked")
+                .expect("concat_and_trim failed");
+            let mut frames = highlight_export::video_sample_times(&saved);
+            frames.sort_unstable();
+            let (first, _) = frames.first().copied().expect("no frames");
+            let (last, last_duration) = frames.last().copied().unwrap();
+            let span = Duration::from_nanos((last + last_duration - first) as u64 * 100);
+            println!(
+                "save {}: {} frames over {span:?}",
+                saved.display(),
+                frames.len()
+            );
+            assert!(span >= Duration::from_secs(29), "only {span:?} saved");
+            let count = frames.len();
+            frames.dedup_by_key(|(ts, _)| *ts);
+            assert_eq!(frames.len(), count, "two frames at one time");
+        }
+
+        tokio::task::block_in_place(|| sm.stop_highlight_buffering(true))
+            .expect("was buffering")
+            .await
+            .expect("stopping panicked");
+    }
+
     /// Regression test for a real bug caught via a live manual run: pausing
     /// Highlight buffering with `stop_highlight_buffering(false)` (e.g. so a
     /// manual recording can start) then resuming with a fresh
@@ -1597,11 +1664,8 @@ mod tests {
     #[ignore]
     async fn pausing_then_resuming_highlight_buffering_does_not_orphan_segment_files() {
         use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
 
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
+        let source = highlight_source();
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
 
         let dir = tempfile::tempdir().unwrap();
