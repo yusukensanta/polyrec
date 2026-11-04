@@ -135,8 +135,7 @@ unsafe fn do_concat_and_trim(
 
         // How much to trim off the front of the oldest contributing segment --
         // zero if the buffer doesn't even contain a full `target_seconds` yet.
-        let skip = total.saturating_sub(target);
-        let skip_hns: i64 = (skip.as_nanos() / 100).min(i64::MAX as u128) as i64;
+        let skip_hns = hns(total.saturating_sub(target));
 
         let output_url = HSTRING::from(output);
 
@@ -158,11 +157,13 @@ unsafe fn do_concat_and_trim(
                 &audio_types,
             )?;
 
-        // ── Copy each contributing segment in order, re-basing timestamps so ──
-        // the output is one continuously increasing timeline across the seams.
-        let mut running_offset_hns: i64 = 0;
+        // ── Copy each contributing segment in order, each where it was ──
+        // captured: its start on the buffering session's clock, from the
+        // oldest's. Every stream keeps its time against the others across
+        // the seams, and any gap a rotation left stays a gap, rather than
+        // each segment going on where the last sample before it began.
         for (i, seg) in contributing.iter().enumerate() {
-            let baseline_hns = if i == 0 { skip_hns } else { 0 };
+            let offset_hns = hns(seg.start.saturating_sub(contributing[0].start)) - skip_hns;
             let (reader, layout) = if i == 0 {
                 (first_reader.clone(), first_layout.clone())
             } else {
@@ -184,8 +185,6 @@ unsafe fn do_concat_and_trim(
             }
 
             let total_streams = 1 + layout.audio.len();
-            let mut max_ts_seen: i64 = baseline_hns;
-
             let label = format!("segment {}", seg.path.display());
             for_each_sample(
                 &reader,
@@ -193,22 +192,24 @@ unsafe fn do_concat_and_trim(
                 Some(&label),
                 |stream, s, timestamp| {
                     if let Some(&sink_idx) = source_to_sink.get(&stream) {
-                        max_ts_seen = max_ts_seen.max(timestamp);
-                        let out_ts = timestamp - baseline_hns + running_offset_hns;
-                        s.SetSampleTime(out_ts).encode_ctx("SetSampleTime")?;
+                        s.SetSampleTime(timestamp + offset_hns)
+                            .encode_ctx("SetSampleTime")?;
                         write_sample(&writer, sink_idx, &s)?;
                     }
                     Ok(())
                 },
             )?;
-
-            running_offset_hns += (max_ts_seen - baseline_hns).max(0);
         }
 
         writer.Finalize().encode_ctx("Finalize")?;
 
         Ok(output.to_path_buf())
     }
+}
+
+/// `duration` in 100 ns units, Media Foundation's.
+fn hns(duration: Duration) -> i64 {
+    (duration.as_nanos() / 100).min(i64::MAX as u128) as i64
 }
 
 fn write_sample(
@@ -264,7 +265,9 @@ mod tests {
         writer.finalize().expect("finalize");
         SegmentInfo {
             path,
-            duration: last_pts,
+            start: Duration::ZERO,
+            // Up to where the last frame ends, as the actor counts it.
+            duration: last_pts + Duration::from_secs(1) / 30,
         }
     }
 
@@ -308,6 +311,50 @@ mod tests {
         assert!(result.is_ok(), "concat_and_trim failed: {:?}", result.err());
         assert!(output.exists());
         assert!(output.metadata().unwrap().len() > 0, "output file is empty");
+    }
+
+    /// Each segment goes where it was captured. It used to go on at the
+    /// last sample's *start* in the segment before -- whichever stream's
+    /// that was: here the audio's, 2.7 ms after the last frame began, so the
+    /// next segment's first frame overlapped it, and the streams shifted
+    /// against each other at every seam.
+    #[test]
+    fn segments_go_where_they_were_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments: Vec<_> = [0, 500, 1000]
+            .into_iter()
+            .enumerate()
+            .map(|(i, start)| {
+                let mut segment = make_segment(dir.path(), &format!("seg{i}.mp4"), 5);
+                segment.start = Duration::from_millis(start);
+                segment
+            })
+            .collect();
+        let output = dir.path().join("saved.mp4");
+        concat_and_trim(&segments, 3600, &output).expect("concat_and_trim");
+
+        let _mf = MfSession::start_mta().unwrap();
+        let mut video = Vec::new();
+        unsafe {
+            let (reader, layout, _, _) = open_passthrough_reader(&output).unwrap();
+            for_each_sample(&reader, 1 + layout.audio.len(), None, |stream, _s, ts| {
+                if stream == layout.video {
+                    video.push(ts);
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        for start_hns in [0, 5_000_000, 10_000_000] {
+            assert!(
+                video.contains(&start_hns),
+                "no frame at {start_hns}: {video:?}"
+            );
+        }
+        let count = video.len();
+        video.sort_unstable();
+        video.dedup();
+        assert_eq!(video.len(), count, "two frames at one time");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 pub(super) enum ExportState {
@@ -215,6 +215,62 @@ impl Default for HighlightSave {
     }
 }
 
+/// How long Highlight buffering waits to start again after failing (its
+/// writer couldn't start, or gave out), the first time in a row; each
+/// failure after doubles it, up to `HIGHLIGHT_RETRY_MAX`.
+const HIGHLIGHT_RETRY_FIRST: Duration = Duration::from_secs(10);
+const HIGHLIGHT_RETRY_MAX: Duration = Duration::from_secs(300);
+
+/// When Highlight buffering may start again after failing. It used to start
+/// again on the next pass: a writer that can't start for a window fails
+/// again at once, and again, a restart loop with nothing shown. Only the
+/// window it failed on waits; another may start at once.
+#[derive(Default)]
+pub(super) struct HighlightRetry {
+    failing: Option<HighlightFailing>,
+}
+
+struct HighlightFailing {
+    hwnd: usize,
+    in_a_row: u32,
+    until: Instant,
+}
+
+impl HighlightRetry {
+    /// Notes that buffering `hwnd` failed at `now`. Whether to say so: the
+    /// first failure in a row.
+    pub fn failed(&mut self, hwnd: usize, now: Instant) -> bool {
+        let in_a_row = match &self.failing {
+            Some(failing) if failing.hwnd == hwnd => failing.in_a_row + 1,
+            _ => 1,
+        };
+        let wait = HIGHLIGHT_RETRY_FIRST
+            .saturating_mul(1 << (in_a_row - 1).min(16))
+            .min(HIGHLIGHT_RETRY_MAX);
+        self.failing = Some(HighlightFailing {
+            hwnd,
+            in_a_row,
+            until: now + wait,
+        });
+        in_a_row == 1
+    }
+
+    pub fn may_start(&self, hwnd: usize, now: Instant) -> bool {
+        self.failing
+            .as_ref()
+            .is_none_or(|failing| failing.hwnd != hwnd || now >= failing.until)
+    }
+
+    /// Buffering works again: the next failure counts from one.
+    pub fn working(&mut self) {
+        self.failing = None;
+    }
+
+    pub fn is_failing(&self) -> bool {
+        self.failing.is_some()
+    }
+}
+
 /// The in-app self-update flow (confirm -> download/verify/install).
 pub(super) struct SelfUpdate {
     pub state: SelfUpdateState,
@@ -318,6 +374,41 @@ pub(super) fn escape_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlight_waits_longer_after_each_failure_in_a_row() {
+        let mut retry = HighlightRetry::default();
+        let mut at = Instant::now();
+        for seconds in [10, 20, 40, 80, 160, 300, 300] {
+            retry.failed(1, at);
+            let wait = Duration::from_secs(seconds);
+            assert!(!retry.may_start(1, at + wait - Duration::from_millis(1)));
+            assert!(retry.may_start(1, at + wait), "after {seconds} s");
+            at += wait;
+        }
+    }
+
+    #[test]
+    fn only_the_first_highlight_failure_in_a_row_is_said() {
+        let mut retry = HighlightRetry::default();
+        let now = Instant::now();
+        assert!(retry.failed(1, now));
+        assert!(!retry.failed(1, now));
+        retry.working();
+        assert!(!retry.is_failing());
+        assert!(retry.failed(1, now));
+    }
+
+    /// The failure was likely that window's: one too small to encode, say.
+    #[test]
+    fn another_window_may_start_while_one_waits_out_a_failure() {
+        let mut retry = HighlightRetry::default();
+        let now = Instant::now();
+        retry.failed(1, now);
+        assert!(!retry.may_start(1, now));
+        assert!(retry.may_start(2, now));
+        assert!(retry.failed(2, now), "a failure of its own, said");
+    }
 
     /// The silent-microphone check and the frame-rate check both speak up
     /// 10 s into a recording; only the second used to be seen.

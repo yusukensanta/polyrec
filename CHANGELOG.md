@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A Highlight save could hold less than your buffer: with 30 seconds set, about 25 on average, and less after each save. Every save ends the segment being written early, and the buffer kept a set number of segments, so a short one pushed out a full one. It keeps as much as your buffer holds now.
+- In a saved Highlight, each 10-second piece started where the last *audio* in the one before it began, so its first frame overlapped the last frame before it, and sound and picture shifted against each other a little at every join. Each piece goes where it was recorded now.
+- If Highlight couldn't start for a window (its encoder wouldn't open, say), it was started again on every pass, over and over, with nothing shown. It says why now, and waits before trying that window again: 10 seconds, then longer each time, up to 5 minutes. Another window starts straight away.
+- If Highlight's encoder or disk gave out, it logged an error 160 times a second and showed as on while saving nothing. It stops after 2 seconds of failures now and says so, then tries again as above. A segment that couldn't be finished is no longer taken for an empty one.
+- Switching windows, or turning Highlight off, while a Highlight was saving deleted the pieces the save was reading. Highlight waits for the save to finish now.
+- Highlight no longer reads the window in front's details, icon and all, on every pass just to see whether it's the same window.
+
+### Security
+
+- Starting Highlight deleted every file in its `_highlight_buffer` folder, and followed the folder if it was a link to somewhere else. It deletes only its own segment files now (`highlight_seg_*.mp4`), and won't use a folder that links elsewhere.
+
 ## [v0.5.150] - 2026-11-04
 
 ### Security

@@ -36,8 +36,8 @@ use eframe::egui;
 use fps_support::FpsSupportProbe;
 use hotkeys_popup::HotkeySlot;
 use state::{
-    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightSave, LastRecording, Notices,
-    Popup, RecordingStatusCache, SelfUpdate,
+    AddAppPicker, ExportUi, Finalizing, FreeSpaceCache, HighlightRetry, HighlightSave,
+    LastRecording, Notices, Popup, RecordingStatusCache, SelfUpdate,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -186,6 +186,7 @@ pub struct App {
     finalizing: Finalizing,
     export: ExportUi,
     highlight_save: HighlightSave,
+    highlight_retry: HighlightRetry,
     self_update: SelfUpdate,
     /// Window position as of the most recent frame -- updated every frame in
     /// `ui()` (cheap, in-memory only) and written to `config.toml` exactly
@@ -343,6 +344,7 @@ impl App {
             finalizing: Finalizing::default(),
             export: ExportUi::new(initial_track_selection),
             highlight_save: HighlightSave::default(),
+            highlight_retry: HighlightRetry::default(),
             self_update: SelfUpdate::default(),
         }
     }

@@ -608,15 +608,7 @@ impl RecordingWriter {
             .ok_or_else(|| AppError::Encode(format!("no audio stream {track_idx}")))?;
 
         let pts_hns = samples.pts.as_nanos() as i64 / 100;
-        let sample_count = samples.samples.len();
-        let channels = samples.channels as usize;
-        let frame_count = sample_count / channels.max(1);
-        let sample_rate = samples.sample_rate as i64;
-        let duration_hns = if sample_rate > 0 {
-            (frame_count as i64 * 10_000_000) / sample_rate
-        } else {
-            0
-        };
+        let duration_hns = samples.duration().as_nanos() as i64 / 100;
 
         let pcm: Vec<u8> = samples
             .samples
