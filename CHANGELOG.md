@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.152] - 2026-11-05
+
 ### Fixed
 
 - A recording PolyRec never got to finish — PolyRec closed by force or crashing, the PC losing power, a graphics driver reset — couldn't be opened at all: an MP4's index is written only when it's finished, so everything recorded was lost. Recordings are now written in fragments of about a second, each readable as soon as it's written, so one cut off loses only its last second or so. The next time PolyRec starts, it saves what was recorded as `<app>_<when it started>_recovered.mp4` and tells you. A finished recording is a normal MP4, as before. This covers H.265 recordings too, which Windows' own fragmented MP4 writer can't write.
