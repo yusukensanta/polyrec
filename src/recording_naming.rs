@@ -121,7 +121,27 @@ pub fn reserve_finished_recording_path(
     process_app_name: &str,
     dir: &Path,
 ) -> std::io::Result<PathBuf> {
-    for stem in candidate_stems(naming, process_app_name, dir) {
+    reserve_first(dir, candidate_stems(naming, process_app_name, dir))
+}
+
+/// Claims a name, as `reserve_finished_recording_path` does, for a
+/// recording recovered after it was cut off (see `session::recovery`):
+/// `<app>_<when it started>_recovered`, numbered if that's taken.
+pub fn reserve_recovered_recording_path(
+    app_name: &str,
+    started: chrono::DateTime<chrono::Local>,
+    dir: &Path,
+) -> std::io::Result<PathBuf> {
+    let stamp = started.format("%Y-%m-%d-%H-%M-%S");
+    reserve_first(
+        dir,
+        numbered_stems(format!("{app_name}_{stamp}_recovered"), None),
+    )
+}
+
+/// Creates the first of `stems` no file in `dir` has yet, empty.
+fn reserve_first(dir: &Path, stems: impl Iterator<Item = String>) -> std::io::Result<PathBuf> {
+    for stem in stems {
         let path = dir.join(format!("{stem}.mp4"));
         match std::fs::OpenOptions::new()
             .write(true)

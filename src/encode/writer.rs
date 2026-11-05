@@ -14,15 +14,16 @@ use std::sync::{Mutex, PoisonError};
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMF2DBuffer,
-    IMFMediaBuffer, IMFMediaBuffer_Impl, IMFMediaType, IMFSinkWriter,
-    MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
-    MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
-    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SINK_WRITER_D3D_MANAGER, MFAudioFormat_AAC,
-    MFAudioFormat_PCM, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video,
-    MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
+    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
+    CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMF2DBuffer, IMFMediaBuffer, IMFMediaBuffer_Impl,
+    IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
+    MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
+    MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SINK_WRITER_D3D_MANAGER,
+    MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromMediaSink,
+    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_ARGB32,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 use windows::core::HSTRING;
@@ -150,6 +151,7 @@ pub(crate) fn video_encoder_accepts(params: &EncoderParams) -> bool {
     ));
     let video_only = EncoderParams {
         audio_tracks: Vec::new(),
+        container: Container::Mp4,
         ..params.clone()
     };
     let answer = match RecordingWriter::try_new(&probe_path, &video_only) {
@@ -218,6 +220,20 @@ pub struct EncoderParams {
     /// Frames come as textures (`FrameData::Gpu`) rather than memory
     /// buffers -- see `encode::gpu`.
     pub gpu: Option<GpuInput>,
+    /// The file written -- see `Container`.
+    pub container: Container,
+}
+
+/// What kind of MP4 `RecordingWriter` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Container {
+    /// Media Foundation's MP4 sink: the file is indexed when it's
+    /// finalized, and can't be read at all until then.
+    #[default]
+    Mp4,
+    /// Fragmented, by PolyRec's own sink (see `encode::fmp4`): readable up
+    /// to its last fragment, whatever happens to the recording.
+    FragmentedMp4,
 }
 
 #[cfg(test)]
@@ -234,6 +250,7 @@ impl EncoderParams {
             audio_tracks: audio_tracks.to_vec(),
             allow_hardware_encode: false,
             gpu: None,
+            container: Container::Mp4,
         }
     }
 }
@@ -263,9 +280,23 @@ pub struct RecordingWriter {
     /// For frames that come as textures but go to the encoder through
     /// memory (see `write_read_back`).
     readback: Option<TextureReadback>,
+    /// PolyRec's own media sink, writing a fragmented MP4 (see
+    /// `Container`). After `writer`, so it shuts down once that's let go,
+    /// as the sink writer wants.
+    _own_sink: Option<OwnSink>,
     /// Declared last so it drops last -- `writer` must be released before
     /// Media Foundation shuts down (see `MfSession`).
     _mf: MfSession,
+}
+
+/// A media sink the sink writer was made from, shut down when dropped:
+/// the sink writer doesn't shut down one it was given.
+struct OwnSink(windows::Win32::Media::MediaFoundation::IMFMediaSink);
+
+impl Drop for OwnSink {
+    fn drop(&mut self) {
+        let _ = unsafe { self.0.Shutdown() };
+    }
 }
 
 impl RecordingWriter {
@@ -388,6 +419,7 @@ impl RecordingWriter {
             ref audio_tracks,
             allow_hardware_encode,
             ref gpu,
+            container,
         } = *params;
         let mf = MfSession::start()?;
         unsafe {
@@ -423,8 +455,18 @@ impl RecordingWriter {
                     .SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &gpu.frames.manager)
                     .encode_ctx("SetUnknown d3d_manager")?;
             }
-            let writer: IMFSinkWriter = MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
-                .encode_ctx("MFCreateSinkWriterFromURL")?;
+            let own_sink = match container {
+                Container::Mp4 => None,
+                Container::FragmentedMp4 => {
+                    Some(OwnSink(crate::encode::fmp4::sink::create(output_path)?))
+                }
+            };
+            let writer: IMFSinkWriter = match &own_sink {
+                None => MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
+                    .encode_ctx("MFCreateSinkWriterFromURL")?,
+                Some(sink) => MFCreateSinkWriterFromMediaSink(&sink.0, Some(&attrs))
+                    .encode_ctx("MFCreateSinkWriterFromMediaSink")?,
+            };
 
             let requested_subtype = match codec {
                 Codec::H265 => MFVideoFormat_HEVC,
@@ -464,6 +506,13 @@ impl RecordingWriter {
                 .map_err(WriterError::Rejected)?;
             let codec_api = video_codec_api(&writer, video_stream);
             let gop_set = codec_api.as_ref().is_some_and(|api| set_gop_size(api, fps));
+            if container == Container::FragmentedMp4
+                && let Some(api) = &codec_api
+            {
+                // Frames in decode order are frames in time order: the
+                // fragments' sample times need no reordering.
+                no_b_frames(api);
+            }
 
             let mut audio_streams = Vec::new();
             for (sample_rate, channels) in audio_tracks {
@@ -498,6 +547,7 @@ impl RecordingWriter {
                 input_size: (in_width, in_height),
                 takes_textures: std::cell::Cell::new(direct.is_some()),
                 readback,
+                _own_sink: own_sink,
                 _mf: mf,
             })
         }
@@ -662,6 +712,15 @@ fn video_codec_api(writer: &IMFSinkWriter, stream: u32) -> Option<ICodecAPI> {
 /// `KeyframeSchedule` expects them. Best-effort: the encoders measured default
 /// to one second's worth of frames anyway.
 /// Whether the encoder took `frames` as its GOP size.
+/// Asks the encoder for no B-frames. Best-effort, like `set_gop_size`: the
+/// encoders tried use none anyway.
+fn no_b_frames(api: &ICodecAPI) {
+    if let Err(e) = unsafe { api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0)) }
+    {
+        tracing::info!("video encoder kept its own B-frame count ({e})");
+    }
+}
+
 fn set_gop_size(api: &ICodecAPI, frames: u32) -> bool {
     match unsafe { api.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(frames)) } {
         Ok(()) => true,
@@ -1168,6 +1227,7 @@ mod tests {
                     audio_tracks: vec![],
                     allow_hardware_encode: true,
                     gpu: None,
+                    container: Container::Mp4,
                 };
                 if !video_encoder_accepts(&params) {
                     println!("{codec:?} {fps} fps: rejected by this PC's encoder");
@@ -1216,6 +1276,7 @@ mod tests {
                 audio_tracks: vec![],
                 allow_hardware_encode: true,
                 gpu: None,
+                container: Container::Mp4,
             };
             let output = dir.path().join(format!("{codec:?}_stepped.mp4"));
             let (writer, fps) =
@@ -1437,6 +1498,7 @@ mod tests {
                     size: CAPTURE,
                     direct: input != Input::ReadBack,
                 }),
+                container: Container::Mp4,
             };
             let writer = if input == Input::ReadBackAfterRefusalAtStart {
                 // An encoder that won't be set up for textures at all.
@@ -1531,6 +1593,7 @@ mod tests {
                 audio_tracks: vec![],
                 allow_hardware_encode: hardware,
                 gpu: None,
+                container: Container::Mp4,
             };
             let writer = RecordingWriter::new(&output, &params).expect("writer");
             writer.begin_writing().expect("begin_writing");

@@ -23,6 +23,18 @@ impl App {
             self.update_check_rx = None;
         }
 
+        // Recordings cut off last time, finished off the dashboard's thread
+        // (see `start_recovery`).
+        if let Some(rx) = &self.recovery_rx
+            && let Ok(recovered) = rx.try_recv()
+        {
+            self.recovery_rx = None;
+            if let Some(notice) = recovered_notice(&recovered, s) {
+                self.notices.push(notice);
+                self.refresh_recent();
+            }
+        }
+
         // Poll the add-app picker's background Start Menu scan -- see
         // `add_app.installed_rx`'s doc comment for why this isn't done
         // synchronously on the click that opens the picker.
@@ -286,6 +298,20 @@ fn needs_ui_while_minimized(minimized: bool, wanted: [bool; 2], up: [bool; 2]) -
 /// `{actual}`/`{expected}` placeholders.
 /// What a recording lost before it was stopped, if anything -- see
 /// `capture::LostSources`. `labels` names its audio tracks, in track order.
+/// The notice for recordings cut off last time and saved now (see
+/// `session::recovery`), if there are any.
+fn recovered_notice(recovered: &[std::path::PathBuf], s: &'static Strings) -> Option<String> {
+    let names: Vec<_> = recovered
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy())
+        .collect();
+    (!names.is_empty()).then(|| {
+        s.notice_recovered_template
+            .replace("{files}", &names.join(", "))
+    })
+}
+
 fn lost_sources_message(
     s: &Strings,
     lost: &crate::capture::LostSources,
@@ -357,6 +383,24 @@ fn recording_gave_up_message(s: &Strings, why: &str) -> String {
 mod tests {
     use super::*;
     use crate::i18n::Lang;
+
+    #[test]
+    fn recovered_recordings_are_named_in_one_notice() {
+        let s = Lang::En.strings();
+        assert_eq!(recovered_notice(&[], s), None);
+        let recovered = [
+            std::path::PathBuf::from(r"D:\videos\polyrec\game_2026-11-05-01-02-03_recovered.mp4"),
+            std::path::PathBuf::from(r"D:\videos\polyrec\app_2026-11-04-20-00-00_recovered.mp4"),
+        ];
+        let notice = recovered_notice(&recovered, s).unwrap();
+        assert!(
+            notice.contains(
+                "game_2026-11-05-01-02-03_recovered.mp4, app_2026-11-04-20-00-00_recovered.mp4"
+            ),
+            "{notice}"
+        );
+        assert!(!notice.contains("{files}"));
+    }
 
     #[test]
     fn fast_repaint_only_while_someone_can_see_the_animation() {

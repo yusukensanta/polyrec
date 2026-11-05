@@ -2,7 +2,7 @@ use crate::capture::CaptureControl;
 use crate::capture::audio::TrackCoverage;
 use crate::capture::frame_rate::LiveFps;
 use crate::disk_space::DiskSpaceGuard;
-use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter, VideoSlot};
+use crate::encode::{Container, EncoderParams, RecordingCommand, RecordingWriter, VideoSlot};
 use crate::error::{AppError, ResultExt};
 use crate::recording_naming::{RecordingNaming, reserve_finished_recording_path};
 use crate::types::{AudioLevel, AudioSamples, TrackId, VideoFrame};
@@ -132,10 +132,13 @@ impl Writes {
 ///
 /// Recording is written to `temp_path` throughout (Media Foundation's sink writer needs
 /// a fixed destination from the moment it opens the file, before the finish time is
-/// known). Once `finalize()` closes the file, it's renamed to whatever `naming`
-/// resolves to (see `reserve_finished_recording_path`) inside `output_dir` --
-/// resolved at finish time, not start time, since the default naming mode's
-/// timestamp should reflect when the recording actually finished.
+/// known), as a fragmented MP4 (`Container::FragmentedMp4`): one cut off -- PolyRec
+/// killed, a crash, a power cut -- reads back up to its last fragment, and is
+/// recovered at the next start (see `session::recovery`). Once `finalize()` closes the
+/// file, it's remuxed into a plain MP4 under whatever `naming` resolves to (see
+/// `reserve_finished_recording_path`) inside `output_dir` -- resolved at finish time,
+/// not start time, since the default naming mode's timestamp should reflect when the
+/// recording actually finished.
 ///
 /// Returns (command_sender, handle_resolving_to_the_final_renamed_path).
 pub fn spawn_recording_actor(
@@ -152,6 +155,11 @@ pub fn spawn_recording_actor(
 ) {
     let (tx, mut rx) = mpsc::channel::<RecordingCommand>(256);
 
+    let audio_tracks = params.audio_tracks.len();
+    let params = EncoderParams {
+        container: Container::FragmentedMp4,
+        ..params
+    };
     let handle = tokio::task::spawn_blocking(move || {
         // Creating the writer creates its file, so one that didn't start
         // leaves an empty file behind otherwise.
@@ -210,15 +218,11 @@ pub fn spawn_recording_actor(
             )?;
         // Replaces the empty file that reserved the name. On failure the
         // recording stays where it is, under its temporary name.
-        std::fs::rename(&finished_temp_path, &final_path)
-            .inspect_err(|_| {
+        crate::encode::fmp4::finish(&finished_temp_path, &final_path, audio_tracks).inspect_err(
+            |_| {
                 let _ = std::fs::remove_file(&final_path);
-            })
-            .encode_ctx(format_args!(
-                "failed to rename {} to {}",
-                finished_temp_path.display(),
-                final_path.display()
-            ))?;
+            },
+        )?;
         Ok(final_path)
     });
 
