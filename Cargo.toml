@@ -1,6 +1,6 @@
 [package]
 name = "polyrec"
-version = "0.5.156"
+version = "0.5.157"
 edition = "2024"
 # The toolchain rust-toolchain.toml pins. Also what the MSRV-aware resolver
 # picks dependency versions for, whichever toolchain runs `cargo update`.

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.157] - 2026-11-07
+
 ### Fixed
 
 - Made narrow, the dashboard cut off the right of its middle column — Browse and Open, and in Japanese the Audio button too — and when an update was offered, its button drew over the PolyRec title. The middle column now fits the window, the source panel gives way before it does, and the window can't be made narrower than what it shows needs, in either language, at any Windows text size; it widens itself when an update button appears.
