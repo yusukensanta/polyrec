@@ -231,7 +231,7 @@ impl App {
                 ui.label(caption(state_label, state_color).strong());
             });
 
-            ui.add_space(8.0);
+            ui.add_space(SPACE_NORMAL);
 
             // Large monospace timer
             ui.label(
@@ -245,7 +245,7 @@ impl App {
                 .color(pal().text_primary),
             );
 
-            ui.add_space(4.0);
+            ui.add_space(SPACE_TIGHT);
 
             // Recomputed only on a new elapsed second, not every frame --
             // see `RecordingStatusCache`.
@@ -281,7 +281,7 @@ impl App {
             ui.label(caption(stats.join("  ·  "), pal().text_muted))
                 .on_hover_text(s.recording_stats_tooltip);
 
-            ui.add_space(4.0);
+            ui.add_space(SPACE_TIGHT);
             ui.label(caption(
                 self.recording_status
                     .as_ref()
@@ -291,7 +291,7 @@ impl App {
 
             self.render_audio_meters(ui, is_paused);
         } else if self.finalizing.handle.is_some() {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_NORMAL);
             ui.label(
                 egui::RichText::new(s.saving_recording)
                     .size(text_px(TEXT_BODY))
@@ -300,7 +300,7 @@ impl App {
         } else if let Some(path) = self.last_recording.saved.clone() {
             self.render_export_controls(ui, s, &path);
         } else {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_NORMAL);
             ui.label(
                 egui::RichText::new(s.select_source_prompt)
                     .size(text_px(TEXT_BODY))
@@ -352,8 +352,8 @@ impl App {
         // the Audio button rather than always-visible in the source
         // panel -- without this, checking what's selected would mean
         // opening the popup every time.
-        let audio_selected_count = self.selected_audio.iter().filter(|&&b| b).count()
-            + self.selected_app_audio.iter().filter(|&&b| b).count();
+        let audio_selected_count =
+            self.selected_audio.iter().filter(|&&b| b).count() + self.app_audio_sources.len();
         ui.label(caption(
             if audio_selected_count == 0 {
                 s.no_audio_selected.to_string()
@@ -362,7 +362,7 @@ impl App {
             },
             pal().text_muted,
         ));
-        ui.add_space(8.0);
+        ui.add_space(SPACE_NORMAL);
 
         let row = folder_row(
             ui,
@@ -507,7 +507,7 @@ impl App {
     /// The bottom-anchored REC / STOP+pause / Resume row.
     fn render_action_row(&mut self, ui: &mut egui::Ui, s: &'static Strings, is_recording: bool) {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_NORMAL);
 
             let is_paused = self.session.is_paused();
 
@@ -719,7 +719,7 @@ impl App {
         ui.label(caption(s.recording_saved_label, pal().text_muted));
         ui.add_space(SPACE_TIGHT);
         ui.label(caption(path.to_string_lossy().as_ref(), pal().text_primary));
-        ui.add_space(8.0);
+        ui.add_space(SPACE_NORMAL);
 
         // Fewer than 2 tracks means there's nothing a track-selection export
         // could meaningfully remove -- the raw recording already IS the most
@@ -738,7 +738,7 @@ impl App {
 
         let track_groups = self.render_export_track_checkboxes(ui, s);
 
-        ui.add_space(8.0);
+        ui.add_space(SPACE_NORMAL);
 
         match export_status_and_actions(ui, s, &self.export.state, path) {
             ExportClick::Export => self.start_export(path, &track_groups),
@@ -781,13 +781,13 @@ fn export_status_and_actions(
                 export_path.to_string_lossy().as_ref(),
                 pal().text_primary,
             ));
-            ui.add_space(4.0);
+            ui.add_space(SPACE_TIGHT);
             folder_of = export_path;
         }
         ExportState::Failed(msg) => {
             section_header(ui, s.export_failed_header);
             ui.label(caption(msg.as_str(), pal().danger));
-            ui.add_space(4.0);
+            ui.add_space(SPACE_TIGHT);
         }
         ExportState::Idle => {}
     }
@@ -827,8 +827,6 @@ fn typed_output_dir(typed: &str, current: &Path) -> Option<PathBuf> {
     (!typed.is_empty() && dir != current).then_some(dir)
 }
 
-/// The message for an unusable output folder, shown under the folder and on
-/// a disabled REC.
 /// Why REC can't start a recording, if it can't: the last recording is
 /// still being saved, no source is selected, or the output folder can't be
 /// used. REC used to do nothing at all when clicked without a source, and
@@ -850,6 +848,8 @@ fn why_rec_is_blocked(
     }
 }
 
+/// The message for an unusable output folder, shown under the folder and on
+/// a disabled REC.
 fn output_dir_problem_text(problem: OutputDirProblem, s: &Strings) -> &'static str {
     match problem {
         OutputDirProblem::Unavailable => s.output_dir_unavailable,

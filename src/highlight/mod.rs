@@ -25,11 +25,6 @@ use tokio::task::JoinHandle;
 /// least 3 segments of trim granularity even at the minimum 30s buffer.
 pub const HIGHLIGHT_SEGMENT_SECONDS: u32 = 10;
 
-/// How often the rotation loop re-checks free disk space -- see
-/// `DiskSpaceGuard`'s doc comment for why this is on an interval, not every
-/// frame.
-const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-
 const HIGHLIGHT_CHANNEL_CAPACITY: usize = 256;
 
 /// Segment files are named `highlight_seg_<id>.mp4`; nothing else in the
@@ -153,7 +148,7 @@ pub fn spawn_highlight_actor(
     let handle = tokio::task::spawn_blocking(move || {
         let mut params = params;
         let segment_duration = Duration::from_secs(segment_seconds.max(1) as u64);
-        let mut disk_guard = DiskSpaceGuard::new(segment_dir.clone(), DISK_CHECK_INTERVAL);
+        let mut disk_guard = DiskSpaceGuard::new(segment_dir.clone());
         let mut writes = Writes::default();
 
         loop {

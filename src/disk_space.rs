@@ -22,29 +22,31 @@ pub const MIN_FREE_BYTES: u64 = 500 * 1024 * 1024;
 /// checking every frame would mean a syscall 30-60+ times a second for no
 /// benefit; a few seconds of lag between "disk went low" and "stopped" is
 /// fine given the goal is stopping before Media Foundation fails mid-write,
-/// not stopping at the exact byte it would have failed.
+/// not stopping at the exact byte it would have failed. Checks every
+/// `CHECK_INTERVAL`.
 pub struct DiskSpaceGuard {
     path: PathBuf,
-    interval: Duration,
     last_check: Instant,
 }
 
+/// How often a `DiskSpaceGuard` really checks.
+const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
 impl DiskSpaceGuard {
-    pub fn new(path: PathBuf, interval: Duration) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            interval,
             last_check: Instant::now(),
         }
     }
 
-    /// A no-op unless `interval` has elapsed since the last real check.
+    /// A no-op unless `CHECK_INTERVAL` has elapsed since the last real check.
     /// Returns `true` (and sets `disk_full_flag`) once free space on `path`
     /// drops below `MIN_FREE_BYTES` -- the caller should stop its write loop
     /// in that case. `context` (e.g. "recording", "highlight buffering") is
     /// folded into the log message so it's clear which loop stopped.
     pub fn should_stop(&mut self, disk_full_flag: &AtomicBool, context: &str) -> bool {
-        if self.last_check.elapsed() < self.interval {
+        if self.last_check.elapsed() < CHECK_INTERVAL {
             return false;
         }
         self.last_check = Instant::now();

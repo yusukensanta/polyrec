@@ -160,8 +160,8 @@ impl App {
     /// may have it -- what needs seeing to.
     pub(super) fn run_recording_checks(&mut self, s: &'static Strings) {
         let Some(active) = self.session.active() else {
-            let tracks = self.selected_audio.iter().filter(|&&on| on).count()
-                + self.selected_app_audio.iter().filter(|&&on| on).count();
+            let tracks =
+                self.selected_audio.iter().filter(|&&on| on).count() + self.app_audio_sources.len();
             let source = self.selected_source.and_then(|i| self.sources.get(i));
             let encode = self.encode_settings();
             self.rate_estimate.update(source, &encode, tracks);

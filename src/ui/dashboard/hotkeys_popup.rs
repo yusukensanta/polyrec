@@ -1,6 +1,6 @@
 use super::App;
 use super::state::Popup;
-use super::theme::{POPUP_WIDTH, pal};
+use super::theme::{POPUP_WIDTH, SPACE_NORMAL, pal};
 use super::widgets::{accent_button, caption, grid_section_header, popup_window};
 use crate::config::HotkeyConfig;
 use crate::hotkeys::HotkeyListener;
@@ -149,17 +149,17 @@ impl App {
                             .enumerate()
                             .any(|(i, a)| bindings.iter().skip(i + 1).any(|b| a == b));
                         if has_collision {
-                            ui.add_space(8.0);
+                            ui.add_space(SPACE_NORMAL);
                             ui.label(caption(s.hotkey_collision_warning, pal().warn));
                         }
 
                         if let Some(warning) = &self.hotkey_capture_warning {
-                            ui.add_space(8.0);
+                            ui.add_space(SPACE_NORMAL);
                             ui.label(caption(warning, pal().warn));
                         }
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
-                ui.add_space(8.0);
+                ui.add_space(SPACE_NORMAL);
                 if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
@@ -299,14 +299,11 @@ fn hotkey_combo(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
 
 /// Maps an egui key-press event (from the Hotkeys popup's "press any key to
 /// bind" capture) to the base-key string form `hotkeys::parse_hotkey` expects
-/// (modifiers are prefixed separately by the capture logic that calls this).
-/// Returns
-/// `None` for keys that can't be a standalone global hotkey binding: `Escape`
-/// (reserved as this capture flow's own cancel gesture) and bare modifier
-/// keys (Ctrl/Shift/Alt/Super alone aren't meaningful `RegisterHotKey`
-/// targets without a companion key -- this app only supports single-key,
-/// no-modifier bindings, matching `hotkeys::run_hotkey_loop`'s `MOD_NOREPEAT`
-/// -only registration).
+/// (`hotkey_combo` puts the held modifiers in front). Returns `None` for keys
+/// that can't be a hotkey's base key: `Escape` (reserved as this capture
+/// flow's own cancel gesture) and bare modifier keys (Ctrl/Shift/Alt/Super
+/// alone aren't meaningful `RegisterHotKey` targets without a key to go
+/// with).
 fn egui_key_to_hotkey_string(key: egui::Key) -> Option<&'static str> {
     use egui::Key;
     Some(match key {

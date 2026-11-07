@@ -6,7 +6,7 @@ pub mod state;
 pub use pipeline::{CaptureInputs, FpsSupport, estimated_bytes_per_sec, probe_fps_support};
 
 use crate::capture::frame_rate::LiveFps;
-use crate::config::{BitrateMode, Codec, EncoderMode, ResolutionMode};
+use crate::config::{BitrateMode, Codec, EncodeConfig, EncoderMode, ResolutionMode};
 use crate::encode::RecordingCommand;
 use crate::encode::actor::{StoppedItself, spawn_recording_actor};
 use crate::encode::highlight_export;
@@ -39,17 +39,22 @@ pub struct EncodeSettings {
     pub gpu_frames: bool,
 }
 
+impl From<&EncodeConfig> for EncodeSettings {
+    fn from(config: &EncodeConfig) -> Self {
+        Self {
+            codec: config.codec,
+            fps: config.fps(),
+            resolution_mode: config.resolution_mode(),
+            bitrate_mode: config.bitrate_mode(),
+            encoder_mode: config.encoder_mode,
+            gpu_frames: config.gpu_frames,
+        }
+    }
+}
+
 impl Default for EncodeSettings {
     fn default() -> Self {
-        let d = crate::config::Config::default().encode;
-        Self {
-            codec: d.codec,
-            fps: d.fps,
-            resolution_mode: d.resolution_mode(),
-            bitrate_mode: d.bitrate_mode(),
-            encoder_mode: d.encoder_mode,
-            gpu_frames: d.gpu_frames,
-        }
+        (&crate::config::Config::default().encode).into()
     }
 }
 
@@ -596,8 +601,22 @@ mod tests {
     use crate::types::{AppAudioSource, AudioDevice};
     use std::sync::atomic::Ordering;
 
-    /// Every device/app at unity gain with the default encode settings --
-    /// what the e2e tests below record with.
+    /// A recording is set up with the frame rate `Config` clamps to (see
+    /// `EncodeConfig::fps`), not the raw one -- the dashboard's settings and
+    /// the default ones alike.
+    #[test]
+    fn encode_settings_take_the_clamped_frame_rate() {
+        let config = EncodeConfig {
+            fps: 0,
+            ..crate::config::Config::default().encode
+        };
+        assert_eq!(EncodeSettings::from(&config).fps, 1);
+        assert_eq!(
+            EncodeSettings::default().fps,
+            crate::config::Config::default().encode.fps()
+        );
+    }
+
     /// A manual recording whose capture loop and recorder never finish --
     /// the shape of every recorder stall so far, like the still-window one
     /// fixed in #204.
@@ -641,6 +660,8 @@ mod tests {
         assert_eq!(state, SessionState::Idle);
     }
 
+    /// Every device/app at unity gain with the default encode settings --
+    /// what the e2e tests below record with.
     fn inputs(
         devices: Vec<AudioDevice>,
         app_sources: Vec<AppAudioSource>,

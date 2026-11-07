@@ -458,8 +458,7 @@ impl CapturePipeline {
                 move || async move {
                     match process_loopback_pid {
                         Some(pid) => {
-                            run_process_loopback_capture(pid, true, track_id, ctrl, audio_tx, gain)
-                                .await
+                            run_process_loopback_capture(pid, track_id, ctrl, audio_tx, gain).await
                         }
                         None => {
                             run_audio_capture(track_id, dev.is_loopback, ctrl, audio_tx, gain).await
@@ -517,9 +516,7 @@ impl CapturePipeline {
                 let capture = spawn_capture_thread(
                     format!("{log_prefix}AppAudioCapture[{track_id:?}] pid={target_pid}"),
                     move || {
-                        run_process_loopback_capture(
-                            target_pid, true, track_id, ctrl, audio_tx, gain,
-                        )
+                        run_process_loopback_capture(target_pid, track_id, ctrl, audio_tx, gain)
                     },
                 );
                 let level = self.new_audio_level();

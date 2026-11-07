@@ -222,27 +222,6 @@ fn audio_device_ids_changed(old: &[AudioDevice], new: &[AudioDevice]) -> bool {
     new_ids != old_ids
 }
 
-/// Display label for each audio track a recording with these sources will
-/// produce, in the same order `session::start_capture` assigns track ids
-/// (devices first, then app-audio sources) -- see
-/// `App::last_recording_audio_labels`'s field doc for why the export dialog
-/// needs this captured at record-start time instead of reading it back from
-/// the live device list.
-///
-/// One app source can expand to several tracks: `session::start_capture`
-/// spawns one capture task (and track id) per entry in
-/// `AppAudioSource::process_ids`, not one per source -- two genuinely
-/// independent top-level process trees of the same exe (e.g. two separate
-/// Chrome windows/profiles launched independently) each get their own track.
-/// A single app's own parent/child helper processes (e.g. Discord's
-/// GPU/renderer/utility processes) are already collapsed to one entry by
-/// `capture::audio::enumerate_app_audio_sessions`'s canonical_root_pid, so
-/// they don't multiply this list. Repeating the display
-/// name `process_ids.len()` times (zero for a registered-but-inactive
-/// source) keeps this list's length and order matching the real tracks
-/// exactly; emitting one label per source regardless of process count would
-/// desync every label after the first multi-process source from its actual
-/// track.
 /// What an audio track of a recording is called on screen: its source's
 /// name and, for a device, its 🔊/🎙 glyph -- kept apart so lists can draw
 /// the glyph in their icon column (`widgets::icon_slot`) and line the names
@@ -284,6 +263,27 @@ impl std::fmt::Display for TrackLabel {
     }
 }
 
+/// Display label for each audio track a recording with these sources will
+/// produce, in the same order `session::start_capture` assigns track ids
+/// (devices first, then app-audio sources) -- see
+/// `LastRecording::audio_labels`'s field doc for why the export dialog
+/// needs this captured at record-start time instead of reading it back from
+/// the live device list.
+///
+/// One app source can expand to several tracks: `session::start_capture`
+/// spawns one capture task (and track id) per entry in
+/// `AppAudioSource::process_ids`, not one per source -- two genuinely
+/// independent top-level process trees of the same exe (e.g. two separate
+/// Chrome windows/profiles launched independently) each get their own track.
+/// A single app's own parent/child helper processes (e.g. Discord's
+/// GPU/renderer/utility processes) are already collapsed to one entry by
+/// `capture::audio::enumerate_app_audio_sessions`'s canonical_root_pid, so
+/// they don't multiply this list. Repeating the display
+/// name `process_ids.len()` times (zero for a registered-but-inactive
+/// source) keeps this list's length and order matching the real tracks
+/// exactly; emitting one label per source regardless of process count would
+/// desync every label after the first multi-process source from its actual
+/// track.
 fn build_audio_labels<'a>(
     devices: impl IntoIterator<Item = &'a AudioDevice>,
     app_sources: impl IntoIterator<Item = &'a AppAudioSource>,
@@ -323,7 +323,7 @@ impl App {
     /// session each time, never from a copy taken earlier in the frame:
     /// several start/stop presses can be handled in one frame, each after
     /// the last one's start or stop.
-    fn has_recording(&self) -> bool {
+    pub(super) fn has_recording(&self) -> bool {
         self.session.is_recording() || self.session.is_paused()
     }
 
@@ -470,7 +470,6 @@ impl App {
         if app_audio_fingerprint(&new_app_audio_sources)
             != app_audio_fingerprint(&self.app_audio_sources)
         {
-            self.selected_app_audio = vec![true; new_app_audio_sources.len()];
             self.app_audio_sources = new_app_audio_sources;
             self.app_audio_icon_textures.clear();
         }
@@ -510,7 +509,6 @@ impl App {
     /// thing that poll's fingerprint actually watches for).
     pub(super) fn rebuild_app_audio_sources_now(&mut self) {
         self.app_audio_sources = build_app_audio_sources(&mut self.config);
-        self.selected_app_audio = vec![true; self.app_audio_sources.len()];
         self.app_audio_icon_textures.clear();
     }
 
@@ -554,14 +552,12 @@ impl App {
         let app_sources = self
             .app_audio_sources
             .iter()
-            .zip(self.selected_app_audio.iter())
-            .filter(|&(_, &sel)| sel)
-            .map(|(src, _)| (src.clone(), self.config.app_audio_gain(&src.exe_name)))
+            .map(|src| (src.clone(), self.config.app_audio_gain(&src.exe_name)))
             .collect();
         CaptureInputs {
             devices,
             app_sources,
-            app_audio_only: self.app_audio_only,
+            app_audio_only: self.config.default_app_audio_only,
             encode: self.encode_settings(),
         }
     }
@@ -569,14 +565,7 @@ impl App {
     /// `Config::encode` resolved into what a recording (and the Quality
     /// popup's fps probe) is configured with.
     pub(super) fn encode_settings(&self) -> EncodeSettings {
-        EncodeSettings {
-            codec: self.config.encode.codec,
-            fps: self.config.encode.fps(),
-            resolution_mode: self.config.encode.resolution_mode(),
-            bitrate_mode: self.config.encode.bitrate_mode(),
-            encoder_mode: self.config.encode.encoder_mode,
-            gpu_frames: self.config.encode.gpu_frames,
-        }
+        (&self.config.encode).into()
     }
 
     /// Resolves `Config::use_process_name_for_recording` /
@@ -613,7 +602,7 @@ impl App {
         match self.session.start_capture(
             source,
             inputs,
-            self.show_recording_border,
+            self.config.show_recording_border,
             Arc::clone(&self.frame_count),
             &self.config.output_dir,
             naming,
@@ -684,7 +673,7 @@ impl App {
         let now = Instant::now();
         let view = HighlightView {
             enabled: self.config.highlight.enabled,
-            recording: self.session.is_recording() || self.session.is_paused(),
+            recording: self.has_recording(),
             saving,
             following: self.session.highlight_hwnd(),
             front,

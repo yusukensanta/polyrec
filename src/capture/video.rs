@@ -34,10 +34,8 @@ use windows::core::{Interface, PCWSTR};
 
 /// A window or a monitor -- the two things Windows.Graphics.Capture can
 /// create a `GraphicsCaptureItem` for (`CreateForWindow` / `CreateForMonitor`
-/// respectively). Everything downstream of item creation (frame pool,
-/// encoding) is identical either way; this only matters at the one call site
-/// in each of `query_capture_size` and `run_video_capture` that creates the
-/// item itself.
+/// respectively). Everything downstream of creating the item
+/// (`create_item`) -- frame pool, encoding -- is identical either way.
 #[derive(Clone, Copy)]
 pub enum CaptureTarget {
     Window(HWND),
@@ -99,17 +97,14 @@ pub fn query_display_size(hwnd: HWND) -> Result<(u32, u32), AppError> {
     Ok((w, h))
 }
 
-/// Full bounds (not just size) of the monitor nearest `hwnd` -- used by the
-/// overlay HUD to position itself on whichever monitor the recorded window
-/// is actually on, instead of assuming the primary display.
-pub fn query_monitor_rect(hwnd: HWND) -> Result<windows::Win32::Foundation::RECT, AppError> {
+/// Full bounds (not just size) of the monitor nearest `hwnd` -- see
+/// `query_display_size`.
+fn query_monitor_rect(hwnd: HWND) -> Result<windows::Win32::Foundation::RECT, AppError> {
     unsafe { monitor_rect(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) }
 }
 
-/// Full bounds of `hmonitor` directly -- the `Monitor`-source counterpart to
-/// `query_monitor_rect`'s window-based lookup, used by the overlay HUD when
-/// the recording's own target already *is* a monitor (see
-/// `render_overlay_viewport`), so there's no window to resolve one from.
+/// Full bounds of `hmonitor` -- for `query_monitor_rect`, and for placing
+/// the HUDs on a monitor (`ui::dashboard::hud_place`).
 pub fn monitor_rect(hmonitor: HMONITOR) -> Result<windows::Win32::Foundation::RECT, AppError> {
     unsafe {
         let mut info = MONITORINFO {
@@ -162,12 +157,13 @@ pub fn display_refresh_hz(target: CaptureTarget) -> Option<u32> {
     }
 }
 
-/// Nearest-neighbor resize of an interleaved BGRA8 buffer. `run_video_capture` sizes
-/// the encoder to match the capture size 1:1, so this is normally a no-op; kept as a
-/// safety net for whatever mismatch might occur between the two. Takes `src` by value
-/// so the identity (common/default) path returns it straight back with no copy at
-/// all, instead of cloning a full frame (several MB at 1080p+) every frame for
-/// nothing -- only the actual mismatch path needs to allocate a new buffer.
+/// Nearest-neighbor resize of an interleaved BGRA8 buffer to the recording's
+/// size: a real resize for the Display and Custom resolution modes, the
+/// buffer handed straight back for Native (see
+/// `session::pipeline::resolve_output_size`). Takes `src` by value so that
+/// identity path returns it with no copy at all, instead of cloning a full
+/// frame (several MB at 1080p+) every frame for nothing -- only an actual
+/// resize allocates a new buffer.
 pub(crate) fn scale_bgra(
     src: FrameBuf,
     src_w: u32,
@@ -438,8 +434,9 @@ impl CaptureResources {
     /// loop in `run_video_capture` -- the GPU copy that filled the slot was
     /// issued a full iteration ago, so it has almost always already finished,
     /// and this way a miss returns `Ok(None)` instead of blocking the capture
-    /// thread on the GPU. Callers must not treat `Ok(None)` as "drop this
-    /// frame" -- see `read_back`.
+    /// thread on the GPU. A blocking Map (`map_flags` 0) always has the
+    /// frame. Callers must not treat `Ok(None)` as "drop this frame" -- see
+    /// `read_back`.
     unsafe fn map_staging(
         &self,
         slot: usize,
@@ -490,15 +487,16 @@ impl CaptureResources {
         slot: usize,
         nonblocking_first: bool,
         pool: &Arc<FramePool>,
-    ) -> Result<Option<FrameBuf>, AppError> {
+    ) -> Result<FrameBuf, AppError> {
         unsafe {
             if nonblocking_first
                 && let Some(pixel_data) =
                     self.map_staging(slot, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, pool)?
             {
-                return Ok(Some(pixel_data));
+                return Ok(pixel_data);
             }
-            self.map_staging(slot, 0, pool)
+            self.map_staging(slot, 0, pool)?
+                .ok_or_else(|| AppError::Capture("a blocking Map came back empty".into()))
         }
     }
 
@@ -548,7 +546,7 @@ pub fn capture_still(
     let read = copied.and_then(|()| unsafe { res.read_back(0, false, &FramePool::new()) });
     let border_left_out = res.border_as_asked;
     res.close();
-    let bgra = read?.ok_or_else(|| AppError::Capture("preview frame not read back".into()))?;
+    let bgra = read?;
     Ok(Still {
         bgra,
         width: size.0,
@@ -787,9 +785,8 @@ impl FrameOutput {
                 // blocks more than the original single-buffer implementation
                 // did on every frame; it only avoids the block when the GPU
                 // has already caught up.
-                if let Some(pts) = pending[read_idx].take()
-                    && let Some(pixel_data) = unsafe { res.read_back(read_idx, true, pool)? }
-                {
+                if let Some(pts) = pending[read_idx].take() {
+                    let pixel_data = unsafe { res.read_back(read_idx, true, pool)? };
                     return Ok(send_frame(tx, pts, pixel_data, capture_size, output_size).await);
                 }
                 Ok(true)
@@ -839,12 +836,10 @@ impl FrameOutput {
                     .and_then(|slot| pending[slot].take())
                     .unwrap_or(now);
                 match *newest_slot {
-                    Some(slot) => match unsafe { res.read_back(slot, false, pool)? } {
-                        Some(pixels) => {
-                            Ok(send_frame(tx, pts, pixels, capture_size, output_size).await)
-                        }
-                        None => Ok(true),
-                    },
+                    Some(slot) => {
+                        let pixels = unsafe { res.read_back(slot, false, pool)? };
+                        Ok(send_frame(tx, pts, pixels, capture_size, output_size).await)
+                    }
                     None => Ok(send_black_frame(pool, tx, pts, output_size).await),
                 }
             }
@@ -923,9 +918,8 @@ impl FrameOutput {
             .collect();
         leftover.sort_by_key(|(pts, _)| *pts);
         for (pts, idx) in leftover {
-            if let Some(pixel_data) = unsafe { res.read_back(idx, false, pool)? } {
-                let _ = send_frame(tx, pts, pixel_data, capture_size, output_size).await;
-            }
+            let pixel_data = unsafe { res.read_back(idx, false, pool)? };
+            let _ = send_frame(tx, pts, pixel_data, capture_size, output_size).await;
         }
         Ok(())
     }

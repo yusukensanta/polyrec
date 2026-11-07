@@ -1,5 +1,5 @@
 use super::App;
-use super::theme::{Palette, TEXT_BODY};
+use super::theme::{HUD_BACKDROP, TEXT_BODY};
 use crate::i18n::Strings;
 use crate::types::CaptureKind;
 use eframe::egui;
@@ -8,12 +8,15 @@ pub(super) fn overlay_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("polyrec_overlay")
 }
 
+/// The overlay HUD window's title, which also finds it again.
+const OVERLAY_TITLE: &str = "PolyRec Overlay";
+
 impl App {
     /// Whether the overlay HUD is up: recording or paused, with Overlay
     /// turned on. It used to vanish while paused, which looked the same as
     /// the recording having stopped.
     pub(super) fn overlay_visible(&self) -> bool {
-        (self.session.is_recording() || self.session.is_paused()) && self.overlay_enabled
+        self.has_recording() && self.config.overlay.enabled
     }
 
     /// Second OS window (click-through, always-on-top) showing a compact
@@ -77,7 +80,7 @@ impl App {
         self.overlay_window.show(
             ctx,
             overlay_viewport_id(),
-            hud_window("PolyRec Overlay").with_inner_size(size),
+            hud_window(OVERLAY_TITLE).with_inner_size(size),
             move |ctx| {
                 // CentralPanel::show(ctx, ...) is soft-deprecated in favor of
                 // show_inside(ui, ...), but this closure only ever receives a
@@ -87,7 +90,7 @@ impl App {
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::NONE
-                            .fill(Palette::DARK.bg_overlay)
+                            .fill(HUD_BACKDROP)
                             .inner_margin(6i8),
                     )
                     .show(ctx, |ui| {
@@ -113,10 +116,7 @@ impl App {
         // repaint happens to land right after the game's own re-assertion).
         // Re-asserting HWND_TOPMOST every frame the overlay is visible fights
         // that back instead of relying on a one-time flag.
-        keep_on_top_and_out_of_captures(
-            windows::core::w!("PolyRec Overlay"),
-            monitor.top_right(size, 10.0),
-        );
+        keep_on_top_and_out_of_captures(OVERLAY_TITLE, monitor.top_right(size, 10.0));
     }
 }
 
@@ -251,13 +251,13 @@ pub(super) fn show_viewport_immediate(
 /// pump on this same thread -- reentering winit's event handling from inside
 /// its own repaint reliably crashed the process in testing. The async flag
 /// posts the request instead of sending it, avoiding the reentrant call.
-pub(super) fn keep_on_top_and_out_of_captures(title: windows::core::PCWSTR, at: (i32, i32)) {
+pub(super) fn keep_on_top_and_out_of_captures(title: &str, at: (i32, i32)) {
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowW, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
         SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE,
     };
     unsafe {
-        let Ok(hwnd) = FindWindowW(None, title) else {
+        let Ok(hwnd) = FindWindowW(None, &windows::core::HSTRING::from(title)) else {
             return;
         };
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
@@ -282,7 +282,7 @@ mod tests {
     /// through them.
     #[test]
     fn hud_windows_never_take_focus() {
-        let window = hud_window("PolyRec Overlay");
+        let window = hud_window(OVERLAY_TITLE);
         assert_eq!(window.active, Some(false));
         assert_eq!(window.mouse_passthrough, Some(true));
     }

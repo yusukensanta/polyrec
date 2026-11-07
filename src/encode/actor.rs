@@ -13,11 +13,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
-/// How often the recording loop re-checks free disk space -- see
-/// `DiskSpaceGuard`'s doc comment for why this is on an interval, not every
-/// frame.
-const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-
 /// How long video writes may fail one after another, with none getting
 /// through, before the recorder gives up: an encoder or GPU that has given
 /// out (a driver reset, say) loses about this much video instead of the
@@ -169,7 +164,7 @@ pub fn spawn_recording_actor(
             })?;
         fps.set(settled_fps);
 
-        let mut disk_guard = DiskSpaceGuard::new(output_dir.clone(), DISK_CHECK_INTERVAL);
+        let mut disk_guard = DiskSpaceGuard::new(output_dir.clone());
         let mut wrote_any = false;
         let mut writes = Writes::default();
 

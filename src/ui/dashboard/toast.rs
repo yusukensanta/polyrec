@@ -5,12 +5,15 @@
 use super::App;
 use super::hud_place::HudMonitor;
 use super::overlay::{hud_window, keep_on_top_and_out_of_captures};
-use super::theme::{Palette, TEXT_BODY};
+use super::theme::{HUD_BACKDROP, TEXT_BODY};
 use crate::hotkeys::HotkeyEvent;
 use crate::i18n::Strings;
 use crate::types::SessionState;
 use eframe::egui;
 use std::time::{Duration, Instant};
+
+/// The toast window's title, which also finds it again.
+const TOAST_TITLE: &str = "PolyRec Toast";
 
 /// How long a toast stays up.
 const TOAST_DURATION: Duration = Duration::from_millis(1500);
@@ -113,7 +116,7 @@ impl App {
         self.toast_window.show(
             ctx,
             toast_viewport_id(),
-            hud_window("PolyRec Toast").with_inner_size(size),
+            hud_window(TOAST_TITLE).with_inner_size(size),
             move |ctx| {
                 // Same ctx-only form as the overlay HUD -- see the comment
                 // in `render_overlay_viewport`.
@@ -121,7 +124,7 @@ impl App {
                 egui::CentralPanel::default()
                     .frame(
                         egui::Frame::NONE
-                            .fill(Palette::DARK.bg_overlay)
+                            .fill(HUD_BACKDROP)
                             .corner_radius(6u8)
                             .inner_margin(egui::Margin::symmetric(12, 7)),
                     )
@@ -134,10 +137,7 @@ impl App {
                     });
             },
         );
-        keep_on_top_and_out_of_captures(
-            windows::core::w!("PolyRec Toast"),
-            monitor.top_centre(size, 40.0),
-        );
+        keep_on_top_and_out_of_captures(TOAST_TITLE, monitor.top_centre(size, 40.0));
     }
 }
 
