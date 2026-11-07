@@ -33,8 +33,8 @@ pub struct CaptureSource {
     pub kind: CaptureKind,
     /// 0 for `Monitor` -- a display isn't owned by any one process, so there's
     /// no PID to scope Process Loopback Capture ("App audio only") to. See
-    /// the `kind == CaptureKind::Window` gate on `use_process_loopback` in
-    /// `session::start_capture`.
+    /// the `CaptureKind::Window` gate on `loopback_scope_pid` in
+    /// `session::pipeline`.
     pub process_id: u32,
     /// Window title for `Window`; a display's own generated label (e.g.
     /// "🖥 Display 1 (2560×1440)") for `Monitor`.

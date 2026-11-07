@@ -94,10 +94,10 @@ pub(super) fn choice_row<R>(
 }
 
 pub(super) fn section_header(ui: &mut egui::Ui, title: &str) {
-    // 14pt: up from 10pt (too small to read comfortably as a section label),
-    // still clearly below the "PolyRec" heading's default 18pt so it reads as
+    // `TEXT_SUBTITLE`, muted: up from 10pt (too small to read comfortably as
+    // a section label), still clearly below the heading size so it reads as
     // a subordinate label, not competing with it.
-    ui.add_space(4.0);
+    ui.add_space(SPACE_TIGHT);
     ui.label(section_label(title));
     ui.add_space(SPACE_TIGHT);
     ui.separator();
@@ -120,9 +120,8 @@ pub(super) fn grid_section_header(ui: &mut egui::Ui, title: &str) {
     ui.separator();
 }
 
-/// Icon for an audio-device checkbox label — used in the source panel's
-/// device list, and by `actions::start_recording_with_source` to build the
-/// export dialog's per-track labels at record-start time.
+/// Icon for an audio-device checkbox label, in the Audio pop-up's device
+/// list.
 pub(super) fn audio_device_icon(dev: &AudioDevice) -> Icon {
     if dev.is_loopback {
         Icon::Speaker
@@ -182,7 +181,7 @@ pub(super) fn icon_slot(ui: &mut egui::Ui, icon: RowIcon) {
 /// checked row wider instead of taller, which doesn't fit well next to a
 /// device/app name in a 200-380px panel. Toggling a checkbox does change
 /// this section's content height (one row vs. two), but the section's own
-/// ScrollArea reserves a fixed height regardless (see render_source_panel),
+/// ScrollArea reserves a fixed height regardless (see `render_audio_popup`),
 /// so that never resizes the surrounding panel -- it just means less/more
 /// of the section's own scroll room is used.
 #[allow(clippy::too_many_arguments)] // icon + the config-save trio + the per-row identity trio are each independent, not a natural single struct

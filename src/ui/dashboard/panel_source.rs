@@ -1,6 +1,6 @@
 use super::App;
 use super::icons::Icon;
-use super::theme::{SPACE_GROUP, SPACE_NORMAL, TEXT_BODY, pal, text_px};
+use super::theme::{SPACE_GROUP, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY, pal, text_px};
 use super::widgets::{RowIcon, caption, icon_slot, section_header};
 use crate::i18n::Strings;
 use crate::sources::MONITOR_GLYPH;
@@ -38,7 +38,7 @@ impl App {
                         .hint_text(s.source_filter_placeholder)
                         .desired_width(f32::INFINITY),
                 );
-                ui.add_space(4.0);
+                ui.add_space(SPACE_TIGHT);
 
                 if self.sources.is_empty() {
                     ui.label(caption(s.no_windows_found, pal().text_muted));

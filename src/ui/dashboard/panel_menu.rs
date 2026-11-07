@@ -22,7 +22,7 @@ impl App {
                 ));
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.overlay_enabled {
+                    let label = if self.config.overlay.enabled {
                         s.overlay_on
                     } else {
                         s.overlay_off
@@ -32,13 +32,12 @@ impl App {
                         .on_hover_text(s.overlay_toggle_tooltip)
                         .clicked()
                     {
-                        self.overlay_enabled = !self.overlay_enabled;
-                        self.config.overlay.enabled = self.overlay_enabled;
+                        self.config.overlay.enabled = !self.config.overlay.enabled;
                         // Saved at once: it used to be saved only on the
                         // way out, so a crash forgot it.
                         self.save_config_or_report(s);
                     }
-                    let border_label = if self.show_recording_border {
+                    let border_label = if self.config.show_recording_border {
                         s.border_on
                     } else {
                         s.border_off
@@ -48,8 +47,7 @@ impl App {
                         .on_hover_text(s.border_toggle_tooltip)
                         .clicked()
                     {
-                        self.show_recording_border = !self.show_recording_border;
-                        self.config.show_recording_border = self.show_recording_border;
+                        self.config.show_recording_border = !self.config.show_recording_border;
                         self.save_config_or_report(s);
                     }
                     // Saved at once, like the language: it decides what the
@@ -108,7 +106,7 @@ impl App {
                             // `update_highlight_disabled_notice`'s doc comment
                             // for why `config.highlight.enabled` also gets
                             // cleared, not just the running session).
-                            if self.session.is_recording() || self.session.is_paused() {
+                            if self.has_recording() {
                                 self.notices.push(s.update_blocked_while_recording);
                             } else {
                                 if self.session.is_highlighting() {

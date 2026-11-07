@@ -1,7 +1,7 @@
 use super::App;
 use super::icons::Icon;
 use super::state::Popup;
-use super::theme::{POPUP_WIDTH, pal};
+use super::theme::{POPUP_WIDTH, SPACE_NORMAL, SPACE_TIGHT, pal};
 use super::widgets::{
     RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, popup_window,
     section_header,
@@ -65,14 +65,14 @@ impl App {
                     .show(ui, |ui| {
                         self.render_system_audio_rows(ui, s);
 
-                        ui.add_space(8.0);
+                        ui.add_space(SPACE_NORMAL);
                         self.render_app_audio_rows(ui, s);
 
-                        ui.add_space(8.0);
+                        ui.add_space(SPACE_NORMAL);
                         self.render_app_audio_only_toggle(ui, s);
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
-                ui.add_space(8.0);
+                ui.add_space(SPACE_NORMAL);
                 if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
@@ -148,7 +148,7 @@ impl App {
                 );
                 entry.insert(tex);
             }
-            let was_checked = self.selected_app_audio[i];
+            let mut checked = true;
             checkbox_with_volume_slider(
                 ui,
                 self.app_audio_icon_textures
@@ -157,7 +157,7 @@ impl App {
                 &mut self.config,
                 &mut self.error_message,
                 s.config_save_failed_prefix,
-                &mut self.selected_app_audio[i],
+                &mut checked,
                 src.display_name.clone(),
                 &Config::app_audio_gain_key(&src.exe_name),
                 Some(s.remove_registered_app_tooltip),
@@ -171,7 +171,7 @@ impl App {
             // (there's no "checked but idle" state to fall
             // back to -- being in this list at all already
             // means "record this").
-            if was_checked && !self.selected_app_audio[i] {
+            if !checked {
                 self.config.unregister_app_audio(&src.exe_name);
                 self.save_config_or_report(s);
                 self.rebuild_app_audio_sources_now();
@@ -226,7 +226,7 @@ impl App {
         ui.add_enabled_ui(loopback_selected && selected_is_window, |ui| {
             let response = ui
                 .checkbox(
-                    &mut self.app_audio_only,
+                    &mut self.config.default_app_audio_only,
                     egui::RichText::new(s.app_audio_only_label).color(pal().link),
                 )
                 .on_hover_text(if !has_loopback_device {
@@ -238,10 +238,9 @@ impl App {
                 } else {
                     s.tooltip_app_audio_only
                 });
-            // Persisted as the default for next launch (and thus what a
-            // hotkey-started recording uses) -- same pattern as overlay_enabled.
+            // Saved at once: it's what the next recording uses, a
+            // hotkey-started one too, and the default at next launch.
             if response.changed() {
-                self.config.default_app_audio_only = self.app_audio_only;
                 self.save_config_or_report(s);
             }
         });
@@ -266,7 +265,7 @@ impl App {
                 .hint_text(s.add_app_search_placeholder)
                 .desired_width(f32::INFINITY),
         );
-        ui.add_space(4.0);
+        ui.add_space(SPACE_TIGHT);
 
         let filter = self.add_app.search.to_lowercase();
         let candidates = self.add_app_candidates(&filter);
@@ -296,7 +295,7 @@ impl App {
             self.register_app_and_close_picker(exe_name, exe_path, s);
         }
 
-        ui.add_space(4.0);
+        ui.add_space(SPACE_TIGHT);
         ui.horizontal(|ui| {
             if ui
                 .add(accent_button(s.add_app_browse_button, pal().link))

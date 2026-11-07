@@ -62,7 +62,7 @@ impl App {
 
     /// The Recent list, while nothing is recording.
     pub(super) fn render_recent(&self, ui: &mut egui::Ui, s: &'static Strings) {
-        if self.recent.is_empty() || self.session.is_recording() || self.session.is_paused() {
+        if self.recent.is_empty() || self.has_recording() {
             return;
         }
         ui.add_space(SPACE_TIGHT);

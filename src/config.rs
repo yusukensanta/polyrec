@@ -3,6 +3,9 @@ use crate::i18n::Lang;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The smallest the dashboard can be made (logical points).
+pub const MIN_WINDOW_SIZE: (f32, f32) = (620.0, 450.0);
+
 /// Persisted settings (`config.toml`).
 ///
 /// Every struct here is `#[serde(default)]` at the container level: any
@@ -10,9 +13,6 @@ use std::path::{Path, PathBuf};
 /// existed, or a hand-edited one -- falls back to that field's own default
 /// instead of failing the whole load, so adding a setting never needs a
 /// per-field `#[serde(default = ...)]` again.
-/// The smallest the dashboard can be made (logical points).
-pub const MIN_WINDOW_SIZE: (f32, f32) = (620.0, 450.0);
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -324,14 +324,14 @@ impl EncodeConfig {
         }
     }
 
-    /// Clamped to `[1, 240]` -- the UI only ever writes 30 or 60, but unlike
+    /// Clamped to `[1, 240]` -- the UI only writes one of
+    /// `capture::frame_rate::FPS_PRESETS` (30 up to 240), but unlike
     /// `resolution_mode()`/`bitrate_mode()`'s inputs, raw `fps` was never
     /// guarded, so a hand-edited `config.toml` with `fps = 0` divided by
     /// zero on the very first frame of every recording (see
     /// `encode::writer::RecordingWriter::write_video`'s duration_hns
-    /// calculation). 240 is a generous ceiling, not a real target -- just
-    /// keeps a wildly-out-of-range value from producing a degenerate
-    /// per-frame duration either.
+    /// calculation). 240, the highest preset, also keeps a wildly
+    /// out-of-range value from producing a degenerate per-frame duration.
     pub fn fps(&self) -> u32 {
         self.fps.clamp(1, 240)
     }
@@ -481,6 +481,14 @@ impl Config {
         self.registered_app_audio.retain(|a| a.exe_name != exe_name);
     }
 
+    /// `window_size` if it's still worth restoring: no smaller than the
+    /// window may be made (`MIN_WINDOW_SIZE`), and not absurdly large.
+    pub fn sane_window_size(&self) -> Option<(f32, f32)> {
+        self.window_size.filter(|&(w, h)| {
+            (MIN_WINDOW_SIZE.0..20_000.0).contains(&w) && (MIN_WINDOW_SIZE.1..20_000.0).contains(&h)
+        })
+    }
+
     /// `window_position` if it's still worth restoring, `None` otherwise.
     ///
     /// This is a loose sanity floor, not real multi-monitor validation --
@@ -493,14 +501,6 @@ impl Config {
     /// accepted, undetected edge case; Windows' own window-placement
     /// recovery (right-click taskbar icon -> Move, or Win+Shift+Arrow) is the
     /// fallback for it, same as for any other app.
-    /// `window_size` if it's still worth restoring: no smaller than the
-    /// window may be made (`MIN_WINDOW_SIZE`), and not absurdly large.
-    pub fn sane_window_size(&self) -> Option<(f32, f32)> {
-        self.window_size.filter(|&(w, h)| {
-            (MIN_WINDOW_SIZE.0..20_000.0).contains(&w) && (MIN_WINDOW_SIZE.1..20_000.0).contains(&h)
-        })
-    }
-
     pub fn sane_window_position(&self) -> Option<(f32, f32)> {
         // Symmetric and generous in both directions -- a monitor placed to
         // the left of (or above) the primary is common and puts the window

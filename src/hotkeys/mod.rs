@@ -213,9 +213,10 @@ fn parse_base_key(s: &str) -> Option<VIRTUAL_KEY> {
 /// Parses a full binding string: zero or more `"CTRL"`/`"ALT"`/`"SHIFT"`
 /// segments joined by `+`, followed by exactly one base key recognized by
 /// [`parse_base_key`] (e.g. `"F9"`, `"CTRL+F9"`, `"CTRL+ALT+SHIFT+A"`).
-/// Segment order doesn't matter and matching is case-insensitive. Returns
-/// `None` if the base key is missing/unrecognized, or the same modifier is
-/// repeated. Windows' own Super/Win key isn't supported as a modifier here --
+/// Segment order doesn't matter, matching is case-insensitive, and a
+/// repeated modifier counts once (`CTRL+CTRL+F9` is `CTRL+F9`). Returns
+/// `None` if the base key is missing/unrecognized, or a modifier isn't one
+/// of those. Windows' own Super/Win key isn't supported as a modifier here --
 /// egui doesn't expose it as a held-modifier flag the way Ctrl/Alt/Shift are
 /// (see `egui::Modifiers`), only as a standalone key, which is a poor global
 /// hotkey component anyway (Win+key combos are frequently OS-reserved).

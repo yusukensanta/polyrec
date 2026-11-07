@@ -66,8 +66,7 @@ impl App {
                 HotkeyEvent::StartStop => self.handle_hotkey_start_stop(s),
                 HotkeyEvent::Pause => self.handle_pause_button(),
                 HotkeyEvent::ToggleOverlay => {
-                    self.overlay_enabled = !self.overlay_enabled;
-                    self.config.overlay.enabled = self.overlay_enabled;
+                    self.config.overlay.enabled = !self.config.overlay.enabled;
                     self.save_config_or_report(s);
                 }
                 HotkeyEvent::SaveHighlight => self.handle_save_highlight_hotkey(s),
@@ -77,7 +76,7 @@ impl App {
                 event,
                 &before,
                 self.session.state(),
-                self.overlay_enabled,
+                self.config.overlay.enabled,
                 highlight_saving,
                 s,
             ) {
@@ -161,12 +160,6 @@ impl App {
         }
     }
 
-    // Takes `&mut egui::Ui` (the root Ui from App::ui), not `&egui::Context` --
-    // Panel's old ctx-based top-level `.show(ctx, ...)` (what
-    // TopBottomPanel/SidePanel used to be deprecated aliases for) was removed
-    // entirely in egui 0.35; the replacement needs an existing Ui to nest
-    // inside. CentralPanel takes the same shape for consistency.
-
     pub(super) fn request_repaints(&self, ctx: &egui::Context) {
         // Unconditional, independent of every other state below -- without
         // this, refresh_sources_and_audio_if_due's 2s timer only actually
@@ -235,11 +228,11 @@ impl App {
 
     /// One-shot-per-recording check: has the achieved frame rate
     /// (frame_count / elapsed) fallen persistently short of the configured
-    /// target? The "frames" counter next to "tracks" in the status panel is
-    /// a real throughput signal -- it only increments once a frame clears
-    /// the whole pipeline through to the recording channel -- but nothing
-    /// previously surfaced a sustained shortfall to the user; it just
-    /// silently degraded. Waits past WARMUP_SECS before checking, so brief
+    /// target? The fps the status panel shows is a real throughput signal --
+    /// a frame only counts once it clears the whole pipeline through to the
+    /// recording channel -- but nothing previously surfaced a sustained
+    /// shortfall to the user; it just silently degraded. Waits past `WARMUP`
+    /// before checking, so brief
     /// startup/encoder-warmup noise (and the first few seconds of a normal
     /// recording, where elapsed is small enough for count/elapsed to be
     /// noisy) doesn't false-positive.
@@ -291,13 +284,6 @@ fn needs_ui_while_minimized(minimized: bool, wanted: [bool; 2], up: [bool; 2]) -
     minimized && wanted.into_iter().zip(up).any(|(wanted, up)| wanted && !up)
 }
 
-/// `None` when `actual >= expected` (nothing missing, or the recording
-/// legitimately ended up with more tracks than expected -- see
-/// `track_label_fallback`'s doc comment for that case, which this doesn't
-/// need to warn about). Otherwise fills in `s.audio_tracks_missing_template`'s
-/// `{actual}`/`{expected}` placeholders.
-/// What a recording lost before it was stopped, if anything -- see
-/// `capture::LostSources`. `labels` names its audio tracks, in track order.
 /// The notice for recordings cut off last time and saved now (see
 /// `session::recovery`), if there are any.
 fn recovered_notice(recovered: &[std::path::PathBuf], s: &'static Strings) -> Option<String> {
@@ -312,6 +298,8 @@ fn recovered_notice(recovered: &[std::path::PathBuf], s: &'static Strings) -> Op
     })
 }
 
+/// What a recording lost before it was stopped, if anything -- see
+/// `capture::LostSources`. `labels` names its audio tracks, in track order.
 fn lost_sources_message(
     s: &Strings,
     lost: &crate::capture::LostSources,
@@ -362,6 +350,11 @@ fn fps_shortfall(frames: u64, elapsed: std::time::Duration, target_fps: f64) -> 
     (achieved < target_fps * SHORTFALL_THRESHOLD).then_some(achieved)
 }
 
+/// `None` when `actual >= expected` (nothing missing, or the recording
+/// legitimately ended up with more tracks than expected -- see
+/// `track_label_fallback`'s doc comment for that case, which this doesn't
+/// need to warn about). Otherwise fills in `s.audio_tracks_missing_template`'s
+/// `{actual}`/`{expected}` placeholders.
 fn audio_tracks_missing_message(s: &Strings, actual: usize, expected: usize) -> Option<String> {
     if actual >= expected {
         return None;

@@ -11,9 +11,8 @@ use windows::Win32::Media::Audio::{
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
     IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
-    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-    WAVEFORMATEX, eCapture, eConsole, eMultimedia, eRender,
+    MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, eCapture, eConsole, eMultimedia, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -459,12 +458,11 @@ impl CoTaskMem<u16> {
     }
 }
 
-/// Capture only the audio produced by `target_pid` (and, if `include_tree`, its child
-/// processes) via the Windows 10 2004+ Process Loopback Capture API, instead of the
-/// full desktop audio mix. Forwards PCM f32 samples to `tx`, same as `run_audio_capture`.
+/// Capture only the audio produced by `target_pid` and its child processes via the
+/// Windows 10 2004+ Process Loopback Capture API, instead of the full desktop audio
+/// mix. Forwards PCM f32 samples to `tx`, same as `run_audio_capture`.
 pub async fn run_process_loopback_capture(
     target_pid: u32,
-    include_tree: bool,
     track_id: TrackId,
     ctrl: CaptureControl,
     tx: mpsc::Sender<AudioSamples>,
@@ -472,7 +470,7 @@ pub async fn run_process_loopback_capture(
 ) -> Result<(), AppError> {
     crate::com::join_mta();
     unsafe {
-        let audio_client = activate_process_loopback_audio_client(target_pid, include_tree)?;
+        let audio_client = activate_process_loopback_audio_client(target_pid)?;
 
         // Process loopback is a synthesized stream with no natural device mix format,
         // so we pick the format ourselves — matches our fixed encoder target directly,
@@ -649,11 +647,7 @@ impl TrackCoverage {
 
     /// `samples` were sent for the track.
     pub(crate) fn on_samples(&mut self, samples: &AudioSamples) {
-        let frames = samples.samples.len() / usize::from(samples.channels.max(1));
-        let duration = std::time::Duration::from_nanos(
-            frames as u64 * 1_000_000_000 / u64::from(samples.sample_rate.max(1)),
-        );
-        self.silence.on_packet(samples.pts, duration);
+        self.silence.on_packet(samples.pts, samples.duration());
     }
 
     /// Silence for the track's gap up to recording time `now`, once there's
@@ -1271,14 +1265,12 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationCompletionHandl
 /// recording with no second chance.
 unsafe fn activate_process_loopback_audio_client(
     target_pid: u32,
-    include_tree: bool,
 ) -> Result<IAudioClient, AppError> {
     const ACTIVATION_ATTEMPTS: u32 = 3;
     const ACTIVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     for attempt in 1..=ACTIVATION_ATTEMPTS {
-        let result = unsafe {
-            try_activate_process_loopback_audio_client(target_pid, include_tree, ACTIVATION_TIMEOUT)
-        }?;
+        let result =
+            unsafe { try_activate_process_loopback_audio_client(target_pid, ACTIVATION_TIMEOUT) }?;
         if let Some(client) = result {
             return Ok(client);
         }
@@ -1299,7 +1291,6 @@ unsafe fn activate_process_loopback_audio_client(
 /// failed, or the returned interface not actually being an `IAudioClient`).
 unsafe fn try_activate_process_loopback_audio_client(
     target_pid: u32,
-    include_tree: bool,
     timeout: std::time::Duration,
 ) -> Result<Option<IAudioClient>, AppError> {
     unsafe {
@@ -1308,11 +1299,7 @@ unsafe fn try_activate_process_loopback_audio_client(
             Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                 ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
                     TargetProcessId: target_pid,
-                    ProcessLoopbackMode: if include_tree {
-                        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
-                    } else {
-                        PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
-                    },
+                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
                 },
             },
         };
@@ -1586,8 +1573,7 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ =
-                    run_process_loopback_capture(pid, true, TrackId::new(0), capture_ctrl, tx, 1.0)
-                        .await;
+                    run_process_loopback_capture(pid, TrackId::new(0), capture_ctrl, tx, 1.0).await;
             });
         });
 

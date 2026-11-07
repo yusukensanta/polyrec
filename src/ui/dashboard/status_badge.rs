@@ -152,12 +152,11 @@ pub(super) fn small_icon_size() -> u32 {
 /// `size`: the size drawn for it in the .ico, rather than a scaled one.
 /// `None` if it can't be read, e.g. in a build without the resource.
 pub(super) fn app_icon_pixels(size: u32) -> Option<Pixels> {
-    const APP_ICON_RESOURCE: usize = 1;
     unsafe {
         let module = GetModuleHandleW(None).ok()?;
         let handle = LoadImageW(
             Some(module.into()),
-            PCWSTR(APP_ICON_RESOURCE as *const u16),
+            PCWSTR(usize::from(super::tray::APP_ICON_RESOURCE) as *const u16),
             IMAGE_ICON,
             size as i32,
             size as i32,

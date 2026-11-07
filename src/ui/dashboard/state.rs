@@ -38,7 +38,7 @@ pub(super) enum SelfUpdateState {
 /// `refresh_free_space`) rather than on every frame -- `GetDiskFreeSpaceExW`
 /// is fast, but there's no reason to make a syscall 30-60+ times a second for
 /// a number that only meaningfully changes over seconds, same reasoning as
-/// the recording loop's own `DISK_CHECK_INTERVAL`.
+/// the recording loop's own `DiskSpaceGuard`.
 #[derive(Default)]
 pub(super) struct FreeSpaceCache {
     pub bytes: Option<u64>,
@@ -149,11 +149,13 @@ pub(super) struct ExportUi {
     pub result_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
 }
 
-impl ExportUi {
-    pub(super) fn new(track_selection: Vec<bool>) -> Self {
+/// Nothing to export until a recording finishes: its tracks are counted
+/// and all selected then (see `background.rs`).
+impl Default for ExportUi {
+    fn default() -> Self {
         Self {
             available_tracks: 0,
-            track_selection,
+            track_selection: Vec::new(),
             mix_tracks: false,
             state: ExportState::Idle,
             result_rx: None,

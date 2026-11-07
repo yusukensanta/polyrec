@@ -61,21 +61,13 @@ pub struct App {
     /// Curated from `config.registered_app_audio`, not auto-populated from
     /// whatever's currently making sound -- see
     /// `actions::build_app_audio_sources`'s doc comment. Every entry here is
-    /// registered by construction, so `selected_app_audio` is always `true`
-    /// for each one; there's no separate "checked but not registered" state.
+    /// registered by construction and recorded; unchecking one in the Audio
+    /// pop-up unregisters it, so there's no "listed but not recorded" state.
     app_audio_sources: Vec<AppAudioSource>,
-    selected_app_audio: Vec<bool>,
     /// Keyed by index into `app_audio_sources` -- same convention and same
     /// "clear on any list change, rebuild lazily" lifecycle as
     /// `source_icon_textures`.
     app_audio_icon_textures: std::collections::HashMap<usize, egui::TextureHandle>,
-    app_audio_only: bool,
-    overlay_enabled: bool,
-    /// Whether Windows' own colored capture-border indicator shows around
-    /// the recorded window/monitor during a manual recording -- see
-    /// `Config::show_recording_border`'s doc comment. Toggled via the menu
-    /// bar button next to Overlay, and saved at once, like it.
-    show_recording_border: bool,
     /// The settings pop-up that's open -- see `Popup`.
     popup: Popup,
     /// What the Quality popup knows about the fps the selected source can
@@ -85,11 +77,8 @@ pub struct App {
     frame_count: Arc<AtomicU64>,
     /// Set once per recording after the achieved fps (frame_count / elapsed)
     /// has been checked against the configured target and found persistently
-    /// short -- the "frames" counter next to "tracks" is a real throughput
-    /// signal (it only increments once a frame clears the whole pipeline
-    /// through to the recording channel), but nothing previously surfaced a
-    /// sustained shortfall to the user; it just silently degraded. One-shot
-    /// per recording so it doesn't re-fire every frame once triggered.
+    /// short (see `check_fps_shortfall`). One-shot per recording so it
+    /// doesn't re-fire every frame once triggered.
     fps_shortfall_warned: bool,
     /// The next recording's estimated rate, for the free-space line.
     rate_estimate: checks::RateEstimate,
@@ -146,8 +135,8 @@ pub struct App {
     tray: Option<tray::Tray>,
     /// Windows' text size setting, followed while running.
     text_scale: Option<theme::TextScaleWatch>,
-    /// Windows' theme (light, dark, high contrast), accent colour and
-    /// animation setting, followed while running.
+    /// Windows' theme (light, dark, high contrast) and animation setting,
+    /// followed while running.
     theme_watch: theme::ThemeWatch,
     /// The window's size and whether it's maximized, saved on exit (like
     /// `last_window_pos`).
@@ -240,14 +229,10 @@ impl App {
         {
             crate::encode::gpu::GpuFrames::warm_up();
         }
-        let overlay_enabled = config.overlay.enabled;
-        let show_recording_border = config.show_recording_border;
-        let app_audio_only = config.default_app_audio_only;
         let output_dir_input = config.output_dir.to_string_lossy().into_owned();
         let output_dir_problem = util::output_dir_problem(&config.output_dir);
         let recent = recent::recent_recordings(&config.output_dir, recent::RECENT_LIMIT);
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
-        let n = audio_devices.len();
         // Restores the user's last saved SYSTEM audio selection if there is
         // one; otherwise defaults to loopback (system/game audio) only. The
         // MP4 container's physical stream order doesn't follow AddStream()
@@ -260,11 +245,8 @@ impl App {
         let selected_audio = actions::resolve_selected_audio(&audio_devices, &config);
         // Curated entirely by config -- see `actions::build_app_audio_sources`'s
         // doc comment for why this doesn't auto-populate from whatever's
-        // currently making sound. Every entry is registered by
-        // construction, so it's always checked.
+        // currently making sound.
         let app_audio_sources = actions::build_app_audio_sources(&mut config);
-        let selected_app_audio = vec![true; app_audio_sources.len()];
-        let initial_track_selection = vec![true; n];
         let hotkey_listener = hotkeys_popup::spawn_hotkey_listener(&config.hotkeys, &cc.egui_ctx);
         let wake_ctx = cc.egui_ctx.clone();
         let tray = tray::Tray::new(move || wake_ctx.request_repaint())
@@ -299,11 +281,7 @@ impl App {
             audio_devices,
             selected_audio,
             app_audio_sources,
-            selected_app_audio,
             app_audio_icon_textures: std::collections::HashMap::new(),
-            app_audio_only,
-            overlay_enabled,
-            show_recording_border,
             popup: Popup::None,
             fps_support: FpsSupportProbe::default(),
             source_icon_textures: std::collections::HashMap::new(),
@@ -347,7 +325,7 @@ impl App {
             add_app: AddAppPicker::default(),
             free_space: FreeSpaceCache::default(),
             finalizing: Finalizing::default(),
-            export: ExportUi::new(initial_track_selection),
+            export: ExportUi::default(),
             highlight_save: HighlightSave::default(),
             highlight_retry: HighlightRetry::default(),
             self_update: SelfUpdate::default(),
@@ -365,10 +343,6 @@ impl App {
     }
 }
 
-/// Whether a request to close the window hides PolyRec in the tray instead
-/// of quitting: the user asked for that (`close_to_tray`), there's a tray
-/// icon to bring it back from, and PolyRec isn't closing its own window to
-/// quit (`App::quit`) -- egui reports that as a close request too.
 /// Saves the recordings cut off last time -- PolyRec killed, a crash, a
 /// power cut -- in `output_dir`'s `polyrec` folder (see
 /// `session::recovery`), on a thread of its own: each is remuxed, which
@@ -390,6 +364,10 @@ fn start_recovery(output_dir: &std::path::Path) -> Option<mpsc::Receiver<Vec<std
     Some(rx)
 }
 
+/// Whether a request to close the window hides PolyRec in the tray instead
+/// of quitting: the user asked for that (`close_to_tray`), there's a tray
+/// icon to bring it back from, and PolyRec isn't closing its own window to
+/// quit (`App::quit`) -- egui reports that as a close request too.
 fn close_button_hides(close_to_tray: bool, has_tray: bool, quitting: bool) -> bool {
     close_to_tray && has_tray && !quitting
 }
@@ -498,9 +476,8 @@ impl eframe::App for App {
             h.stop();
         }
         // Covers both a normal close and the close a successful self-update
-        // triggers (dashboard.rs's ViewportCommand::Close after
-        // perform_self_update returns Ok) -- no special-casing needed in
-        // self_update.rs itself.
+        // triggers (`App::quit` once perform_self_update returns Ok) -- no
+        // special-casing needed in self_update.rs itself.
         if let Some(pos) = self.last_window_pos {
             self.config.window_position = Some((pos.x, pos.y));
             if let Some(size) = self.last_window_size {

@@ -62,9 +62,6 @@ pub(super) struct Palette {
     pub(super) success: egui::Color32,
     /// A level meter's bar below -12 dBFS (`warn`, then `danger`, above).
     pub(super) meter: egui::Color32,
-    /// The recording HUD overlay's translucent backdrop (premultiplied
-    /// alpha). The HUDs sit over games, so they're dark in every theme.
-    pub(super) bg_overlay: egui::Color32,
     /// Whether egui's dark widgets are the base.
     pub(super) dark: bool,
 }
@@ -103,7 +100,6 @@ impl Palette {
         warn_bg: rgb(0x2a, 0x22, 0x19),
         success: rgb(0x5d, 0xd3, 0x9e),
         meter: rgb(0x8b, 0x91, 0xff),
-        bg_overlay: egui::Color32::from_rgba_premultiplied(20, 20, 20, 200),
         dark: true,
     };
 
@@ -136,7 +132,6 @@ impl Palette {
         warn_bg: rgb(0xff, 0xf4, 0xe0),
         success: rgb(0x1f, 0x7a, 0x45),
         meter: rgb(0x4b, 0x50, 0xd6),
-        bg_overlay: Self::DARK.bg_overlay,
         dark: false,
     };
 
@@ -171,7 +166,6 @@ impl Palette {
             warn_bg,
             success,
             meter,
-            bg_overlay,
             dark,
         } = self;
         Self {
@@ -202,7 +196,6 @@ impl Palette {
             warn_bg: f(warn_bg),
             success: f(success),
             meter: f(meter),
-            bg_overlay: f(bg_overlay),
             dark,
         }
     }
@@ -260,7 +253,6 @@ impl Palette {
             warn_bg: c.window,
             success: c.window_text,
             meter: c.highlight,
-            bg_overlay: Self::DARK.bg_overlay,
             dark: luminance(c.window) < 0.5,
         }
     }
@@ -286,6 +278,12 @@ fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
+/// The HUDs' translucent backdrop (premultiplied alpha): the recording
+/// overlay's and the toast's. They sit over games, so they're dark whatever
+/// the theme.
+pub(super) const HUD_BACKDROP: egui::Color32 =
+    egui::Color32::from_rgba_premultiplied(20, 20, 20, 200);
+
 /// Windows' own colours for a high-contrast theme (`GetSysColor`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct SystemColors {
@@ -293,8 +291,6 @@ pub(super) struct SystemColors {
     pub(super) window_text: egui::Color32,
     pub(super) highlight: egui::Color32,
     pub(super) highlight_text: egui::Color32,
-    pub(super) button_face: egui::Color32,
-    pub(super) button_text: egui::Color32,
     pub(super) hotlight: egui::Color32,
 }
 
@@ -402,8 +398,8 @@ impl ThemeWatch {
 /// Windows' own colours, if a high-contrast theme is on.
 fn system_high_contrast() -> Option<SystemColors> {
     use windows::Win32::Graphics::Gdi::{
-        COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_HOTLIGHT,
-        COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
+        COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_HOTLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+        GetSysColor,
     };
     use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -435,8 +431,6 @@ fn system_high_contrast() -> Option<SystemColors> {
         window_text: color(COLOR_WINDOWTEXT),
         highlight: color(COLOR_HIGHLIGHT),
         highlight_text: color(COLOR_HIGHLIGHTTEXT),
-        button_face: color(COLOR_BTNFACE),
-        button_text: color(COLOR_BTNTEXT),
         hotlight: color(COLOR_HOTLIGHT),
     })
 }
@@ -971,8 +965,6 @@ mod palette_tests {
             window_text: white,
             highlight: cyan,
             highlight_text: black,
-            button_face: black,
-            button_text: white,
             hotlight: yellow,
         };
         // Whatever Windows' theme is, high contrast wins.

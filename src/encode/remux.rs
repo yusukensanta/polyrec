@@ -100,11 +100,9 @@ pub(crate) const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 /// Copies compressed samples from every stream `reader` has selected into
 /// `writer`, mapping each source stream index to its sink stream index via
 /// `source_to_sink`, until all `total_streams` enabled source streams have
-/// reported end-of-stream. Shared by `do_remux`'s pure-passthrough copy and
-/// `do_export_grouped`'s video+passthrough-audio portion (its separately
-/// merged/transcoded audio groups are written afterward, in their own loop
-/// -- they're PCM chunks, not samples read from a reader, so they don't fit
-/// this shape).
+/// reported end-of-stream. `do_remux`'s pure-passthrough copy; `export_pass`
+/// has a loop of its own, as it interleaves its merged PCM chunks with the
+/// passthrough samples by time, which this shape can't.
 unsafe fn copy_passthrough_samples(
     reader: &IMFSourceReader,
     writer: &IMFSinkWriter,
@@ -748,7 +746,7 @@ unsafe fn wait_for_encoder(writer: &IMFSinkWriter, stream: u32) {
 }
 
 /// A sink writer with `MF_SINK_WRITER_DISABLE_THROTTLING` (see the comment
-/// at `do_export_grouped`'s call site) and hardware transforms enabled.
+/// at its call site in `export_pass`) and hardware transforms enabled.
 unsafe fn create_unthrottled_sink_writer(output_url: &HSTRING) -> Result<IMFSinkWriter, AppError> {
     unsafe {
         let mut attrs_opt: Option<IMFAttributes> = None;

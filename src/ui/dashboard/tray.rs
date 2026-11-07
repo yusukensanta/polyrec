@@ -1,7 +1,8 @@
 //! The notification-area (tray) icon. Clicking it brings the dashboard up;
 //! its menu shows or hides the dashboard, starts or stops a recording and
 //! quits -- so PolyRec can stay out of the taskbar while it waits for a
-//! hotkey. Closing the dashboard still quits, as before.
+//! hotkey. Closing the dashboard quits, or hides it here instead with
+//! `Config::close_to_tray` on.
 
 use super::App;
 use super::status_badge::{Badge, Pixels, app_icon_pixels, small_icon_size, tray_icon_with};
@@ -13,7 +14,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 /// The application icon `build.rs` embeds (winresource's default id).
-const APP_ICON_RESOURCE: u16 = 1;
+pub(super) const APP_ICON_RESOURCE: u16 = 1;
 
 /// Longest source title the Start item shows before cutting it off.
 const MAX_SOURCE_CHARS: usize = 40;
@@ -246,7 +247,7 @@ impl App {
                     self.set_dashboard_shown(ctx, !shown);
                 }
                 TrayAction::StartStop => {
-                    let can_stop = self.session.is_recording() || self.session.is_paused();
+                    let can_stop = self.has_recording();
                     if can_stop || self.rec_blocked_reason(s).is_none() {
                         self.handle_rec_button();
                     }

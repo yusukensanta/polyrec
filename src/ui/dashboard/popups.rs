@@ -1,6 +1,6 @@
 use super::App;
 use super::state::{Escape, Popup, SelfUpdateState, escape_target};
-use super::theme::{POPUP_WIDTH, TEXT_BODY, pal, text_px};
+use super::theme::{POPUP_WIDTH, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY, pal, text_px};
 use super::util::{open_url, take_if_finished};
 use super::widgets::{
     accent_button, caption, choice_row, popup_window, primary_button, section_header,
@@ -106,7 +106,7 @@ impl App {
 
     /// Quality popup: the Highlight section.
     fn render_highlight_settings(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
-        ui.add_space(4.0);
+        ui.add_space(SPACE_TIGHT);
         section_header(ui, s.highlight_header);
         ui.checkbox(
             &mut self.config.highlight.enabled,
@@ -192,7 +192,7 @@ impl App {
             .show(ctx, |ui| {
                 // Caps the popup's height below a typical app window's, so a
                 // short window (or more settings added later) scrolls instead
-                // of forcing the popup taller than its parent. 480 (not the
+                // of forcing the popup taller than its parent. 520 (not the
                 // original 400) -- found via a live check that 400 already
                 // clipped the default (no Custom resolution, no Manual
                 // bitrate) content, hiding the Auto/Manual bitrate choice and
@@ -206,7 +206,7 @@ impl App {
                         self.render_highlight_settings(ui, s);
                     }); // end settings ScrollArea -- Close button stays outside so it's never scrolled out of view
 
-                ui.add_space(8.0);
+                ui.add_space(SPACE_NORMAL);
                 if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                     close = true;
                 }
@@ -266,7 +266,7 @@ impl App {
                     .size(text_px(TEXT_BODY))
                     .color(pal().danger),
             );
-            ui.add_space(8.0);
+            ui.add_space(SPACE_NORMAL);
             if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                 close = true;
             }
@@ -289,7 +289,11 @@ impl App {
             SelfUpdateState::Idle => {}
             SelfUpdateState::Confirming(update) => {
                 let update = update.clone();
-                let mut action: Option<&str> = None;
+                enum Choice {
+                    Now,
+                    NotNow,
+                }
+                let mut action = None;
                 popup_window(ctx, s.update_confirm_title).show(ctx, |ui| {
                     ui.label(
                         egui::RichText::new(format!(
@@ -299,18 +303,18 @@ impl App {
                         .size(text_px(TEXT_BODY))
                         .color(pal().text_primary),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_TIGHT);
                     ui.label(caption(s.update_confirm_uac_note, pal().text_muted));
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_NORMAL);
                     ui.horizontal(|ui| {
                         if ui.add(primary_button(s.update_now_button)).clicked() {
-                            action = Some("now");
+                            action = Some(Choice::Now);
                         }
                         if ui
                             .add(accent_button(s.update_not_now_button, pal().link))
                             .clicked()
                         {
-                            action = Some("not_now");
+                            action = Some(Choice::NotNow);
                         }
                     });
                     if ui.link(s.update_view_release_notes).clicked() {
@@ -318,15 +322,15 @@ impl App {
                     }
                 });
                 match action {
-                    Some("now") => {
+                    Some(Choice::Now) => {
                         let version = update.version;
                         self.self_update.handle = Some(tokio::spawn(
                             crate::self_update::perform_self_update(version),
                         ));
                         self.self_update.state = SelfUpdateState::Working;
                     }
-                    Some("not_now") => self.self_update.state = SelfUpdateState::Idle,
-                    _ => {}
+                    Some(Choice::NotNow) => self.self_update.state = SelfUpdateState::Idle,
+                    None => {}
                 }
             }
             SelfUpdateState::Working => {
@@ -347,7 +351,7 @@ impl App {
                             .size(text_px(TEXT_BODY))
                             .color(pal().danger),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_NORMAL);
                     if ui.add(accent_button(s.close_button, pal().link)).clicked() {
                         close = true;
                     }

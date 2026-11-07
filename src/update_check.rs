@@ -89,10 +89,10 @@ mod tests {
 
     /// Hits the real GitHub API. Ignored by default since it needs network — run
     /// manually with `--ignored --nocapture`. Doesn't assert `Some`/`None` since
-    /// that depends on whether this repo has a published release at run time
-    /// (currently it doesn't — GET .../releases/latest 404s, which this function
-    /// treats as "no update" by design); this just proves the request completes
-    /// and the client is built correctly, without panicking or hanging.
+    /// that depends on the latest published release at run time (a repo with
+    /// none 404s, which this function treats as "no update" by design); this
+    /// just proves the request completes and the client is built correctly,
+    /// without panicking or hanging.
     #[tokio::test]
     #[ignore]
     async fn check_for_update_reaches_real_github_api() {
