@@ -1,4 +1,5 @@
 use super::App;
+use super::icons::{add_named, name_for};
 use super::state::Popup;
 use super::theme::{POPUP_WIDTH, SPACE_NORMAL, pal};
 use super::widgets::{accent_button, caption, grid_section_header, popup_window};
@@ -234,10 +235,14 @@ impl App {
                     .strong()
                     .color(pal().text_primary),
             );
-            if ui
-                .add(accent_button(s.hotkey_change_button, pal().link))
-                .on_hover_text(s.hotkey_change_tooltip)
-                .clicked()
+            if add_named(
+                ui,
+                true,
+                accent_button(s.hotkey_change_button, pal().link),
+                &name_for(s.hotkey_change_button, header),
+            )
+            .on_hover_text(s.hotkey_change_tooltip)
+            .clicked()
             {
                 self.recording_hotkey = Some(slot);
                 self.hotkey_capture_warning = None;

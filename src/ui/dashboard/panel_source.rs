@@ -1,7 +1,9 @@
 use super::App;
 use super::icons::Icon;
 use super::theme::{SPACE_GROUP, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY, pal, text_px};
-use super::widgets::{RowIcon, caption, icon_slot, section_header};
+use super::widgets::{
+    RowIcon, cached_icon_texture, caption, icon_slot, matches_search, section_header,
+};
 use crate::i18n::Strings;
 use crate::sources::MONITOR_GLYPH;
 use eframe::egui;
@@ -16,11 +18,7 @@ impl App {
             .sources
             .iter()
             .enumerate()
-            .filter(|(_, src)| {
-                filter.is_empty()
-                    || src.window_title.to_lowercase().contains(&filter)
-                    || src.exe_name.to_lowercase().contains(&filter)
-            })
+            .filter(|(_, src)| matches_search(&filter, &[&src.window_title, &src.exe_name]))
             .map(|(i, _)| i)
             .collect();
         filtered_indices
@@ -85,21 +83,13 @@ impl App {
                                 pal().border
                             };
 
-                            if let std::collections::hash_map::Entry::Vacant(entry) =
-                                self.source_icon_textures.entry(i)
-                                && let Some((rgba, w, h)) = &source.icon_rgba
-                            {
-                                let image = egui::ColorImage::from_rgba_unmultiplied(
-                                    [*w as usize, *h as usize],
-                                    rgba,
-                                );
-                                let tex = ui.ctx().load_texture(
-                                    format!("source_icon_{i}"),
-                                    image,
-                                    egui::TextureOptions::LINEAR,
-                                );
-                                entry.insert(tex);
-                            }
+                            let icon_texture = cached_icon_texture(
+                                ui.ctx(),
+                                &mut self.source_icon_textures,
+                                i,
+                                || format!("source_icon_{i}"),
+                                source.icon_rgba.as_ref(),
+                            );
 
                             let inner = egui::Frame::NONE
                                 .fill(fill)
@@ -112,21 +102,18 @@ impl App {
                                         // A display's title starts with its
                                         // glyph; it goes in the icon column
                                         // instead, lined up with windows'.
-                                        let (icon, title) =
-                                            match source.window_title.strip_prefix(MONITOR_GLYPH) {
-                                                Some(title) => (
-                                                    RowIcon::Icon(Icon::Monitor),
-                                                    title.trim_start(),
-                                                ),
-                                                None => (
-                                                    self.source_icon_textures
-                                                        .get(&i)
-                                                        .map_or(RowIcon::None, |tex| {
-                                                            RowIcon::Image(tex.id())
-                                                        }),
-                                                    source.window_title.as_str(),
-                                                ),
-                                            };
+                                        let (icon, title) = match source
+                                            .window_title
+                                            .strip_prefix(MONITOR_GLYPH)
+                                        {
+                                            Some(title) => {
+                                                (RowIcon::Icon(Icon::Monitor), title.trim_start())
+                                            }
+                                            None => (
+                                                icon_texture.map_or(RowIcon::None, RowIcon::Image),
+                                                source.window_title.as_str(),
+                                            ),
+                                        };
                                         icon_slot(ui, icon);
                                         ui.vertical(|ui| {
                                             ui.label(

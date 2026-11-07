@@ -153,9 +153,25 @@ pub(super) fn add_named(
     response
 }
 
+/// What a screen reader calls one of several buttons that do the same thing
+/// (`action`) each to something else (`subject`): "Start / Stop: Change"
+/// rather than four "Change"s.
+pub(super) fn name_for(action: &str, subject: &str) -> String {
+    format!("{subject}: {action}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buttons_alike_are_named_by_what_they_act_on() {
+        assert_eq!(name_for("Change", "Start / Stop"), "Start / Stop: Change");
+        assert_eq!(
+            name_for("Play", "game_2026-11-07.mp4"),
+            "game_2026-11-07.mp4: Play"
+        );
+    }
 
     #[test]
     fn the_windows_11_icon_font_is_preferred_then_windows_10_s() {
