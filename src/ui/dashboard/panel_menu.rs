@@ -10,6 +10,7 @@ impl App {
     pub(super) fn render_menu_bar(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
+                let row = ui.available_width();
                 ui.heading("PolyRec");
                 // Single source of truth for the app's version: Cargo.toml's `version`
                 // field, baked in at compile time. Never hardcode a version string
@@ -21,7 +22,13 @@ impl App {
                     pal().text_muted,
                 ));
                 ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The title and the buttons, side by side: right-aligned,
+                // the buttons draw over the title when the window is too
+                // narrow for both, so the window is kept wide enough (see
+                // `min_width`).
+                let title = ui.min_rect().width() + ui.spacing().item_spacing.x;
+                let right_to_left = egui::Layout::right_to_left(egui::Align::Center);
+                let buttons = ui.with_layout(right_to_left, |ui| {
                     let label = if self.config.overlay.enabled {
                         s.overlay_on
                     } else {
@@ -120,6 +127,9 @@ impl App {
                         }
                     }
                 });
+                let buttons = buttons.response.rect.width();
+                self.min_width
+                    .menu(ui.ctx().content_rect().width(), row, title + buttons);
             });
         });
     }

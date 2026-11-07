@@ -148,8 +148,20 @@ impl App {
             // (status text, the two settings buttons, the output-dir row) has
             // a natural width well under this; without the cap, widening the
             // window just reopens empty right-side space rather than the
-            // window becoming more useful.
-            ui.set_max_width(440.0);
+            // window becoming more useful. No wider than there's room for:
+            // `set_max_width` sets the width outright, and 440 in a
+            // narrower window ran the content off its edge.
+            let space = ui.available_width();
+            let width = space.min(440.0);
+            ui.set_max_width(width);
+            let key = (
+                self.config.lang(),
+                (ui.ctx().global_style().text_styles[&egui::TextStyle::Body].size
+                    * ui.ctx().pixels_per_point()
+                    * 100.0) as u32,
+            );
+            self.min_width
+                .centre(key, ui.ctx().content_rect().width(), space);
             // The REC row gets its own bottom panel, so it keeps its space
             // however tall the content above gets (e.g. a finished
             // recording's export controls); that content scrolls instead.
@@ -162,7 +174,7 @@ impl App {
                 .show_separator_line(true)
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.render_action_row(ui, s, is_recording));
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            let content = egui::ScrollArea::vertical().show(ui, |ui| {
                 self.render_notice(ui, s);
                 section_header(ui, s.status_header);
 
@@ -175,6 +187,13 @@ impl App {
                 self.render_status_box(ui, s);
                 self.render_recent(ui, s);
             });
+            // A row that can't shrink makes the content wider than it was
+            // laid out: the window is kept wide enough for it.
+            self.min_width.centre_content(
+                width,
+                content.inner_rect.width(),
+                content.content_size.x,
+            );
         });
     }
 
