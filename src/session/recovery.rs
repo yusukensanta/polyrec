@@ -14,7 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Recovers the recordings in `polyrec_dir` cut off before `before` -- this
 /// start: one begun since is being written. The files they're saved as.
 /// A leftover that can't be read (one from before recordings were written
-/// fragmented, cut off with nothing readable) stays as it is.
+/// fragmented, cut off with nothing readable) stays as it is, as does one
+/// still open: another copy of PolyRec recording into it.
 pub fn recover_cut_off_recordings(polyrec_dir: &Path, before: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(polyrec_dir) else {
         return Vec::new();
@@ -30,6 +31,10 @@ pub fn recover_cut_off_recordings(polyrec_dir: &Path, before: SystemTime) -> Vec
             continue;
         };
         if started >= before {
+            continue;
+        }
+        if in_use(&path) {
+            tracing::info!("left {}: it's being written", path.display());
             continue;
         }
         match recover(&path, &app, started, polyrec_dir) {
@@ -60,7 +65,7 @@ fn remove_cut_off_finishes(polyrec_dir: &Path) {
         let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".tmp.mp4")) else {
             continue;
         };
-        if cut_off_recording(&name).is_some() {
+        if cut_off_recording(&name).is_some() || in_use(&entry.path()) {
             continue;
         }
         let reserved = polyrec_dir.join(format!("{stem}.mp4"));
@@ -70,6 +75,18 @@ fn remove_cut_off_finishes(polyrec_dir: &Path) {
             let _ = std::fs::remove_file(&reserved);
         }
     }
+}
+
+/// Whether something has `path` open, so it can't be opened for this
+/// process alone: another copy of PolyRec (an installed and a portable one
+/// can run side by side) recording into it, or finishing a recording.
+fn in_use(path: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .is_err()
 }
 
 /// The app and start (ms since the epoch) of a recording's temporary file,
@@ -147,6 +164,62 @@ mod tests {
         }
         let files = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(files, 3, "nothing else left behind");
+    }
+
+    /// Another copy of PolyRec (an installed one and a portable one run
+    /// side by side) is recording into the same folder: its file, open, is
+    /// left alone, not finished from under it.
+    #[test]
+    fn a_recording_still_being_written_is_left_alone() {
+        use crate::encode::RecordingWriter;
+        use crate::encode::fmp4::tests::{params, record};
+
+        let dir = tempfile::tempdir().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(60);
+        let name = format!("game_recording_{}.tmp.mp4", millis(started));
+        let being_written = dir.path().join(&name);
+        let writer = RecordingWriter::new(&being_written, &params()).expect("writer");
+        writer.begin_writing().unwrap();
+        record(&writer, 3, false);
+
+        let recovered = recover_cut_off_recordings(dir.path(), SystemTime::now());
+        writer.finalize().expect("finalize");
+        assert!(recovered.is_empty(), "{recovered:?}");
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(files, [name.as_str()]);
+    }
+
+    /// Another copy of PolyRec is finishing a recording: the remux it's
+    /// writing and the name it reserved stay.
+    #[test]
+    fn a_finish_still_being_written_is_left_alone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(60);
+        record_fragmented(
+            &dir.path()
+                .join(format!("game_recording_{}.tmp.mp4", millis(started))),
+        );
+        let reserved = dir.path().join("game_2026-11-05-01-00-00.mp4");
+        std::fs::write(&reserved, b"").unwrap();
+        let partial = dir.path().join("game_2026-11-05-01-00-00.tmp.mp4");
+        let _writing = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(&partial)
+            .unwrap();
+
+        assert_eq!(
+            recover_cut_off_recordings(dir.path(), SystemTime::now()).len(),
+            1
+        );
+        assert!(reserved.exists() && partial.exists());
     }
 
     /// PolyRec quit while finishing a long recording, the save on exit

@@ -85,7 +85,7 @@ pub(crate) mod tests {
 
     const TRACKS: [(u32, u16); 2] = [(48_000, 2), (48_000, 1)];
 
-    fn params() -> EncoderParams {
+    pub(crate) fn params() -> EncoderParams {
         EncoderParams {
             container: Container::FragmentedMp4,
             ..EncoderParams::tiny_test(Codec::H264, &TRACKS)
@@ -94,7 +94,7 @@ pub(crate) mod tests {
 
     /// `seconds` of 30 fps video and both tracks' audio (10 ms packets, as
     /// WASAPI's), in real time if `realtime`.
-    fn record(writer: &RecordingWriter, seconds: u64, realtime: bool) {
+    pub(crate) fn record(writer: &RecordingWriter, seconds: u64, realtime: bool) {
         let started = Instant::now();
         for frame in 0..seconds * 30 {
             let pts = Duration::from_millis(frame * 1000 / 30);
@@ -304,6 +304,25 @@ pub(crate) mod tests {
         assert!(!fragmented.exists());
         assert!(top_level(&dest).contains(&"moof".to_owned()));
         assert_holds_three_seconds_of_everything(&read_back(&dest));
+    }
+
+    /// Nothing else -- another copy of PolyRec, say -- can delete or write
+    /// to a recording while it's being written; reading it is fine.
+    #[test]
+    fn a_recording_being_written_is_held_for_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app_recording_1.tmp.mp4");
+        let writer = RecordingWriter::new(&path, &params()).expect("writer");
+        writer.begin_writing().unwrap();
+        record(&writer, 2, false);
+
+        let deleted = std::fs::remove_file(&path);
+        let written = std::fs::OpenOptions::new().append(true).open(&path);
+        let read = std::fs::File::open(&path);
+        writer.finalize().expect("finalize");
+        assert!(deleted.is_err(), "deleted while being written");
+        assert!(written.is_err(), "opened for writing twice");
+        assert!(read.is_ok(), "can't be read: {read:?}");
     }
 
     /// HEVC from a hardware encoder at 1080p -- what most recordings are,

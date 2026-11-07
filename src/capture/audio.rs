@@ -1208,14 +1208,18 @@ async unsafe fn run_capture_loop(
                     break StreamEnd::Lost;
                 }
                 Err(e) => {
-                    let since = *failing_since.get_or_insert_with(std::time::Instant::now);
+                    let since = *failing_since.get_or_insert_with(|| {
+                        tracing::warn!(
+                            "AudioCapture[{track_id:?}]: GetBuffer failed ({e}); trying again for up to {GET_BUFFER_FAILING_FOR:?}"
+                        );
+                        std::time::Instant::now()
+                    });
                     if since.elapsed() >= GET_BUFFER_FAILING_FOR {
                         tracing::error!(
                             "AudioCapture[{track_id:?}]: GetBuffer kept failing ({e}), giving up on this stream"
                         );
                         break StreamEnd::Lost;
                     }
-                    tracing::warn!("GetBuffer error: {e}");
                     tokio::time::sleep(IDLE_POLL).await;
                 }
             }

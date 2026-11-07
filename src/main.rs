@@ -10,6 +10,7 @@ mod error;
 mod highlight;
 mod hotkeys;
 mod i18n;
+mod logging;
 mod recording_naming;
 mod restart;
 mod self_update;
@@ -28,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const SAVE_ON_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn main() -> eframe::Result<()> {
-    tracing_subscriber::fmt::init();
+    logging::init();
     crash_log::install(ui::is_caught_on_purpose);
     let started = std::time::Instant::now();
     let restarted = restart::Reason::of_this_start(std::env::args());

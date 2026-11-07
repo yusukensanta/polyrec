@@ -28,6 +28,12 @@ pub struct Muxer<W: Write> {
     video: Option<usize>,
     pending: Vec<Vec<Sample>>,
     sequence: u32,
+    /// The last video sample's time: the samples' order is taken for their
+    /// order in time, which B-frames would break (the writer makes sure the
+    /// encoder uses none, as far as it can tell).
+    last_video_time: Option<i64>,
+    /// Whether a video sample has come before the one ahead of it in time.
+    reordered: bool,
 }
 
 impl<W: Write> Muxer<W> {
@@ -44,6 +50,8 @@ impl<W: Write> Muxer<W> {
             tracks,
             video,
             sequence: 0,
+            last_video_time: None,
+            reordered: false,
         })
     }
 
@@ -51,6 +59,15 @@ impl<W: Write> Muxer<W> {
     /// given to `new`), writing the fragment before it first if it starts
     /// the next.
     pub fn push(&mut self, track: usize, sample: Sample) -> io::Result<()> {
+        if Some(track) == self.video {
+            if !self.reordered && self.last_video_time.is_some_and(|last| sample.time < last) {
+                self.reordered = true;
+                tracing::warn!(
+                    "video frames out of time order (B-frames?): the recording's timing is off"
+                );
+            }
+            self.last_video_time = Some(sample.time);
+        }
         if Some(track) == self.video
             && let Some(first) = self.pending[track].first()
             && (sample.keyframe || sample.time - first.time >= MAX_FRAGMENT_HNS)

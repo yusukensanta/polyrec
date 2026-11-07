@@ -1,79 +1,57 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::time::Duration;
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
+/// The recording's clock: time since it started, less the time spent
+/// paused. Capture threads stamp video frames and audio with its readings
+/// while the UI pauses and resumes it, so the pause state is read and
+/// changed under one lock: a reading racing `resume()` can't see the
+/// pause ended but not yet subtracted, and jump ahead by its length.
+/// (`Instant` is the performance counter on Windows.)
 pub struct RecordingClock {
-    start_ticks: i64,
-    frequency: i64,
-    /// Total nanoseconds spent paused so far.
-    accumulated_paused_nanos: AtomicU64,
-    /// QPC ticks at the moment pause() was called; 0 means not paused.
-    pause_tick: AtomicI64,
+    started: Instant,
+    paused: Mutex<Paused>,
+}
+
+#[derive(Default)]
+struct Paused {
+    /// When `pause()` was called; `None` while running.
+    since: Option<Instant>,
+    /// Time spent paused before that.
+    total: Duration,
 }
 
 impl RecordingClock {
     pub fn new() -> Arc<Self> {
-        let mut frequency = 0i64;
-        let mut ticks = 0i64;
-        unsafe {
-            QueryPerformanceFrequency(&mut frequency)
-                .expect("QueryPerformanceFrequency failed — requires Windows XP+");
-            QueryPerformanceCounter(&mut ticks)
-                .expect("QueryPerformanceCounter failed — requires Windows XP+");
-        }
         Arc::new(Self {
-            start_ticks: ticks,
-            frequency,
-            accumulated_paused_nanos: AtomicU64::new(0),
-            pause_tick: AtomicI64::new(0),
+            started: Instant::now(),
+            paused: Mutex::default(),
         })
+    }
+
+    fn paused(&self) -> MutexGuard<'_, Paused> {
+        self.paused.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Freeze the clock. Idempotent — calling twice without resume in between is harmless.
     pub fn pause(&self) {
-        let mut now = 0i64;
-        unsafe {
-            QueryPerformanceCounter(&mut now).expect("QueryPerformanceCounter failed");
-        }
-        // Only store if not already paused (pause_tick == 0 means running)
-        let _ = self
-            .pause_tick
-            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+        self.paused().since.get_or_insert_with(Instant::now);
     }
 
     /// Resume the clock, accumulating the paused duration. Idempotent.
     pub fn resume(&self) {
-        let paused_at = self.pause_tick.swap(0, Ordering::SeqCst);
-        if paused_at != 0 {
-            let mut now = 0i64;
-            unsafe {
-                QueryPerformanceCounter(&mut now).expect("QueryPerformanceCounter failed");
-            }
-            let paused_ticks = now - paused_at;
-            let paused_nanos =
-                (paused_ticks as u128 * 1_000_000_000 / self.frequency as u128) as u64;
-            self.accumulated_paused_nanos
-                .fetch_add(paused_nanos, Ordering::SeqCst);
+        let mut paused = self.paused();
+        if let Some(since) = paused.since.take() {
+            paused.total += since.elapsed();
         }
     }
 
     /// Elapsed recording time, excluding any paused periods.
     pub fn elapsed(&self) -> Duration {
-        let mut now = 0i64;
-        unsafe {
-            QueryPerformanceCounter(&mut now).expect("QueryPerformanceCounter failed");
-        }
-        let pt = self.pause_tick.load(Ordering::SeqCst);
-        // Freeze at the tick when pause() was called; advance normally otherwise.
-        let running_ticks = if pt > 0 {
-            pt - self.start_ticks
-        } else {
-            now - self.start_ticks
-        };
-        let total_nanos = (running_ticks as u128 * 1_000_000_000) / self.frequency as u128;
-        let paused_nanos = self.accumulated_paused_nanos.load(Ordering::SeqCst) as u128;
-        Duration::from_nanos((total_nanos.saturating_sub(paused_nanos)) as u64)
+        let paused = self.paused();
+        // Frozen at the moment pause() was called; advancing otherwise.
+        let now = paused.since.unwrap_or_else(Instant::now);
+        now.duration_since(self.started)
+            .saturating_sub(paused.total)
     }
 }
 
@@ -129,6 +107,40 @@ mod tests {
             diff < 5,
             "elapsed should not advance while paused, advanced by {diff}ms"
         );
+    }
+
+    /// A reader racing `resume()` must never see the clock jump ahead by the pause length and
+    /// then fall back: capture threads stamp frames and audio with these readings.
+    #[test]
+    fn elapsed_stays_monotonic_while_resuming() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let clock = RecordingClock::new();
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let clock = Arc::clone(&clock);
+            let done = Arc::clone(&done);
+            thread::spawn(move || {
+                let mut last = clock.elapsed();
+                while !done.load(Ordering::Relaxed) {
+                    let now = clock.elapsed();
+                    if now < last {
+                        return Some((last, now));
+                    }
+                    last = now;
+                }
+                None
+            })
+        };
+        for _ in 0..300 {
+            clock.pause();
+            thread::sleep(Duration::from_millis(1));
+            clock.resume();
+        }
+        done.store(true, Ordering::Relaxed);
+        if let Some((before, after)) = reader.join().unwrap() {
+            panic!("elapsed went back from {before:?} to {after:?}");
+        }
     }
 
     #[test]
