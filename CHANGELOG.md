@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.156] - 2026-11-07
+
 ### Changed
 
 - The window list no longer shows windows Windows keeps hidden — spare windows of some apps (WinUI apps, a suspended Store app's window) that showed up by their title but couldn't be recorded. Windows on another virtual desktop are listed as before.
