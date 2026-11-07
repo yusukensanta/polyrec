@@ -2,6 +2,9 @@
 name = "polyrec"
 version = "0.5.153"
 edition = "2024"
+# The toolchain rust-toolchain.toml pins. Also what the MSRV-aware resolver
+# picks dependency versions for, whichever toolchain runs `cargo update`.
+rust-version = "1.99"
 description = "Multi-track screen recorder for Windows"
 license = "Apache-2.0"
 

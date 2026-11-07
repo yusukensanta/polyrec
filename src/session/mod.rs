@@ -1100,142 +1100,6 @@ mod tests {
         );
     }
 
-    /// DIAGNOSTIC (temporary): records real window + default audio devices while a
-    /// system WAV plays, then decodes the finalized MP4's audio track back to PCM via
-    /// Media Foundation and reports the peak sample magnitude actually stored in the
-    /// file. Isolates whether silence is introduced downstream of audio.rs (which
-    /// diag_default_loopback_captures_real_signal already proved captures real signal).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
-    async fn diag_recorded_audio_track_has_signal() {
-        use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
-        use windows::Win32::Media::MediaFoundation::{
-            MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-            MFAudioFormat_PCM, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
-        };
-
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
-        let audio_devices: Vec<_> = enumerate_audio_devices()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|d| d.is_loopback)
-            .collect();
-        assert!(!audio_devices.is_empty(), "need a loopback audio device");
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut sm = SessionManager::new();
-        let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(
-            source,
-            inputs(audio_devices, vec![], false),
-            true,
-            Arc::clone(&frame_count),
-            dir.path(),
-            RecordingNaming::ProcessName,
-        )
-        .expect("start_capture failed");
-
-        // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
-        // process until the sound finishes, but we want it playing concurrently
-        // with the recording below, not blocking this thread until done.
-        #[allow(clippy::zombie_processes)]
-        std::process::Command::new("powershell")
-            .args([
-                "-c",
-                "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()",
-            ])
-            .spawn()
-            .expect("failed to spawn powershell sound player");
-
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-
-        let handle = tokio::task::block_in_place(|| sm.stop_capture())
-            .expect("stop_capture returned None while active");
-        let result = handle.await.expect("recorder task panicked/aborted");
-        let finalized_path = result.expect("finalize() returned an error");
-        println!("output: {}", finalized_path.display());
-
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(
-                None,
-                windows::Win32::System::Com::COINIT_MULTITHREADED,
-            );
-            let _ = windows::Win32::Media::MediaFoundation::MFStartup(
-                windows::Win32::Media::MediaFoundation::MF_VERSION,
-                windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
-            );
-            let url = windows::core::HSTRING::from(finalized_path.to_str().unwrap());
-            let reader =
-                MFCreateSourceReaderFromURL(&url, None).expect("MFCreateSourceReaderFromURL");
-
-            // Force decode to PCM so we can inspect raw samples.
-            let pcm_type = MFCreateMediaType().unwrap();
-            pcm_type
-                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-                .unwrap();
-            pcm_type
-                .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
-                .unwrap();
-            reader
-                .SetCurrentMediaType(
-                    MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
-                    None,
-                    &pcm_type,
-                )
-                .expect("SetCurrentMediaType PCM failed — no audio stream in file?");
-
-            let mut peak = 0i32;
-            let mut total_bytes = 0usize;
-            loop {
-                let mut stream_index = 0u32;
-                let mut flags = 0u32;
-                let mut timestamp = 0i64;
-                let mut sample = None;
-                reader
-                    .ReadSample(
-                        MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
-                        0,
-                        Some(&mut stream_index),
-                        Some(&mut flags),
-                        Some(&mut timestamp),
-                        Some(&mut sample),
-                    )
-                    .expect("ReadSample failed");
-
-                const MF_SOURCE_READERF_ENDOFSTREAM: u32 = 0x2;
-                if flags & MF_SOURCE_READERF_ENDOFSTREAM != 0 {
-                    break;
-                }
-                let Some(sample) = sample else { continue };
-                let buffer = sample
-                    .ConvertToContiguousBuffer()
-                    .expect("ConvertToContiguousBuffer");
-                let mut data: *mut u8 = std::ptr::null_mut();
-                let mut len = 0u32;
-                buffer.Lock(&mut data, None, Some(&mut len)).expect("Lock");
-                let bytes = std::slice::from_raw_parts(data, len as usize);
-                for chunk in bytes.as_chunks::<2>().0 {
-                    let v = i16::from_le_bytes(*chunk) as i32;
-                    if v.abs() > peak {
-                        peak = v.abs();
-                    }
-                }
-                total_bytes += bytes.len();
-                buffer.Unlock().expect("Unlock");
-            }
-
-            println!("DIAG: total_audio_bytes={total_bytes} peak_pcm16={peak}");
-            assert!(total_bytes > 0, "audio track had zero bytes decoded");
-            assert!(
-                peak > 300,
-                "peak PCM16 sample {peak} looks like silence in the recorded file"
-            );
-        }
-    }
-
     /// Same as `full_capture_produces_nonempty_file` but with `app_audio_only = true`,
     /// exercising the process-loopback path through the real start_capture/stop_capture
     /// wiring (not just the raw capture function). Uses our own process id as the
@@ -1292,16 +1156,15 @@ mod tests {
         println!("output size: {} bytes", metadata.len());
     }
 
-    /// DIAGNOSTIC (temporary): reproduces the reported "Saving recording..."
-    /// hang -- 2 real devices + 1 app-audio source (3 audio tracks total),
-    /// stopped almost immediately (well inside process-loopback's ~5s async
-    /// activation window, so the app-audio track likely never receives a
-    /// single sample). Times `stop_capture()` + finalize under an overall
-    /// `tokio::time::timeout` so a genuine hang fails the test instead of
-    /// wedging the run forever.
+    /// Stopping right after starting doesn't hang the save ("Saving
+    /// recording..." forever, #68/#69): the real devices plus an app source
+    /// of two processes, neither making a sound -- this test and a sleeping
+    /// child, like a multi-process app with one of its processes quiet --
+    /// stopped well inside process loopback's ~5 s activation, so the app
+    /// tracks likely never get a first buffer. Plays nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
-    async fn diag_stop_soon_after_start_with_three_audio_tracks_does_not_hang() {
+    async fn stopping_right_after_start_with_quiet_app_tracks_does_not_hang() {
         use crate::capture::audio::enumerate_audio_devices;
         use crate::sources::enumerate_sources;
         use crate::types::AppAudioSource;
@@ -1312,94 +1175,15 @@ mod tests {
         let audio_devices = enumerate_audio_devices().unwrap_or_default();
         println!("real audio devices: {}", audio_devices.len());
 
-        // Our own test process: guaranteed running, guaranteed to emit zero
-        // audio -- the app-audio slot that never gets a first buffer.
-        let app_audio_sources = vec![AppAudioSource {
-            process_ids: vec![std::process::id()],
-            exe_name: "diag-self.exe".to_string(),
-            display_name: "diag-self".to_string(),
-            icon_rgba: None,
-        }];
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut sm = SessionManager::new();
-        let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(
-            source,
-            inputs(audio_devices, app_audio_sources, false),
-            true,
-            Arc::clone(&frame_count),
-            dir.path(),
-            RecordingNaming::ProcessName,
-        )
-        .expect("start_capture failed");
-
-        // Stop almost immediately -- well inside the ~5s process-loopback
-        // activation window.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let stop_started = std::time::Instant::now();
-        let handle = tokio::task::block_in_place(|| sm.stop_capture())
-            .expect("stop_capture returned None while active");
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle)
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "stop+finalize did not complete within 30s (elapsed before timeout: {:.1}s) -- reproduces the reported hang",
-                    stop_started.elapsed().as_secs_f32()
-                )
-            })
-            .expect("recorder task panicked/aborted");
-        let finalized_path = result.expect("finalize() returned an error");
-
-        println!(
-            "stop+finalize took {:.2}s",
-            stop_started.elapsed().as_secs_f32()
-        );
-        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
-        println!("output size: {} bytes", metadata.len());
-    }
-
-    /// DIAGNOSTIC (temporary): same quick-stop shape, but the app-audio slot
-    /// is one `AppAudioSource` with TWO process_ids (mimics a real
-    /// multi-process app like Discord, where audio comes from more than one
-    /// top-level process) -- 2 devices + 2 app-audio pids = 4 real audio
-    /// tracks, stopped almost immediately.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
-    async fn diag_stop_soon_after_start_with_four_tracks_multi_pid_app_does_not_hang() {
-        use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
-        use crate::types::AppAudioSource;
-
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
-        let audio_devices = enumerate_audio_devices().unwrap_or_default();
-        println!("real audio devices: {}", audio_devices.len());
-
-        #[allow(clippy::zombie_processes)]
-        let mut player = std::process::Command::new("powershell")
-            .args([
-                "-c",
-                "for ($i=0; $i -lt 20; $i++) { (New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync() }",
-            ])
+        let mut sleeper = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
+            .stdout(std::process::Stdio::null())
             .spawn()
-            .expect("failed to spawn powershell sound player");
-        let player_pid = player.id();
-        println!(
-            "sound player pid: {player_pid}, silent pid: {}",
-            std::process::id()
-        );
-
-        // One AppAudioSource, two process_ids: one real active player, one
-        // guaranteed-silent (our own process) -- mirrors a multi-process app
-        // where only one of its processes is actually the one making sound.
+            .expect("failed to start a quiet child process");
         let app_audio_sources = vec![AppAudioSource {
-            process_ids: vec![player_pid, std::process::id()],
-            exe_name: "diag-multi.exe".to_string(),
-            display_name: "diag-multi".to_string(),
+            process_ids: vec![std::process::id(), sleeper.id()],
+            exe_name: "quiet.exe".to_string(),
+            display_name: "quiet".to_string(),
             icon_rgba: None,
         }];
 
@@ -1421,104 +1205,25 @@ mod tests {
         let stop_started = std::time::Instant::now();
         let handle = tokio::task::block_in_place(|| sm.stop_capture())
             .expect("stop_capture returned None while active");
-
         let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle).await;
-        let _ = player.kill();
-        let result = result
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        let finalized_path = result
             .unwrap_or_else(|_| {
                 panic!(
-                    "stop+finalize did not complete within 30s (elapsed before timeout: {:.1}s) -- reproduces the reported hang",
+                    "stop+finalize did not complete within 30s (elapsed before timeout: {:.1}s)",
                     stop_started.elapsed().as_secs_f32()
                 )
             })
-            .expect("recorder task panicked/aborted");
-        let finalized_path = result.expect("finalize() returned an error");
+            .expect("recorder task panicked/aborted")
+            .expect("finalize() returned an error");
 
         println!(
             "stop+finalize took {:.2}s",
             stop_started.elapsed().as_secs_f32()
         );
         let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
-        println!("output size: {} bytes", metadata.len());
-    }
-
-    /// DIAGNOSTIC (temporary): same shape as the "quick stop" repro above,
-    /// but the app-audio track is a real, continuously sound-producing
-    /// process (a looped WAV via a spawned powershell) for a longer (~10s)
-    /// recording -- covers the case the quick-stop version can't: 3
-    /// genuinely active concurrent audio encodes (2 devices + 1 app) plus
-    /// hardware video, long enough for a real recording_tx backlog to build
-    /// if encoding can't keep up with real time on this machine.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
-    async fn diag_stop_after_longer_recording_with_three_active_audio_tracks() {
-        use crate::capture::audio::enumerate_audio_devices;
-        use crate::sources::enumerate_sources;
-        use crate::types::AppAudioSource;
-
-        let sources = enumerate_sources();
-        let source =
-            pick_source_with_real_client_rect(sources).expect("no usable capture source found");
-        let audio_devices = enumerate_audio_devices().unwrap_or_default();
-        println!("real audio devices: {}", audio_devices.len());
-
-        // Loops a short WAV for the whole test so the app-audio track has
-        // continuous real signal, not a one-shot blip.
-        #[allow(clippy::zombie_processes)]
-        let mut player = std::process::Command::new("powershell")
-            .args([
-                "-c",
-                "for ($i=0; $i -lt 20; $i++) { (New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync() }",
-            ])
-            .spawn()
-            .expect("failed to spawn powershell sound player");
-        let player_pid = player.id();
-        println!("sound player pid: {player_pid}");
-
-        let app_audio_sources = vec![AppAudioSource {
-            process_ids: vec![player_pid],
-            exe_name: "diag-player.exe".to_string(),
-            display_name: "diag-player".to_string(),
-            icon_rgba: None,
-        }];
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut sm = SessionManager::new();
-        let frame_count = Arc::new(AtomicU64::new(0));
-        sm.start_capture(
-            source,
-            inputs(audio_devices, app_audio_sources, false),
-            true,
-            Arc::clone(&frame_count),
-            dir.path(),
-            RecordingNaming::ProcessName,
-        )
-        .expect("start_capture failed");
-
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-
-        let stop_started = std::time::Instant::now();
-        let handle = tokio::task::block_in_place(|| sm.stop_capture())
-            .expect("stop_capture returned None while active");
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(60), handle).await;
-        let _ = player.kill();
-        let result = result
-            .unwrap_or_else(|_| {
-                panic!(
-                    "stop+finalize did not complete within 60s (elapsed before timeout: {:.1}s) -- reproduces the reported hang",
-                    stop_started.elapsed().as_secs_f32()
-                )
-            })
-            .expect("recorder task panicked/aborted");
-        let finalized_path = result.expect("finalize() returned an error");
-
-        println!(
-            "stop+finalize took {:.2}s",
-            stop_started.elapsed().as_secs_f32()
-        );
-        let metadata = std::fs::metadata(&finalized_path).expect("output file missing");
-        println!("output size: {} bytes", metadata.len());
+        assert!(metadata.len() > 0, "output file is empty");
     }
 
     /// End-to-end: real window + real audio devices through the actual

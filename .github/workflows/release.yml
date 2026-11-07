@@ -32,6 +32,9 @@ concurrency:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    # A cold build takes about 10 min, and each SignPath request waits up to
+    # 30 min for approval (Submit-SignPathRequest.ps1), two of them.
+    timeout-minutes: 90
     steps:
       # Pinned to a commit SHA, not a mutable version tag -- a compromised or
       # re-tagged upstream action can't silently swap in different code this

@@ -1698,6 +1698,86 @@ mod tests {
         assert!(peak > 26_000, "scaled down too far: peak {peak}");
     }
 
+    /// What's recorded is what's heard: a tone on one track of a recording
+    /// -- written crash-safe, then remuxed into a plain MP4 as at Stop --
+    /// decodes back at its loudness, and the quiet track beside it stays
+    /// quiet. Checks everything after capture without playing a sound (the
+    /// diagnostics this replaces played one out loud).
+    #[test]
+    fn a_recorded_tone_comes_back_at_its_loudness_on_its_own_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragmented = dir.path().join("tone_recording_1.tmp.mp4");
+        let writer = RecordingWriter::new(
+            &fragmented,
+            &EncoderParams {
+                container: crate::encode::Container::FragmentedMp4,
+                ..EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16), (48000u32, 2u16)])
+            },
+        )
+        .expect("RecordingWriter::new");
+        writer.begin_writing().expect("begin_writing");
+        // 1 s in 10 ms packets, as WASAPI hands them over: a 440 Hz tone at
+        // half scale on track 0, silence on track 1.
+        for packet in 0..100u32 {
+            let pts = Duration::from_millis(u64::from(packet) * 10);
+            if packet % 3 == 0 {
+                writer
+                    .write_video(VideoFrame {
+                        pts,
+                        data: vec![0u8; 64 * 64 * 4].into(),
+                    })
+                    .expect("write_video");
+            }
+            let tone = (0..480u32)
+                .flat_map(|i| {
+                    let t = (packet * 480 + i) as f32 / 48000.0;
+                    let v = (t * 440.0 * std::f32::consts::TAU).sin() * 0.5;
+                    [v, v]
+                })
+                .collect();
+            for (track, samples) in [(0, tone), (1, vec![0.0f32; 480 * 2])] {
+                writer
+                    .write_audio(
+                        track,
+                        AudioSamples {
+                            track_id: TrackId::new(track as u32),
+                            pts,
+                            samples,
+                            sample_rate: 48000,
+                            channels: 2,
+                        },
+                    )
+                    .expect("write_audio");
+            }
+        }
+        writer.finalize().expect("finalize");
+        let plain = dir.path().join("tone.mp4");
+        remux(&fragmented, &plain, &[0, 1]).expect("remux");
+
+        let _mf = MfSession::start_mta().unwrap();
+        let url = HSTRING::from(plain.as_path());
+        let reader: IMFSourceReader = unsafe { MFCreateSourceReaderFromURL(&url, None).unwrap() };
+        let layout = unsafe { discover_stream_layout(&reader).unwrap() };
+        let peaks: Vec<u16> = (0..2)
+            .map(|track| {
+                let mut decoder =
+                    unsafe { TrackDecoder::open(&url, &layout, track, 48000, 2).unwrap() };
+                let mut peak = 0;
+                while let Some((_, piece)) = decoder.next_piece().unwrap() {
+                    peak = piece.iter().map(|s| s.unsigned_abs()).fold(peak, u16::max);
+                }
+                peak
+            })
+            .collect();
+        // Half scale is 16384, give or take what AAC does to a tone.
+        assert!(
+            (13_000..=20_000).contains(&peaks[0]),
+            "the tone came back at {}",
+            peaks[0]
+        );
+        assert!(peaks[1] < 300, "the quiet track came back at {}", peaks[1]);
+    }
+
     #[test]
     fn remux_video_only_creates_output_file() {
         let dir = tempfile::tempdir().unwrap();
