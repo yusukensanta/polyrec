@@ -1,5 +1,6 @@
 use super::App;
 use super::icons::Icon;
+use super::min_width::SOURCE_PANEL_MIN;
 use super::theme::{SPACE_GROUP, SPACE_NORMAL, SPACE_TIGHT, TEXT_BODY, pal, text_px};
 use super::widgets::{
     RowIcon, cached_icon_texture, caption, icon_slot, matches_search, section_header,
@@ -25,9 +26,12 @@ impl App {
     }
 
     pub(super) fn render_source_panel(&mut self, ui: &mut egui::Ui, s: &'static Strings) {
-        egui::Panel::left("source_panel")
+        // As wide as the user drags it, short of squeezing the centre (see
+        // `min_width`).
+        let window = ui.ctx().content_rect().width();
+        let panel = egui::Panel::left("source_panel")
             .default_size(260.0)
-            .size_range(200.0..=380.0)
+            .size_range(SOURCE_PANEL_MIN..=self.min_width.panel_max(window))
             .show(ui, |ui| {
                 section_header(ui, s.capture_source_header);
 
@@ -162,5 +166,6 @@ impl App {
                         }
                     });
             });
+        self.min_width.source_panel(panel.response.rect.width());
     }
 }

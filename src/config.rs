@@ -3,7 +3,8 @@ use crate::i18n::Lang;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The smallest the dashboard can be made (logical points).
+/// The smallest the dashboard can be made (logical points) -- wider still
+/// when what it shows needs it (see `ui::dashboard::min_width`).
 pub const MIN_WINDOW_SIZE: (f32, f32) = (620.0, 450.0);
 
 /// Persisted settings (`config.toml`).

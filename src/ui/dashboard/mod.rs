@@ -2,6 +2,7 @@ mod hotkeys_popup;
 mod hud_place;
 mod icons;
 mod keyboard;
+mod min_width;
 
 mod actions;
 mod audio_popup;
@@ -135,6 +136,9 @@ pub struct App {
     tray: Option<tray::Tray>,
     /// Windows' text size setting, followed while running.
     text_scale: Option<theme::TextScaleWatch>,
+    /// What the dashboard's parts need to be shown whole, and so the
+    /// window's minimum width.
+    min_width: min_width::MinWidth,
     /// Windows' theme (light, dark, high contrast) and animation setting,
     /// followed while running.
     theme_watch: theme::ThemeWatch,
@@ -308,6 +312,7 @@ impl App {
             toast_window: Default::default(),
             tray,
             text_scale: theme::TextScaleWatch::start(&cc.egui_ctx),
+            min_width: min_width::MinWidth::default(),
             theme_watch: theme::ThemeWatch::new(),
             last_window_size: None,
             last_window_maximized: false,
@@ -462,6 +467,7 @@ impl eframe::App for App {
         self.render_menu_bar(ui, s);
         self.render_source_panel(ui, s);
         self.render_center_panel(ui, s);
+        self.min_width.apply(ctx, crate::config::MIN_WINDOW_SIZE);
         self.handle_escape(ctx, s);
         self.render_audio_popup(ctx, s);
         self.render_quality_popup(ctx, s);
