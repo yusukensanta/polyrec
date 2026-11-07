@@ -3,19 +3,20 @@ use super::icons::Icon;
 use super::state::Popup;
 use super::theme::{POPUP_WIDTH, SPACE_NORMAL, SPACE_TIGHT, pal};
 use super::widgets::{
-    RowIcon, accent_button, audio_device_icon, caption, checkbox_with_volume_slider, popup_window,
-    section_header,
+    RowIcon, accent_button, audio_device_icon, cached_icon_texture, caption,
+    checkbox_with_volume_slider, matches_search, popup_window, section_header,
 };
-use crate::config::Config;
+use crate::config::{Config, RegisteredApp};
 use crate::i18n::Strings;
-use crate::types::CaptureKind;
+use crate::sources::InstalledApp;
+use crate::types::{CaptureKind, CaptureSource};
 use eframe::egui;
 use rfd::FileDialog;
 use std::sync::mpsc;
 
 /// Where the add-app picker found a candidate -- determines how its exe
 /// path gets resolved at pick time (see `render_add_app_picker`).
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum AddAppSource {
     /// A live window's process id -- path resolved via `get_exe_path` when
     /// picked, not eagerly, since it's only needed once.
@@ -26,14 +27,18 @@ enum AddAppSource {
 }
 
 /// One row in the add-app picker's search results.
-struct AddAppCandidate {
+/// One row of the add-app picker, borrowing from the window list or the
+/// installed apps it's found in: the picker rebuilds its rows every frame
+/// it's open, and used to copy every candidate's icon pixels each time.
+#[derive(Debug, PartialEq)]
+struct AddAppCandidate<'a> {
     display_name: String,
-    exe_name: String,
+    exe_name: &'a str,
     source: AddAppSource,
-    icon_rgba: Option<(Vec<u8>, u32, u32)>,
+    icon_rgba: Option<&'a (Vec<u8>, u32, u32)>,
 }
 
-impl AddAppCandidate {
+impl AddAppCandidate<'_> {
     /// Whether this candidate is currently running -- shown as a "● Running"
     /// tag (see `render_add_app_picker`) so the user can tell at a glance
     /// which candidates will start capturing immediately versus wait for
@@ -128,32 +133,21 @@ impl App {
         if self.app_audio_sources.is_empty() {
             ui.label(caption(s.no_app_audio_sources, pal().text_muted));
         }
-        // Iterated from a clone, not `self.app_audio_sources`
-        // directly -- an uncheck below rebuilds that Vec
-        // in-place via `rebuild_app_audio_sources_now`,
-        // which a live borrow of it here would conflict
-        // with.
-        let app_audio_sources = self.app_audio_sources.clone();
-        for (i, src) in app_audio_sources.iter().enumerate() {
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                self.app_audio_icon_textures.entry(i)
-                && let Some((rgba, w, h)) = &src.icon_rgba
-            {
-                let image =
-                    egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
-                let tex = ui.ctx().load_texture(
-                    format!("app_audio_icon_{i}"),
-                    image,
-                    egui::TextureOptions::LINEAR,
-                );
-                entry.insert(tex);
-            }
+        // An unchecked app is unregistered after the rows are drawn: doing it
+        // in the loop rebuilds the list being drawn.
+        let mut unchecked = None;
+        for (i, src) in self.app_audio_sources.iter().enumerate() {
+            let icon = cached_icon_texture(
+                ui.ctx(),
+                &mut self.app_audio_icon_textures,
+                i,
+                || format!("app_audio_icon_{i}"),
+                src.icon_rgba.as_ref(),
+            );
             let mut checked = true;
             checkbox_with_volume_slider(
                 ui,
-                self.app_audio_icon_textures
-                    .get(&i)
-                    .map_or(RowIcon::None, |tex| RowIcon::Image(tex.id())),
+                icon.map_or(RowIcon::None, RowIcon::Image),
                 &mut self.config,
                 &mut self.error_message,
                 s.config_save_failed_prefix,
@@ -172,11 +166,14 @@ impl App {
             // back to -- being in this list at all already
             // means "record this").
             if !checked {
-                self.config.unregister_app_audio(&src.exe_name);
-                self.save_config_or_report(s);
-                self.rebuild_app_audio_sources_now();
+                unchecked = Some(src.exe_name.clone());
                 break;
             }
+        }
+        if let Some(exe_name) = unchecked {
+            self.config.unregister_app_audio(&exe_name);
+            self.save_config_or_report(s);
+            self.rebuild_app_audio_sources_now();
         }
         // The Applications list is entirely opt-in via this
         // button -- unlike SYSTEM devices, it never shows an
@@ -268,7 +265,12 @@ impl App {
         ui.add_space(SPACE_TIGHT);
 
         let filter = self.add_app.search.to_lowercase();
-        let candidates = self.add_app_candidates(&filter);
+        let candidates = add_app_candidates(
+            &self.sources,
+            &self.add_app.installed,
+            &self.config.registered_app_audio,
+            &filter,
+        );
 
         // Shown even once open-window candidates are already visible above
         // -- distinct from "no matches", it's telling the user more
@@ -284,7 +286,8 @@ impl App {
             };
             ui.label(caption(msg, pal().text_muted));
         }
-        let picked = self.render_add_app_candidate_list(ui, s, &candidates);
+        let picked =
+            render_add_app_candidate_list(ui, s, &candidates, &mut self.add_app.icon_textures);
         if let Some((exe_name, source)) = picked {
             let exe_path = match source {
                 AddAppSource::OpenWindow(pid) => {
@@ -320,130 +323,6 @@ impl App {
         });
     }
 
-    /// The picker's search results for `filter` (already lowercased):
-    /// open windows first, then installed apps, one row per exe, minus
-    /// anything already registered, sorted by name.
-    fn add_app_candidates(&self, filter: &str) -> Vec<AddAppCandidate> {
-        let registered: std::collections::HashSet<String> = self
-            .config
-            .registered_app_audio
-            .iter()
-            .map(|r| r.exe_name.clone())
-            .collect();
-        let mut seen_exe_names = std::collections::HashSet::new();
-        let mut candidates: Vec<AddAppCandidate> = Vec::new();
-        for src in self
-            .sources
-            .iter()
-            .filter(|src| src.kind == CaptureKind::Window && !src.exe_name.is_empty())
-        {
-            if registered.contains(&src.exe_name) {
-                continue;
-            }
-            if !(filter.is_empty()
-                || src.window_title.to_lowercase().contains(filter)
-                || src.exe_name.to_lowercase().contains(filter))
-            {
-                continue;
-            }
-            // One row per exe, not per window -- a multi-window app (several
-            // File Explorer windows, several browser windows) would
-            // otherwise list the same exe repeatedly.
-            if !seen_exe_names.insert(src.exe_name.to_lowercase()) {
-                continue;
-            }
-            candidates.push(AddAppCandidate {
-                display_name: crate::sources::display_name_from_exe_name(&src.exe_name),
-                exe_name: src.exe_name.clone(),
-                source: AddAppSource::OpenWindow(src.process_id),
-                icon_rgba: src.icon_rgba.clone(),
-            });
-        }
-        for app in &self.add_app.installed {
-            if registered.contains(&app.exe_name) {
-                continue;
-            }
-            if !(filter.is_empty()
-                || app.display_name.to_lowercase().contains(filter)
-                || app.exe_name.to_lowercase().contains(filter))
-            {
-                continue;
-            }
-            if !seen_exe_names.insert(app.exe_name.to_lowercase()) {
-                continue;
-            }
-            candidates.push(AddAppCandidate {
-                display_name: app.display_name.clone(),
-                exe_name: app.exe_name.clone(),
-                source: AddAppSource::Installed(app.exe_path.clone()),
-                icon_rgba: app.icon_rgba.clone(),
-            });
-        }
-        candidates.sort_by_key(|c| c.display_name.to_lowercase());
-        candidates
-    }
-
-    /// The scrollable candidate rows; returns the one clicked this frame.
-    fn render_add_app_candidate_list(
-        &mut self,
-        ui: &mut egui::Ui,
-        s: &'static Strings,
-        candidates: &[AddAppCandidate],
-    ) -> Option<(String, AddAppSource)> {
-        let mut picked: Option<(String, AddAppSource)> = None;
-        egui::ScrollArea::vertical()
-            .max_height(220.0)
-            .id_salt("add_app_picker_scroll")
-            .show(ui, |ui| {
-                for candidate in candidates {
-                    if let std::collections::hash_map::Entry::Vacant(entry) = self
-                        .add_app
-                        .icon_textures
-                        .entry(candidate.exe_name.to_lowercase())
-                        && let Some((rgba, w, h)) = &candidate.icon_rgba
-                    {
-                        let image = egui::ColorImage::from_rgba_unmultiplied(
-                            [*w as usize, *h as usize],
-                            rgba,
-                        );
-                        let tex = ui.ctx().load_texture(
-                            format!("add_app_icon_{}", candidate.exe_name),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        entry.insert(tex);
-                    }
-                    ui.horizontal(|ui| {
-                        if let Some(tex) = self
-                            .add_app
-                            .icon_textures
-                            .get(&candidate.exe_name.to_lowercase())
-                        {
-                            ui.image((tex.id(), egui::vec2(16.0, 16.0)));
-                        }
-                        // `.truncate()` -- an installed app's display name
-                        // (derived from its Start Menu shortcut's filename,
-                        // not curated) can be long enough to force this
-                        // button wider than the popup's fixed width (see
-                        // POPUP_WIDTH), pushing content past the window's
-                        // right edge instead of the window resizing to fit --
-                        // a plain `ui.button(text)` doesn't wrap or clip its
-                        // label to the available row width on its own.
-                        if ui
-                            .add(egui::Button::new(&candidate.display_name).truncate())
-                            .clicked()
-                        {
-                            picked = Some((candidate.exe_name.clone(), candidate.source.clone()));
-                        }
-                        if candidate.is_running() {
-                            ui.label(caption(s.add_app_running_tag, pal().success));
-                        }
-                    });
-                }
-            });
-        picked
-    }
-
     /// Pins `exe_name`/`exe_path`, rebuilds the Applications list to reflect
     /// it immediately, and closes the add-app picker -- the common tail of
     /// both ways the picker can register an app (picked from the search
@@ -453,5 +332,177 @@ impl App {
         self.save_config_or_report(s);
         self.rebuild_app_audio_sources_now();
         self.add_app.open = false;
+    }
+}
+
+/// The picker's search results for `filter` (already lowercased): open
+/// windows (`sources`) first, then `installed` apps, one row per exe, minus
+/// anything already `registered`, sorted by name.
+fn add_app_candidates<'a>(
+    sources: &'a [CaptureSource],
+    installed: &'a [InstalledApp],
+    registered: &[RegisteredApp],
+    filter: &str,
+) -> Vec<AddAppCandidate<'a>> {
+    let registered: std::collections::HashSet<&str> =
+        registered.iter().map(|r| r.exe_name.as_str()).collect();
+    let mut seen_exe_names = std::collections::HashSet::new();
+    let mut candidates: Vec<AddAppCandidate> = Vec::new();
+    for src in sources
+        .iter()
+        .filter(|src| src.kind == CaptureKind::Window && !src.exe_name.is_empty())
+    {
+        if registered.contains(src.exe_name.as_str())
+            || !matches_search(filter, &[&src.window_title, &src.exe_name])
+        {
+            continue;
+        }
+        // One row per exe, not per window -- a multi-window app (several
+        // File Explorer windows, several browser windows) would otherwise
+        // list the same exe repeatedly.
+        if !seen_exe_names.insert(src.exe_name.to_lowercase()) {
+            continue;
+        }
+        candidates.push(AddAppCandidate {
+            display_name: crate::sources::display_name_from_exe_name(&src.exe_name),
+            exe_name: &src.exe_name,
+            source: AddAppSource::OpenWindow(src.process_id),
+            icon_rgba: src.icon_rgba.as_ref(),
+        });
+    }
+    for app in installed {
+        if registered.contains(app.exe_name.as_str())
+            || !matches_search(filter, &[&app.display_name, &app.exe_name])
+            || !seen_exe_names.insert(app.exe_name.to_lowercase())
+        {
+            continue;
+        }
+        candidates.push(AddAppCandidate {
+            display_name: app.display_name.clone(),
+            exe_name: &app.exe_name,
+            source: AddAppSource::Installed(app.exe_path.clone()),
+            icon_rgba: app.icon_rgba.as_ref(),
+        });
+    }
+    candidates.sort_by_key(|c| c.display_name.to_lowercase());
+    candidates
+}
+
+/// The picker's scrollable candidate rows, their icons loaded into
+/// `icon_textures`; returns the one clicked this frame.
+fn render_add_app_candidate_list(
+    ui: &mut egui::Ui,
+    s: &'static Strings,
+    candidates: &[AddAppCandidate],
+    icon_textures: &mut std::collections::HashMap<String, egui::TextureHandle>,
+) -> Option<(String, AddAppSource)> {
+    let mut picked: Option<(String, AddAppSource)> = None;
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .id_salt("add_app_picker_scroll")
+        .show(ui, |ui| {
+            for candidate in candidates {
+                let icon = cached_icon_texture(
+                    ui.ctx(),
+                    icon_textures,
+                    candidate.exe_name.to_lowercase(),
+                    || format!("add_app_icon_{}", candidate.exe_name),
+                    candidate.icon_rgba,
+                );
+                ui.horizontal(|ui| {
+                    if let Some(icon) = icon {
+                        ui.image((icon, egui::vec2(16.0, 16.0)));
+                    }
+                    // `.truncate()` -- an installed app's display name
+                    // (derived from its Start Menu shortcut's filename, not
+                    // curated) can be long enough to force this button wider
+                    // than the popup's fixed width (see POPUP_WIDTH), pushing
+                    // content past the window's right edge instead of the
+                    // window resizing to fit -- a plain `ui.button(text)`
+                    // doesn't wrap or clip its label to the available row
+                    // width on its own.
+                    if ui
+                        .add(egui::Button::new(&candidate.display_name).truncate())
+                        .clicked()
+                    {
+                        picked = Some((candidate.exe_name.to_owned(), candidate.source.clone()));
+                    }
+                    if candidate.is_running() {
+                        ui.label(caption(s.add_app_running_tag, pal().success));
+                    }
+                });
+            }
+        });
+    picked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(title: &str, exe: &str, pid: u32) -> CaptureSource {
+        CaptureSource {
+            kind: CaptureKind::Window,
+            process_id: pid,
+            window_title: title.into(),
+            exe_name: exe.into(),
+            hwnd: pid as usize,
+            icon_rgba: Some((vec![1, 2, 3, 4], 1, 1)),
+        }
+    }
+
+    fn installed(name: &str, exe: &str) -> InstalledApp {
+        InstalledApp {
+            display_name: name.into(),
+            exe_name: exe.into(),
+            exe_path: format!(r"C:\Apps\{exe}"),
+            icon_rgba: None,
+        }
+    }
+
+    /// Open windows and installed apps, one row per exe -- a running app as
+    /// its window, not again as installed -- minus what's registered, sorted
+    /// by name, the icons borrowed from where they were found.
+    #[test]
+    fn the_picker_lists_each_app_once_running_first() {
+        let sources = [
+            window("Chat - Discord", "Discord.exe", 10),
+            window("Another Discord window", "Discord.exe", 11),
+            window("Notes", "notepad.exe", 12),
+        ];
+        let apps = [
+            installed("Discord", "Discord.exe"),
+            installed("Audacity", "Audacity.exe"),
+            installed("Notepad", "notepad.exe"),
+        ];
+        let registered = [RegisteredApp {
+            exe_name: "notepad.exe".into(),
+            exe_path: String::new(),
+        }];
+        let rows = add_app_candidates(&sources, &apps, &registered, "");
+        let names: Vec<_> = rows.iter().map(|c| (c.exe_name, c.is_running())).collect();
+        assert_eq!(names, [("Audacity.exe", false), ("Discord.exe", true)]);
+        assert!(std::ptr::eq(
+            rows[1].icon_rgba.unwrap(),
+            sources[0].icon_rgba.as_ref().unwrap()
+        ));
+    }
+
+    /// The search matches a window's title or exe, an installed app's name
+    /// or exe; the filter comes in lowercased.
+    #[test]
+    fn the_picker_search_matches_title_name_or_exe() {
+        let sources = [window("Chat - Discord", "Discord.exe", 10)];
+        let apps = [installed("Audacity", "audacity.exe")];
+        let found = |filter| {
+            add_app_candidates(&sources, &apps, &[], filter)
+                .iter()
+                .map(|c| c.exe_name.to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("chat"), ["Discord.exe"]);
+        assert_eq!(found("discord.exe"), ["Discord.exe"]);
+        assert_eq!(found("auda"), ["audacity.exe"]);
+        assert!(found("zzz").is_empty());
     }
 }

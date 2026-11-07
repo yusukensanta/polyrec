@@ -2,7 +2,7 @@
 //! Highlight saves, with buttons to play one or show it in Explorer.
 
 use super::App;
-use super::icons::{Icon, add_named};
+use super::icons::{Icon, add_named, name_for};
 use super::theme::{SPACE_TIGHT, TEXT_BODY, pal, text_px};
 use super::util::{open_file, show_in_folder};
 use super::widgets::{caption, format_bytes, section_header};
@@ -87,7 +87,7 @@ impl App {
                 ui,
                 true,
                 egui::Button::new(Icon::Play.rich(text_px(TEXT_BODY)).color(pal().link)).small(),
-                s.recent_play_tooltip,
+                &name_for(s.recent_play_tooltip, &name),
             )
             .on_hover_text(s.recent_play_tooltip)
             .clicked()
@@ -98,7 +98,7 @@ impl App {
                 ui,
                 true,
                 egui::Button::new(Icon::Folder.rich(text_px(TEXT_BODY)).color(pal().link)).small(),
-                s.recent_show_tooltip,
+                &name_for(s.recent_show_tooltip, &name),
             )
             .on_hover_text(s.recent_show_tooltip)
             .clicked()

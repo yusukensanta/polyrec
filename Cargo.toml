@@ -71,6 +71,7 @@ features = [
     "Win32_Media_MediaFoundation",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_UI_Shell",
     # Windows' text size setting (UISettings::TextScaleFactor).
     "UI_ViewManagement",

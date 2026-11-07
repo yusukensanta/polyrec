@@ -120,6 +120,34 @@ pub(super) fn grid_section_header(ui: &mut egui::Ui, title: &str) {
     ui.separator();
 }
 
+/// An icon's texture (`icon`: RGBA pixels, width, height), loaded into
+/// `cache` under `key` the first time it's asked for, as `name()`. `None`
+/// for no icon.
+pub(super) fn cached_icon_texture<K: std::hash::Hash + Eq>(
+    ctx: &egui::Context,
+    cache: &mut std::collections::HashMap<K, egui::TextureHandle>,
+    key: K,
+    name: impl FnOnce() -> String,
+    icon: Option<&(Vec<u8>, u32, u32)>,
+) -> Option<egui::TextureId> {
+    use std::collections::hash_map::Entry;
+    match cache.entry(key) {
+        Entry::Occupied(texture) => Some(texture.get().id()),
+        Entry::Vacant(slot) => {
+            let (rgba, w, h) = icon?;
+            let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+            let texture = ctx.load_texture(name(), image, egui::TextureOptions::LINEAR);
+            Some(slot.insert(texture).id())
+        }
+    }
+}
+
+/// Whether a search box's text (`filter`, already lowercased) matches any of
+/// `fields`, case-insensitively: everything matches an empty one.
+pub(super) fn matches_search(filter: &str, fields: &[&str]) -> bool {
+    filter.is_empty() || fields.iter().any(|f| f.to_lowercase().contains(filter))
+}
+
 /// Icon for an audio-device checkbox label, in the Audio pop-up's device
 /// list.
 pub(super) fn audio_device_icon(dev: &AudioDevice) -> Icon {

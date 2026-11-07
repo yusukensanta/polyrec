@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The window list no longer shows windows Windows keeps hidden — spare windows of some apps (WinUI apps, a suspended Store app's window) that showed up by their title but couldn't be recorded. Windows on another virtual desktop are listed as before.
+- When PolyRec has to record at a lower frame rate than it started with (the encoder turned the first one down), Windows is asked for frames at the lower rate too, instead of handing over frames that were only thrown away — less work for the graphics card on a high-refresh display.
+- Screen readers tell like buttons apart: the Hotkeys pop-up's four "Change" buttons say which hotkey they change, and each Recent recording's Play and Show in folder buttons name the file.
+- The Audio pop-up does less work while open: the add-app picker no longer copies every app's icon each time it's drawn.
+
 ## [v0.5.155] - 2026-11-07
 
 ### Changed

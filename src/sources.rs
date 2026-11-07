@@ -11,8 +11,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGetFileInfoW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetIconInfo, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    ICONINFO, IsWindowVisible, MONITORINFOF_PRIMARY,
+    EnumWindows, GetClassNameW, GetIconInfo, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, ICONINFO, IsWindowVisible, MONITORINFOF_PRIMARY,
 };
 use windows::core::{BOOL, Owned};
 use windows::core::{PCWSTR, PWSTR};
@@ -106,7 +106,7 @@ unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
             return BOOL(1);
         }
 
-        if GetWindowTextLengthW(hwnd) == 0 {
+        if GetWindowTextLengthW(hwnd) == 0 || hidden_from_view(hwnd) {
             return BOOL(1);
         }
 
@@ -114,6 +114,42 @@ unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
 
         BOOL(1)
     }
+}
+
+/// Whether `hwnd` is a window Windows keeps from view (DWM "cloaks" it)
+/// that isn't anything to record -- see `phantom`.
+fn hidden_from_view(hwnd: HWND) -> bool {
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+    let mut cloaked = 0u32;
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if read.is_err() || cloaked == 0 {
+        return false;
+    }
+    let mut class = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut class) };
+    phantom(
+        cloaked,
+        &String::from_utf16_lossy(&class[..len.max(0) as usize]),
+    )
+}
+
+/// Whether a window cloaked as `cloaked` (`DWMWA_CLOAKED`), of window class
+/// `class`, is one nobody would pick to record: hidden by its own app (a
+/// WinUI app's spare window) or along with its owner, or a UWP app's core
+/// window left at the top level -- the app the user sees is its
+/// `ApplicationFrameWindow`. Windows on another virtual desktop are hidden
+/// by the shell too; they stay listed, as before.
+fn phantom(cloaked: u32, class: &str) -> bool {
+    use windows::Win32::Graphics::Dwm::{DWM_CLOAKED_APP, DWM_CLOAKED_INHERITED};
+    cloaked & (DWM_CLOAKED_APP | DWM_CLOAKED_INHERITED) != 0
+        || (cloaked != 0 && class == "Windows.UI.Core.CoreWindow")
 }
 
 /// Builds a `CaptureSource` for an arbitrary window handle — used both by the
@@ -189,13 +225,6 @@ pub(crate) fn get_exe_path(pid: u32) -> Option<String> {
             }
         }
     }
-}
-
-/// The exe file name of `pid`'s image (e.g. "Discord.exe"), or `None` if
-/// the process can't be opened (already exited, or access denied) -- the
-/// identity both capture sources and per-app audio sessions are keyed on.
-pub(crate) fn exe_name_for_pid(pid: u32) -> Option<String> {
-    get_exe_path(pid).as_deref().and_then(exe_file_name)
 }
 
 /// The file-name part of an exe path (e.g. `C:\...\Discord.exe` ->
@@ -673,6 +702,21 @@ impl Drop for SingleThreadedApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows kept from view that nobody would pick are left out; one on
+    /// another virtual desktop (hidden by the shell) and an uncloaked one stay.
+    #[test]
+    fn phantom_windows_are_left_out_of_the_list() {
+        use windows::Win32::Graphics::Dwm::{
+            DWM_CLOAKED_APP, DWM_CLOAKED_INHERITED, DWM_CLOAKED_SHELL,
+        };
+        assert!(phantom(DWM_CLOAKED_APP, "WinUIDesktopWin32WindowClass"));
+        assert!(phantom(DWM_CLOAKED_INHERITED, "Chrome_WidgetWin_1"));
+        assert!(phantom(DWM_CLOAKED_SHELL, "Windows.UI.Core.CoreWindow"));
+        assert!(!phantom(DWM_CLOAKED_SHELL, "ApplicationFrameWindow"));
+        assert!(!phantom(DWM_CLOAKED_SHELL, "Chrome_WidgetWin_1"));
+        assert!(!phantom(0, "Windows.UI.Core.CoreWindow"));
+    }
 
     /// `enumerate_installed_apps` runs on tokio's blocking pool (the Audio
     /// popup's app picker), whose threads are reused for a recording's

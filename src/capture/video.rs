@@ -247,6 +247,26 @@ struct CaptureResources {
     border_as_asked: bool,
 }
 
+/// Asks WGC itself to deliver frames no closer than `interval` apart, so on
+/// a high-refresh display the frames `FrameRateLimiter` would drop anyway
+/// aren't composed and handed over in the first place. Only a hint: the
+/// limiter still does the exact capping. Like the border flag,
+/// `IGraphicsCaptureSession5` only exists on Windows 11 24H2+, and this fails
+/// harmlessly before that.
+fn limit_updates(session: &GraphicsCaptureSession, interval: std::time::Duration) {
+    let _ = session.SetMinUpdateInterval(windows::Foundation::TimeSpan {
+        Duration: (interval.as_nanos() / 100) as i64,
+    });
+}
+
+/// What `limit_updates` asks for when recording at `fps`: half a slot, not a
+/// whole one -- a minimum interval of exactly 1/fps would make WGC skip a
+/// frame whenever one lands a hair early against the display's vsync,
+/// halving a 60 Hz source recorded at 60 fps.
+fn update_interval_for(fps: u32) -> std::time::Duration {
+    FrameRateLimiter::new(fps).interval() / 2
+}
+
 impl CaptureResources {
     /// Creates the device -- or uses `gpu`'s, which the encoder shares --,
     /// starts the capture session for `target`, and creates both staging
@@ -320,14 +340,7 @@ impl CaptureResources {
         // (border shown) since there's no way to suppress it there.
         let border_as_asked = session.SetIsBorderRequired(show_border).is_ok();
 
-        // Asks WGC itself to deliver fewer frames on a high-refresh display, so
-        // the frames `FrameRateLimiter` would drop anyway aren't composed and
-        // handed over in the first place. Only a hint: the limiter still does
-        // the exact capping. Like the border flag, `IGraphicsCaptureSession5`
-        // only exists on Windows 11 24H2+, and this fails harmlessly before that.
-        let _ = session.SetMinUpdateInterval(windows::Foundation::TimeSpan {
-            Duration: (min_update_interval.as_nanos() / 100) as i64,
-        });
+        limit_updates(&session, min_update_interval);
 
         session.StartCapture().capture_ctx("StartCapture")?;
 
@@ -612,14 +625,15 @@ pub async fn run_video_capture(
 ) -> Result<(), AppError> {
     crate::com::join_mta();
 
-    // Half a slot, not a whole one: a minimum interval of exactly 1/fps would
-    // make WGC skip a frame whenever one lands a hair early against the
-    // display's vsync, halving a 60 Hz source recorded at 60 fps.
+    // The rate WGC was last asked for: the writer can step the fps down
+    // after capture has started (see `LiveFps`), and WGC would otherwise go
+    // on composing frames at the first rate, only for the pacer to drop them.
+    let mut asked_fps = fps.get();
     let res = CaptureResources::open(
         target,
         capture_size,
         show_border,
-        FrameRateLimiter::new(fps.get()).interval() / 2,
+        update_interval_for(asked_fps),
         gpu.as_ref(),
     )?;
     let mut pacer = FramePacer::new(fps.get(), ctrl.clock.elapsed());
@@ -655,7 +669,12 @@ pub async fn run_video_capture(
             gone = Some(SourceGone::Closed);
         }
 
-        pacer.set_fps(fps.get());
+        let now_fps = fps.get();
+        if now_fps != asked_fps {
+            limit_updates(&res.session, update_interval_for(now_fps));
+            asked_fps = now_fps;
+        }
+        pacer.set_fps(now_fps);
         let paused = ctrl.is_paused();
         // A frame the pacer holds back (paused, or over the fps cap) gets no
         // GPU copy or readback unless it's recorded after all.
@@ -986,6 +1005,17 @@ mod tests {
             let (_, next_read_idx) = ping_pong_indices(frame_counter + 1);
             assert_eq!(write_idx, next_read_idx);
         }
+    }
+
+    /// WGC is asked for frames half a slot apart: a hair early against the
+    /// display's vsync still gets through, and fewer frames come as the fps
+    /// steps down.
+    #[test]
+    fn wgc_is_asked_for_frames_half_a_slot_apart() {
+        use std::time::Duration;
+        assert_eq!(update_interval_for(60), Duration::from_secs(1) / 120);
+        assert_eq!(update_interval_for(240), Duration::from_secs(1) / 480);
+        assert!(update_interval_for(60) > update_interval_for(240));
     }
 
     #[test]
