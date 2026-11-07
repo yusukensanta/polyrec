@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.153] - 2026-11-07
+
 ### Added
 
 - PolyRec keeps a log now: `polyrec.log`, next to `crash.log` in `%APPDATA%\PolyRec`. It says what PolyRec did that you wouldn't otherwise see — a recording recovered, an audio device lost, an encoder falling back — which was all lost before, the app having no console. Past 2 MB it starts over, keeping the one before as `polyrec.log.old`. Include it when you report a problem (it names the files and apps recorded, so look it over first); `RUST_LOG` still picks what's logged.
