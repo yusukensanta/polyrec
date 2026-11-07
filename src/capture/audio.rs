@@ -1573,6 +1573,7 @@ mod tests {
     async fn process_loopback_capture_produces_samples() {
         let (tx, mut rx) = mpsc::channel::<AudioSamples>(64);
         let ctrl = CaptureControl::new();
+        let capture_ctrl = ctrl.clone();
         let pid = std::process::id();
 
         // COM objects (IAudioClient etc.) aren't Send, so this must run on its own
@@ -1585,7 +1586,8 @@ mod tests {
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let _ =
-                    run_process_loopback_capture(pid, true, TrackId::new(0), ctrl, tx, 1.0).await;
+                    run_process_loopback_capture(pid, true, TrackId::new(0), capture_ctrl, tx, 1.0)
+                        .await;
             });
         });
 
@@ -1598,7 +1600,13 @@ mod tests {
         assert_eq!(first.channels, TARGET_CHANNELS);
         assert!(!first.samples.is_empty(), "packet had no samples");
 
-        handle.abort();
+        // Aborting a blocking task doesn't stop it: the capture is asked to.
+        ctrl.request_stop();
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the capture didn't stop")
+            .expect("capture thread");
     }
 
     /// A default-output track on the real audio stack, past its first check
@@ -1699,68 +1707,6 @@ mod tests {
             .expect("capture thread")
             .expect("capture result");
         assert!(matches!(end, StreamEnd::Moved));
-    }
-
-    /// DIAGNOSTIC (temporary): captures the default loopback device for ~3s while a
-    /// system WAV plays, and reports the peak sample magnitude actually received.
-    /// Run: cargo test --lib diag_default_loopback -- --ignored --nocapture
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore]
-    async fn diag_default_loopback_captures_real_signal() {
-        let (tx, mut rx) = mpsc::channel::<AudioSamples>(256);
-        let ctrl = CaptureControl::new();
-
-        let handle = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("capture runtime");
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
-                let _ = run_audio_capture(TrackId::new(0), true, ctrl, tx, 1.0).await;
-            });
-        });
-
-        // Deliberately fire-and-forget: PlaySync() blocks *inside* the spawned
-        // process until the sound finishes, but we want it playing concurrently
-        // with our own capture loop below, not blocking this thread until done.
-        #[allow(clippy::zombie_processes)]
-        std::process::Command::new("powershell")
-            .args([
-                "-c",
-                "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Alarm01.wav').PlaySync()",
-            ])
-            .spawn()
-            .expect("failed to spawn powershell sound player");
-
-        let mut peak = 0.0f32;
-        let mut packet_count = 0usize;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(samples)) => {
-                    packet_count += 1;
-                    for &s in &samples.samples {
-                        if s.abs() > peak {
-                            peak = s.abs();
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
-
-        handle.abort();
-        println!("DIAG: packets={packet_count} peak_abs_sample={peak}");
-        assert!(packet_count > 0, "no audio packets received at all");
-        assert!(
-            peak > 0.01,
-            "peak sample magnitude {peak} looks like silence, not the played WAV"
-        );
     }
 
     // Ignored: assumes a real audio subsystem with at least one device, which

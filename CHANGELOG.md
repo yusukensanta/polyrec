@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- For contributors: the hardware tests (`cargo test -- --ignored`) no longer play a sound through your speakers. The old diagnostics that did are gone; a test that writes a tone through the recording path and checks it comes back covers what they checked after capture, without a sound. Building with a Rust older than the pinned 1.99 now stops with a clear "requires rustc 1.99" instead of going on with the older compiler, and CI jobs give up after 30 minutes (90 for a release) instead of six hours.
+
 ## [v0.5.153] - 2026-11-07
 
 ### Added

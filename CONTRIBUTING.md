@@ -15,7 +15,7 @@ cd polyrec
 
 - Windows 10 2004+ (build 19041+) — required for the Process Loopback Capture API.
 - A GPU with Direct3D 11 support.
-- Rust (stable toolchain) via [rustup](https://rustup.rs/).
+- Rust via [rustup](https://rustup.rs/). `rust-toolchain.toml` pins the version (1.99.1), and rustup installs it on the first build. A `RUSTUP_TOOLCHAIN` environment variable overrides that pin; Cargo then stops with "requires rustc 1.99" if it names an older one.
 
 ### 3. Build and Test
 
@@ -91,10 +91,9 @@ CI treats new clippy warnings as something to fix before merge — the codebase 
 ```powershell
 cargo test               # Fast tests
 cargo test -- --ignored  # Also run tests that need a real desktop/hardware (D3D11, live capture)
-# Heads-up: several ignored diag_* / app-audio tests play C:\Windows\Media\Alarm01.wav
-# through your speakers to generate a real signal -- run specific tests by name
-# (e.g. `-- --ignored --exact session::tests::full_capture_produces_nonempty_file`)
-# if you don't want that.
+# The ignored tests capture real windows and audio devices (they play nothing)
+# and take a few minutes; run one by name with
+# `-- --ignored --exact session::tests::full_capture_produces_nonempty_file`.
 ```
 
 ## Project Structure
