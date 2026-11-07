@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.155] - 2026-11-07
+
 ### Changed
 
 - For contributors: a clean-up with no change to what PolyRec does: doc comments that sat on the wrong function or no longer matched the code are fixed, code written out several times is shared (the "recording or paused" check, the encode settings, the disk check interval, the HUD window titles), and settings copied into the dashboard are read from the settings themselves.
