@@ -508,10 +508,25 @@ impl RecordingWriter {
             let gop_set = codec_api.as_ref().is_some_and(|api| set_gop_size(api, fps));
             if container == Container::FragmentedMp4
                 && let Some(api) = &codec_api
+                && b_frames(api) > 0
             {
-                // Frames in decode order are frames in time order: the
-                // fragments' sample times need no reordering.
-                no_b_frames(api);
+                // The fragments take the frames in the order the encoder
+                // hands them out as their order in time (see
+                // `fmp4::muxer`), which B-frames break. Media Foundation's
+                // own MP4 sink sorts them out: the recording plays right,
+                // but isn't crash-safe.
+                tracing::warn!(
+                    "the video encoder uses B-frames: recording to a plain MP4, not crash-safe"
+                );
+                drop(writer);
+                drop(own_sink);
+                return Self::try_new(
+                    output_path,
+                    &EncoderParams {
+                        container: Container::Mp4,
+                        ..params.clone()
+                    },
+                );
             }
 
             let mut audio_streams = Vec::new();
@@ -708,19 +723,26 @@ fn video_codec_api(writer: &IMFSinkWriter, stream: u32) -> Option<ICodecAPI> {
     }
 }
 
+/// Asks the encoder for no B-frames, and returns how many it uses as far as
+/// it says: one that turns the request down is asked its count, and one
+/// that won't say is taken to use none -- the default Media Foundation has
+/// encoders use (the property is optional, and the encoders tried use none
+/// anyway).
+fn b_frames(api: &ICodecAPI) -> u32 {
+    let asked = unsafe { api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0)) };
+    let Err(e) = asked else { return 0 };
+    let count = unsafe { api.GetValue(&CODECAPI_AVEncMPVDefaultBPictureCount) }
+        .ok()
+        .and_then(|value| variant_as_u32(&value))
+        .unwrap_or(0);
+    tracing::info!("video encoder kept its own B-frame count, {count} ({e})");
+    count
+}
+
 /// Pins the encoder's GOP to `frames`, so its own keyframes fall where
 /// `KeyframeSchedule` expects them. Best-effort: the encoders measured default
 /// to one second's worth of frames anyway.
 /// Whether the encoder took `frames` as its GOP size.
-/// Asks the encoder for no B-frames. Best-effort, like `set_gop_size`: the
-/// encoders tried use none anyway.
-fn no_b_frames(api: &ICodecAPI) {
-    if let Err(e) = unsafe { api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0)) }
-    {
-        tracing::info!("video encoder kept its own B-frame count ({e})");
-    }
-}
-
 fn set_gop_size(api: &ICodecAPI, frames: u32) -> bool {
     match unsafe { api.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(frames)) } {
         Ok(()) => true,
@@ -728,6 +750,15 @@ fn set_gop_size(api: &ICodecAPI, frames: u32) -> bool {
             tracing::info!("video encoder kept its own GOP size ({e}); keyframes go by time");
             false
         }
+    }
+}
+
+/// `value`'s number, if it holds a `u32` (`VT_UI4`).
+fn variant_as_u32(value: &VARIANT) -> Option<u32> {
+    // SAFETY: reading the union member the tag says is there.
+    unsafe {
+        let inner = &value.Anonymous.Anonymous;
+        (inner.vt == VT_UI4).then(|| inner.Anonymous.ulVal)
     }
 }
 
@@ -1015,8 +1046,17 @@ fn pack_u64(high: u32, low: u32) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// An encoder's B-frame count is read back as the `u32` it's given as;
+    /// a value of another type isn't taken for a count.
+    #[test]
+    fn a_u32_variant_reads_back() {
+        assert_eq!(variant_as_u32(&variant_u32(2)), Some(2));
+        assert_eq!(variant_as_u32(&variant_u32(0)), Some(0));
+        assert_eq!(variant_as_u32(&VARIANT::default()), None);
+    }
 
     /// The answers remembered for one frame size -- a size no other test
     /// uses, as answers are kept for the whole test run.
@@ -1374,7 +1414,7 @@ mod tests {
     /// at a quarter and three quarters of the way down, decoded to RGB32
     /// through a source reader (reading the rows the right way round
     /// whichever way the frame is stored).
-    fn first_frame_colours(path: &std::path::Path) -> ((u32, u32), [Rgb; 2]) {
+    pub(crate) fn first_frame_colours(path: &std::path::Path) -> ((u32, u32), [Rgb; 2]) {
         use windows::Win32::Media::MediaFoundation::{
             MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             MFCreateAttributes, MFCreateSourceReaderFromURL, MFVideoFormat_RGB32,

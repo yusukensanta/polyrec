@@ -150,46 +150,65 @@ pub(crate) unsafe fn for_each_sample(
     label: Option<&str>,
     mut on_sample: impl FnMut(u32, IMFSample, i64) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    let (read_ctx, error_suffix) = read_error_context(label);
-    unsafe {
-        let mut done_streams: HashSet<u32> = HashSet::new();
-        loop {
-            let mut actual_idx: u32 = 0;
-            let mut stream_flags: u32 = 0;
-            let mut timestamp: i64 = 0;
-            let mut sample: Option<IMFSample> = None;
-
-            reader
-                .ReadSample(
-                    ANY_STREAM,
-                    0,
-                    Some(&mut actual_idx),
-                    Some(&mut stream_flags),
-                    Some(&mut timestamp),
-                    Some(&mut sample),
-                )
-                .encode_ctx(&read_ctx)?;
-
-            if stream_flags & (MF_SOURCE_READERF_ERROR.0 as u32) != 0 {
-                return Err(AppError::Encode(format!(
-                    "ReadSample: stream {actual_idx} reported error{error_suffix}"
-                )));
-            }
-
-            if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                done_streams.insert(actual_idx);
+    let mut done_streams: HashSet<u32> = HashSet::new();
+    loop {
+        match read_next(reader, ANY_STREAM, label)? {
+            Read::EndOfStream(stream) => {
+                done_streams.insert(stream);
                 if done_streams.len() >= total_streams {
                     break;
                 }
-                continue;
             }
-
-            if let Some(sample) = sample {
-                on_sample(actual_idx, sample, timestamp)?;
-            }
+            Read::Sample(stream, Some(sample), timestamp) => on_sample(stream, sample, timestamp)?,
+            Read::Sample(_, None, _) => {}
         }
-        Ok(())
     }
+    Ok(())
+}
+
+/// What one `ReadSample` gave.
+pub(crate) enum Read {
+    /// From the stream: a sample and its timestamp, or no sample (a gap).
+    Sample(u32, Option<IMFSample>, i64),
+    EndOfStream(u32),
+}
+
+/// Reads `stream` (or `ANY_STREAM`) once. A stream reporting
+/// `MF_SOURCE_READERF_ERROR` is an error: the reader delivers nothing after
+/// it, and Media Foundation says not to call `ReadSample` again -- read on,
+/// it would spin. `label`: see `read_error_context`.
+pub(crate) fn read_next(
+    reader: &IMFSourceReader,
+    stream: u32,
+    label: Option<&str>,
+) -> Result<Read, AppError> {
+    let mut actual = 0u32;
+    let mut flags = 0u32;
+    let mut timestamp = 0i64;
+    let mut sample = None;
+    let read = unsafe {
+        reader.ReadSample(
+            stream,
+            0,
+            Some(&mut actual),
+            Some(&mut flags),
+            Some(&mut timestamp),
+            Some(&mut sample),
+        )
+    };
+    if let Err(e) = read {
+        return Err(e).encode_ctx(read_error_context(label).0);
+    }
+    if flags & (MF_SOURCE_READERF_ERROR.0 as u32) != 0 {
+        let suffix = read_error_context(label).1;
+        return Err(AppError::Encode(format!(
+            "ReadSample: stream {actual} reported error{suffix}"
+        )));
+    }
+    if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+        return Ok(Read::EndOfStream(actual));
+    }
+    Ok(Read::Sample(actual, sample, timestamp))
 }
 
 pub fn remux(
@@ -549,27 +568,15 @@ impl TrackDecoder {
 impl PcmPieces for TrackDecoder {
     fn next_piece(&mut self) -> Result<Option<PcmPiece>, AppError> {
         let idx = self.idx;
+        let label = format!("audio {idx}");
         unsafe {
             loop {
-                let mut actual_idx: u32 = 0;
-                let mut stream_flags: u32 = 0;
-                let mut timestamp: i64 = 0;
-                let mut sample: Option<IMFSample> = None;
-                self.reader
-                    .ReadSample(
-                        self.src_idx,
-                        0,
-                        Some(&mut actual_idx),
-                        Some(&mut stream_flags),
-                        Some(&mut timestamp),
-                        Some(&mut sample),
-                    )
-                    .encode_ctx(format_args!("ReadSample(audio {idx})"))?;
-
-                if stream_flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
-                    return Ok(None);
-                }
-                let Some(sample) = sample else { continue };
+                let (sample, timestamp) = match read_next(&self.reader, self.src_idx, Some(&label))?
+                {
+                    Read::EndOfStream(_) => return Ok(None),
+                    Read::Sample(_, None, _) => continue,
+                    Read::Sample(_, Some(sample), timestamp) => (sample, timestamp),
+                };
                 let buffer = sample
                     .ConvertToContiguousBuffer()
                     .encode_ctx(format_args!("ConvertToContiguousBuffer(audio {idx})"))?;
@@ -1366,6 +1373,110 @@ mod tests {
         assert_eq!(
             count_audio_tracks(&no_track_dest).expect("count_audio_tracks failed"),
             0
+        );
+    }
+
+    /// A source reader whose stream reports a decode error (and no sample)
+    /// on every read, for up to `errors` reads; end of stream after that,
+    /// so a loop that reads on past the error ends instead of spinning.
+    #[windows::core::implement(IMFSourceReader)]
+    struct FailingReader {
+        errors: std::cell::Cell<u32>,
+    }
+
+    #[allow(non_snake_case)]
+    impl windows::Win32::Media::MediaFoundation::IMFSourceReader_Impl for FailingReader_Impl {
+        fn ReadSample(
+            &self,
+            stream: u32,
+            _control: u32,
+            actual: *mut u32,
+            flags: *mut u32,
+            timestamp: *mut i64,
+            _sample: windows::core::OutRef<IMFSample>,
+        ) -> windows::core::Result<()> {
+            let left = self.errors.get();
+            let flag = if left > 0 {
+                self.errors.set(left - 1);
+                MF_SOURCE_READERF_ERROR
+            } else {
+                MF_SOURCE_READERF_ENDOFSTREAM
+            };
+            unsafe {
+                *actual = stream;
+                *flags = flag.0 as u32;
+                *timestamp = 0;
+            }
+            Ok(())
+        }
+        fn GetStreamSelection(&self, _: u32) -> windows::core::Result<windows::core::BOOL> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn SetStreamSelection(&self, _: u32, _: windows::core::BOOL) -> windows::core::Result<()> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn GetNativeMediaType(&self, _: u32, _: u32) -> windows::core::Result<IMFMediaType> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn GetCurrentMediaType(&self, _: u32) -> windows::core::Result<IMFMediaType> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn SetCurrentMediaType(
+            &self,
+            _: u32,
+            _: *const u32,
+            _: windows::core::Ref<IMFMediaType>,
+        ) -> windows::core::Result<()> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn SetCurrentPosition(
+            &self,
+            _: *const windows::core::GUID,
+            _: *const windows::Win32::System::Com::StructuredStorage::PROPVARIANT,
+        ) -> windows::core::Result<()> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn Flush(&self, _: u32) -> windows::core::Result<()> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn GetServiceForStream(
+            &self,
+            _: u32,
+            _: *const windows::core::GUID,
+            _: *const windows::core::GUID,
+            _: *mut *mut std::ffi::c_void,
+        ) -> windows::core::Result<()> {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+        fn GetPresentationAttribute(
+            &self,
+            _: u32,
+            _: *const windows::core::GUID,
+        ) -> windows::core::Result<windows::Win32::System::Com::StructuredStorage::PROPVARIANT>
+        {
+            Err(windows::Win32::Foundation::E_NOTIMPL.into())
+        }
+    }
+
+    /// Media Foundation: after `MF_SOURCE_READERF_ERROR` the reader
+    /// delivers nothing more and `ReadSample` mustn't be called again. A
+    /// track that fails to decode fails the mix instead of being read
+    /// forever.
+    #[test]
+    fn a_track_that_fails_to_decode_fails_the_mix() {
+        let mut track = TrackDecoder {
+            reader: FailingReader {
+                errors: std::cell::Cell::new(1000),
+            }
+            .into(),
+            src_idx: 1,
+            idx: 0,
+            rate: 48_000,
+        };
+        let error = track.next_piece().expect_err("a decode error");
+        assert!(
+            error.to_string().contains("audio 0"),
+            "names the track: {error}"
         );
     }
 

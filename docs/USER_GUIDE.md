@@ -73,7 +73,7 @@ Recordings are saved to `<output folder>/polyrec/<app name>_<finish time>.mp4` â
 
 If the graphics driver is updated or reset while PolyRec is running (Windows Update installs graphics drivers on its own; a game that crashes the GPU resets it), or PolyRec runs into an unexpected error, it closes and starts again by itself, minimized so it doesn't pull you out of a game. A recording that was running is stopped and saved first. The restarted PolyRec says what happened at the top of its window. If it has to close again within a minute of restarting, it stays closed instead of trying over and over.
 
-What went wrong is written to `crash.log`, next to the settings in `%APPDATA%\PolyRec`. Include it if you report a problem.
+What went wrong is written to `crash.log`, next to the settings in `%APPDATA%\PolyRec`; what PolyRec does as it runs goes to `polyrec.log`, beside it. Include both if you report a problem (they name the files and apps recorded, so look them over first).
 
 ## Building from source
 

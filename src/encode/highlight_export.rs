@@ -7,7 +7,9 @@
 //! seams that a single-input remux never has to do.
 
 use crate::encode::mf::MfSession;
-use crate::encode::remux::{ALL_STREAMS, StreamLayout, discover_stream_layout, for_each_sample};
+use crate::encode::remux::{
+    ALL_STREAMS, Read, StreamLayout, discover_stream_layout, for_each_sample, read_next,
+};
 use crate::error::{AppError, ResultExt};
 use crate::highlight::SegmentInfo;
 use std::path::{Path, PathBuf};
@@ -106,6 +108,27 @@ fn time_propvariant(hns: i64) -> PROPVARIANT {
     }
 }
 
+fn seek(reader: &IMFSourceReader, at_hns: i64) -> Result<(), AppError> {
+    unsafe { reader.SetCurrentPosition(&GUID::zeroed(), &time_propvariant(at_hns)) }
+        .encode_ctx(format_args!("SetCurrentPosition({at_hns})"))
+}
+
+/// The time of the keyframe at or before `at_hns` in `path`'s video: where
+/// reading it from `at_hns` really starts, a seek in compressed streams
+/// landing on one. `at_hns` itself if there's no frame from there.
+fn keyframe_at_or_before(path: &Path, at_hns: i64) -> Result<i64, AppError> {
+    let (reader, layout, _, _) = unsafe { open_passthrough_reader(path) }?;
+    seek(&reader, at_hns)?;
+    let label = format!("keyframe in {}", path.display());
+    loop {
+        match read_next(&reader, layout.video, Some(&label))? {
+            Read::Sample(_, Some(_), timestamp) => return Ok(timestamp),
+            Read::Sample(_, None, _) => {}
+            Read::EndOfStream(_) => return Ok(at_hns),
+        }
+    }
+}
+
 unsafe fn do_concat_and_trim(
     segments: &[SegmentInfo],
     target_seconds: u32,
@@ -136,6 +159,7 @@ unsafe fn do_concat_and_trim(
         // How much to trim off the front of the oldest contributing segment --
         // zero if the buffer doesn't even contain a full `target_seconds` yet.
         let skip_hns = hns(total.saturating_sub(target));
+        let oldest = contributing[0].path.as_path();
 
         let output_url = HSTRING::from(output);
 
@@ -143,12 +167,17 @@ unsafe fn do_concat_and_trim(
         // every segment shares identical encode settings (same buffering
         // session), so its native compressed types stand in for all of them. ──
         let (first_reader, first_layout, video_type, audio_types) =
-            open_passthrough_reader(contributing[0].path.as_path())?;
-        if skip_hns > 0 {
-            first_reader
-                .SetCurrentPosition(&GUID::zeroed(), &time_propvariant(skip_hns))
-                .encode_ctx(format_args!("SetCurrentPosition({skip_hns})"))?;
-        }
+            open_passthrough_reader(oldest)?;
+        // Where the save starts in the oldest segment: `skip_hns` in, or
+        // rather the keyframe before that, where a seek lands -- every
+        // stream starts there. The frames between can't be decoded without
+        // it, so the save comes out up to a GOP longer than asked.
+        let start_hns = if skip_hns > 0 {
+            seek(&first_reader, skip_hns)?;
+            keyframe_at_or_before(oldest, skip_hns)?
+        } else {
+            0
+        };
 
         let (writer, video_sink, audio_sinks) =
             crate::encode::remux::build_passthrough_sink_writer(
@@ -163,7 +192,7 @@ unsafe fn do_concat_and_trim(
         // the seams, and any gap a rotation left stays a gap, rather than
         // each segment going on where the last sample before it began.
         for (i, seg) in contributing.iter().enumerate() {
-            let offset_hns = hns(seg.start.saturating_sub(contributing[0].start)) - skip_hns;
+            let offset_hns = hns(seg.start.saturating_sub(contributing[0].start)) - start_hns;
             let (reader, layout) = if i == 0 {
                 (first_reader.clone(), first_layout.clone())
             } else {
@@ -366,6 +395,82 @@ mod tests {
         video.sort_unstable();
         video.dedup();
         assert_eq!(video.len(), count, "two frames at one time");
+    }
+
+    /// A save shorter than the buffer starts in its oldest segment, part
+    /// way in. A compressed stream can only start at a keyframe -- the
+    /// frames after it are told apart from it -- so the save starts at the
+    /// keyframe before, a little longer than asked. It used to keep only
+    /// what came after the start asked for: frames that can't be decoded
+    /// without the keyframe left out.
+    #[test]
+    fn a_save_starting_part_way_into_a_segment_starts_at_a_keyframe() {
+        let _mf = MfSession::start_mta().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // 3 s each; the oldest one's frames grey (from 40 up), the newest's
+        // nearly white.
+        let segment = |name: &str, start_s: u64, grey: fn(u64) -> u8| {
+            let path = dir.path().join(name);
+            let writer = RecordingWriter::new(
+                &path,
+                &EncoderParams::tiny_test(Codec::H264, &[(48000u32, 2u16)]),
+            )
+            .expect("RecordingWriter::new");
+            writer.begin_writing().expect("begin_writing");
+            for frame in 0..90u64 {
+                let pts = Duration::from_millis(frame * 1000 / 30);
+                writer
+                    .write_video(VideoFrame {
+                        pts,
+                        data: vec![grey(frame); 64 * 64 * 4].into(),
+                    })
+                    .expect("write_video");
+                for packet in 0..3u64 {
+                    writer
+                        .write_audio(
+                            0,
+                            AudioSamples {
+                                track_id: TrackId::new(0),
+                                pts: pts + Duration::from_millis(packet * 10),
+                                samples: vec![0.1f32; 480 * 2],
+                                sample_rate: 48000,
+                                channels: 2,
+                            },
+                        )
+                        .expect("write_audio");
+                }
+            }
+            writer.finalize().expect("finalize");
+            SegmentInfo {
+                path,
+                start: Duration::from_secs(start_s),
+                duration: Duration::from_secs(3),
+            }
+        };
+        let segments = [
+            segment("seg0.mp4", 0, |frame| 40 + frame as u8),
+            segment("seg1.mp4", 3, |_| 230),
+        ];
+        let output = dir.path().join("saved.mp4");
+        concat_and_trim(&segments, 4, &output).expect("concat_and_trim");
+
+        let video = video_sample_times(&output);
+        assert_eq!(video[0].0, 0, "starts at 0: {:?}", &video[..3]);
+        let last = video.last().unwrap();
+        assert!(
+            last.0 + last.1 >= 40_000_000 - 10,
+            "at least the 4 s asked for (to the 100 ns frame durations round to): {last:?}"
+        );
+        // Decodes from its first frame on, to the oldest segment's picture.
+        let (_, colours) = crate::encode::writer::tests::first_frame_colours(&output);
+        for (r, g, b) in colours {
+            for channel in [r, g, b] {
+                assert!(
+                    (30..=140).contains(&channel),
+                    "first frame isn't the oldest segment's: {colours:?}"
+                );
+            }
+        }
     }
 
     #[test]

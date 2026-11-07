@@ -3,6 +3,7 @@
 //! console, so before this a panic on the dashboard's thread made PolyRec
 //! vanish without leaving anything behind to say why.
 
+use crate::logging::LogFile;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -72,17 +73,7 @@ fn entry(time: &str, thread: &str, message: &str, location: Option<&str>) -> Str
 }
 
 fn append(path: &Path, entry: &str) -> std::io::Result<()> {
-    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
-        std::fs::rename(path, path.with_extension("log.old"))?;
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?
-        .write_all(entry.as_bytes())
+    LogFile::new(path.to_path_buf(), MAX_LOG_BYTES).write_all(entry.as_bytes())
 }
 
 #[cfg(test)]

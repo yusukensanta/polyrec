@@ -26,9 +26,21 @@ use windows::core::{
     ComObject, GUID, HRESULT, IUnknown, IUnknownImpl, Interface, OutRef, Ref, Result, implement,
 };
 
-/// A media sink writing a fragmented MP4 to `path`, created now.
+/// A media sink writing a fragmented MP4 to `path`, created now. Until it's
+/// finished the file is shared for reading only: nothing else -- another
+/// copy of PolyRec recovering recordings it takes for cut off, say -- can
+/// delete it or write to it.
 pub fn create(path: &Path) -> std::result::Result<IMFMediaSink, AppError> {
-    let file = File::create(path).encode_ctx(format_args!("creating {}", path.display()))?;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(path)
+        .encode_ctx(format_args!("creating {}", path.display()))?;
     let sink: IMFFinalizableMediaSink = Fmp4Sink {
         streams: Mutex::new(Vec::new()),
         clock: Mutex::new(None),

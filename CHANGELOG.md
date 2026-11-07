@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- PolyRec keeps a log now: `polyrec.log`, next to `crash.log` in `%APPDATA%\PolyRec`. It says what PolyRec did that you wouldn't otherwise see — a recording recovered, an audio device lost, an encoder falling back — which was all lost before, the app having no console. Past 2 MB it starts over, keeping the one before as `polyrec.log.old`. Include it when you report a problem (it names the files and apps recorded, so look it over first); `RUST_LOG` still picks what's logged.
+
+### Fixed
+
+- A Highlight save shorter than the buffer could start with up to a second that couldn't be shown — black, frozen or skipped, depending on the player. It started part way between two keyframes, leaving out the keyframe the picture after it is drawn from. It starts at that keyframe now, so a save can come out up to a second longer than set.
+- With two copies of PolyRec running at once (an installed and a portable one, say), the second one starting could take the first one's recording, still being written, for one cut off: it saved a copy as `_recovered.mp4` and deleted the recording from under the first. A recording being written is left alone now, and nothing else can delete it or write to it.
+- Resuming a paused recording could, rarely, freeze the picture for as long as the pause had lasted: the recording's clock could be read just as it resumed, before the pause was taken off it. A reading can't fall in the middle of a resume now.
+- Exporting a recording with audio tracks mixed together hung, keeping a CPU core busy, if a track couldn't be decoded. It fails with an error now.
+- A video encoder that says it uses B-frames would have recorded with the wrong timing: crash-safe recording takes the frames in the order the encoder hands them out. Such an encoder now records the way recordings were written before 0.5.152 — right, but not crash-safe — and the log says so.
+
 ## [v0.5.152] - 2026-11-05
 
 ### Fixed

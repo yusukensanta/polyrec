@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before filing: check [existing issues](https://github.com/yusukensanta/polyrec/issues) and try running from a terminal with `$env:RUST_LOG="debug"; .\polyrec.exe` to capture more detail.
+        Before filing: check [existing issues](https://github.com/yusukensanta/polyrec/issues). PolyRec keeps a log, `polyrec.log`, and writes crashes to `crash.log`, both in `%APPDATA%\PolyRec`; the logs below are the most useful thing to include. For more detail, start PolyRec with `$env:RUST_LOG="polyrec=debug"; .\polyrec.exe` and try again.
 
   - type: input
     id: version
@@ -87,8 +87,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Error Output / Logs
-      description: Paste relevant terminal output (run with `$env:RUST_LOG="debug"` for extra detail)
+      label: Logs
+      description: 'The end of `%APPDATA%\PolyRec\polyrec.log` (from around when it went wrong), and `crash.log` if there is one. They name files and apps PolyRec recorded: look them over before pasting.'
       render: shell
     validations:
       required: false
