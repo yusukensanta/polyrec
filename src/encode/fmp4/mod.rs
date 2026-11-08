@@ -474,14 +474,20 @@ pub(crate) mod tests {
     /// meet it, keeping every sample's time; Media Foundation reading the
     /// fragmented file gives that sample its own length, and leaves the gap.
     ///
-    /// And bar one thing more. A fragment cut at 2 s where the encoder put no
-    /// keyframe starts with an ordinary frame (an H.264 slice of NAL type
-    /// 1), and Media Foundation reads such a frame of a fragmented file as
-    /// a keyframe, with the parameter sets put in front of it; its remux
-    /// wrote it so. It isn't one: a player seeking to it couldn't decode
-    /// from there. A file finished in place keeps it as the encoder made
-    /// it, so there `theirs` may be a keyframe that's `ours` with more in
-    /// front. How many such frames there were.
+    /// And a video sample of `theirs` may be `ours` with the parameter sets
+    /// put in front of it, marked a keyframe, in two cases:
+    /// - Media Foundation's MP4 writer -- the remux -- puts an HEVC
+    ///   keyframe's parameter sets in the keyframe itself. The finished
+    ///   file keeps them where the encoder's output had them, and where
+    ///   `hvc1` says they go: in the track's sample description.
+    /// - A fragment cut at 2 s where the encoder put no keyframe starts with
+    ///   an ordinary frame (an H.264 slice of NAL type 1), and Media
+    ///   Foundation reads such a frame of a fragmented file as a keyframe,
+    ///   parameter sets in front; its remux wrote it so. It isn't one: a
+    ///   player seeking to it couldn't decode from there. The finished file
+    ///   keeps it as the encoder made it.
+    ///
+    /// How many of the second kind there were.
     fn assert_reads_like(
         ours: &[Vec<MfSample>],
         theirs: &[Vec<MfSample>],
@@ -502,14 +508,15 @@ pub(crate) mod tests {
                     (a.duration - b.duration).abs() <= tolerance || runs_to_next,
                     "{at}"
                 );
-                if a.keyframe == b.keyframe {
-                    assert!(a.data == b.data, "{at}: different bytes");
-                } else {
-                    let read_as_keyframe = stream == 0
-                        && !a.keyframe
-                        && b.data.len() > a.data.len()
-                        && b.data.ends_with(&a.data);
-                    assert!(read_as_keyframe, "{at}");
+                if a.keyframe == b.keyframe && a.data == b.data {
+                    continue;
+                }
+                let parameter_sets_in_front = stream == 0
+                    && b.keyframe
+                    && b.data.len() > a.data.len()
+                    && b.data.ends_with(&a.data);
+                assert!(parameter_sets_in_front, "{at}: different");
+                if !a.keyframe {
                     not_keyframes += 1;
                 }
             }
@@ -938,26 +945,44 @@ pub(crate) mod tests {
 
     /// HEVC from a hardware encoder at 1080p -- what most recordings are,
     /// and what Media Foundation's own fragmented MP4 sink won't take --
-    /// reads back, decodes and remuxes. Needs a GPU encoder: ignored.
+    /// finished in place at Stop: it reads back like its fragmented original
+    /// and like the remux that finished recordings before, and decodes. 10 s
+    /// with three audio tracks, like a real recording. Needs a GPU encoder:
+    /// ignored.
+    ///
+    /// With `POLYREC_KEEP_SAMPLE_DIR` set, the finished file is kept there
+    /// (`polyrec-soft-remux-sample-hevc.mp4`) to open in players: a slowly
+    /// scrolling gradient, silent.
     #[test]
     #[ignore = "needs a hardware HEVC encoder"]
     fn hardware_hevc_through_the_own_sink() {
+        const THREE: [(u32, u16); 3] = [(48_000, 2); 3];
+        const FRAMES: u64 = 300;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hevc.frag.mp4");
+        let path = dir.path().join("hevc.tmp.mp4");
         let params = EncoderParams {
             width: 1920,
             height: 1080,
             codec: Codec::H265,
             bitrate_bps: 20_000_000,
             allow_hardware_encode: true,
-            ..params()
+            ..params_with(&THREE)
         };
         let writer = RecordingWriter::new(&path, &params).expect("writer");
         writer.begin_writing().unwrap();
         let started = Instant::now();
-        for frame in 0..90u64 {
+        // Two widths of a gradient (BGRA), so a frame's row is a window on
+        // it, 8 pixels further each frame.
+        let gradient: Vec<u8> = (0..1920 * 2u32)
+            .flat_map(|x| {
+                let v = (x % 1920 * 255 / 1919) as u8;
+                [v, 128, 255 - v, 255]
+            })
+            .collect();
+        for frame in 0..FRAMES {
             let pts = Duration::from_millis(frame * 1000 / 30);
-            let data = vec![(frame * 7 % 255) as u8; 1920 * 1080 * 4];
+            let shift = (frame as usize * 8 % 1920) * 4;
+            let data = gradient[shift..shift + 1920 * 4].repeat(1080);
             writer
                 .write_video(VideoFrame {
                     pts,
@@ -965,11 +990,11 @@ pub(crate) mod tests {
                 })
                 .unwrap();
             for packet in 0..3u64 {
-                for (track, (rate, channels)) in TRACKS.iter().enumerate() {
+                for (track, (rate, channels)) in THREE.iter().enumerate() {
                     let samples = AudioSamples {
                         track_id: TrackId::new(track as u32),
                         pts: pts + Duration::from_millis(packet * 10),
-                        samples: vec![0.1; (*rate as usize / 100) * usize::from(*channels)],
+                        samples: vec![0.0; (*rate as usize / 100) * usize::from(*channels)],
                         sample_rate: *rate,
                         channels: *channels,
                     };
@@ -978,12 +1003,34 @@ pub(crate) mod tests {
             }
         }
         writer.finalize().expect("finalize");
-        println!("encoded 3 s in {:?}", started.elapsed());
-        assert_holds_three_seconds_of_everything(&read_back(&path));
-        assert_eq!(decoded_frames(&path), 90);
-        let plain = dir.path().join("hevc.mp4");
-        crate::encode::remux::remux(&path, &plain, &[0, 1]).expect("remux");
-        assert_holds_three_seconds_of_everything(&read_back(&plain));
+        println!("encoded {} s in {:?}", FRAMES / 30, started.elapsed());
+        assert_eq!(
+            top_level(&path),
+            ["ftyp", "mdat", "moov"],
+            "finished in place"
+        );
+
+        let ours = mf_samples(&path);
+        assert_eq!(ours.len(), 4, "video and three audio streams");
+        assert_eq!(ours[0].len(), FRAMES as usize, "every frame");
+        let original = dir.path().join("hevc.frag.mp4");
+        unfinished_copy(&path, &original);
+        let before = as_finished(mf_samples(&original));
+        assert_reads_like(&ours, &before, A_TICK, "against its fragmented original");
+        let remuxed = dir.path().join("hevc.remuxed.mp4");
+        crate::encode::remux::remux(&original, &remuxed, &[0, 1, 2]).expect("remux");
+        let marked = assert_reads_like(&ours, &mf_samples(&remuxed), 10_000, "against the remux");
+        println!("frames the remux marked keyframes that aren't: {marked}");
+        assert_eq!(top_level_tracks(&path), top_level_tracks(&remuxed));
+        assert_eq!(decoded_frames(&path), FRAMES as usize);
+
+        if let Ok(keep) = std::env::var("POLYREC_KEEP_SAMPLE_DIR") {
+            let keep = Path::new(&keep);
+            std::fs::create_dir_all(keep).unwrap();
+            let sample = keep.join("polyrec-soft-remux-sample-hevc.mp4");
+            std::fs::copy(&path, &sample).unwrap();
+            println!("kept {}", sample.display());
+        }
     }
 
     /// The child half of `a_recording_cut_off_reads_back_to_its_last_fragment`:

@@ -142,8 +142,8 @@ fn main() -> eframe::Result<()> {
     // A recording still being saved -- closing mid-recording, or right after
     // Stop -- finishes here, on the runtime's blocking threads. Dropping the
     // runtime would wait for that however long it took, so a save that hung
-    // left PolyRec running invisibly for good. A real save takes well under
-    // a second.
+    // left PolyRec running invisibly for good. A real save is finished in
+    // place (`encode::fmp4`): about a second, however long the recording.
     drop(rt_guard);
     rt.shutdown_timeout(SAVE_ON_EXIT_TIMEOUT);
 
