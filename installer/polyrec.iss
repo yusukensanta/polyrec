@@ -45,10 +45,11 @@ ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 LicenseFile=..\LICENSE
-; Both this installer and the polyrec.exe it bundles are Authenticode-signed
-; in CI (release.yml, via SignPath Foundation's free OSS code signing) --
-; still expect a SmartScreen warning until the cert/binary build up enough
-; download reputation over time, see SECURITY.md.
+; release.yml asks SignPath to Authenticode-sign this installer and the
+; polyrec.exe it bundles, but those requests currently fail (yearly quota),
+; so both ship unsigned and SmartScreen shows "Unknown Publisher" -- see
+; SECURITY.md. Downloads are verified by SHA256SUMS.txt and the build
+; provenance attestation instead.
 ; Supports the in-app self-updater (src/self_update.rs): it launches this
 ; installer silently while PolyRec is (about to be) still running, so the
 ; installer needs to be able to close it around the file replace rather than
