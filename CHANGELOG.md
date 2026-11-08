@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.161] - 2026-11-08
+
 ### Security
 
 - Updates are now signed with a key the maintainer keeps off GitHub, and **Update Now** installs only a release whose checksums carry that signature. Until now an update had to be built by PolyRec's own release workflow, but anyone who got into the maintainer's GitHub account could have had that workflow build something else. The update banner, too, only appears for a signed release. The first signed release is this one; you can check a download yourself with minisign (see "Verifying a download" in the user guide).
