@@ -2,8 +2,9 @@ name: Release
 
 # A pushed v*.*.* tag builds that release and leaves it as a DRAFT: nobody
 # (and no copy of PolyRec checking for updates) sees it yet. The maintainer
-# then runs .github/scripts/Sign-Release.ps1 locally, which checks what this
-# built, signs its SHA256SUMS.txt with the release key -- kept off GitHub,
+# then runs .github/scripts/Sign-Release.ps1 locally (a copy kept outside
+# the repo), which checks what this built and what changed since the last
+# release, signs its SHA256SUMS.txt with the release key -- kept off GitHub,
 # so nothing here can produce that signature -- uploads the signature and
 # publishes the release. PolyRec only installs an update whose checksums
 # carry it (self_update::verify_signed_sums).

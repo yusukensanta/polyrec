@@ -206,14 +206,22 @@ fn verify_signed_sums(
     Ok(())
 }
 
-async fn fetch_expected_sha256(version_tag: &str, filename: &str) -> Result<String, AppError> {
+/// Downloads `version_tag`'s `SHA256SUMS.txt` and its signature, and
+/// returns its text once it's verified to be signed with a release key, for
+/// that release (`verify_signed_sums`). `version_tag` goes into URLs: only
+/// ever a version (`update_check::tag_version`).
+pub(crate) async fn fetch_signed_sums(version_tag: &str) -> Result<String, AppError> {
     let bytes = download_bytes(&release_asset_url(version_tag, "SHA256SUMS.txt")).await?;
     let signature =
         download_bytes(&release_asset_url(version_tag, "SHA256SUMS.txt.minisig")).await?;
     let signature =
         String::from_utf8(signature).update_ctx("SHA256SUMS.txt.minisig wasn't valid UTF-8")?;
     verify_signed_sums(&bytes, &signature, &RELEASE_KEYS, version_tag)?;
-    let text = String::from_utf8(bytes).update_ctx("SHA256SUMS.txt wasn't valid UTF-8")?;
+    String::from_utf8(bytes).update_ctx("SHA256SUMS.txt wasn't valid UTF-8")
+}
+
+async fn fetch_expected_sha256(version_tag: &str, filename: &str) -> Result<String, AppError> {
+    let text = fetch_signed_sums(version_tag).await?;
     parse_sha256sums(&text, filename).ok_or_else(|| {
         AppError::Update(format!(
             "no checksum entry for {filename} in SHA256SUMS.txt"
@@ -1035,6 +1043,15 @@ mod tests {
             release_asset_url("v0.4.0", "polyrec-v0.4.0-windows-x64.zip"),
             "https://github.com/yusukensanta/polyrec/releases/download/v0.4.0/polyrec-v0.4.0-windows-x64.zip"
         );
+    }
+
+    /// v0.5.160, published before releases were signed. Needs network, so
+    /// it's ignored by default -- run with `--ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn a_real_release_without_a_signature_is_refused() {
+        let refused = fetch_signed_sums("v0.5.160").await.unwrap_err();
+        println!("{refused}");
     }
 
     /// End-to-end against a real, already-published release -- v0.5.161, the

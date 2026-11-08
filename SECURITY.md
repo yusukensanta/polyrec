@@ -62,7 +62,21 @@ From v0.5.161, PolyRec's self-updater installs a release only if all of these ho
 2. The downloaded file's SHA-256 matches its line in that file.
 3. GitHub holds a build provenance attestation saying `release.yml` built that file for that tag.
 
-Neither secret key is ever on GitHub: the release workflow leaves each release as a draft, and the maintainer checks it, signs it and publishes it from their own machine (`.github/scripts/Sign-Release.ps1`). So someone who gets the maintainer's GitHub login or a token, or compromises the workflow, can publish a release but can't make PolyRec install it.
+Neither secret key is ever on GitHub. The release workflow leaves each release as a draft, and the maintainer checks it, signs it and publishes it from their own machine (`.github/scripts/Sign-Release.ps1`, run from a copy kept outside the repo).
+
+That check covers four things:
+- the keys the release is built with are the maintainer's;
+- every change since the last signed release;
+- the files' build provenance;
+- the exact files published.
+
+The update banner, too, only appears for a release signed this way. So someone who gets the maintainer's GitHub login or a token elsewhere, or compromises the workflow, can publish a release but can't make PolyRec offer or install it.
+
+What this does **not** cover:
+- **A compromised maintainer machine.** The release key is password-protected, but it lives on the maintainer's development machine. Someone in control of that machine could capture the password as it's typed and sign anything.
+- **Revoking a key.** Every build trusts both keys for good. Losing one is covered by the other, but if one is stolen, already-installed copies keep trusting it. Replacing it means a new release, and older copies would still accept the stolen key.
+- **v0.5.160 and older.** These check build provenance only, not this signature. Until they've updated, someone able to run the release workflow could still ship them an update.
+- **Freezing updates.** Someone in control of the GitHub repository can still stop updates from appearing, for example by publishing an unsigned release as the latest. Users then just don't see an update.
 
 ## Security Advisories
 

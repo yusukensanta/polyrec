@@ -204,11 +204,23 @@ Make sure `cargo build --release`, `cargo clippy --all-targets`, and `cargo test
    git push origin vX.Y.Z
    ```
 4. CI builds, verifies the tag matches `Cargo.toml`, and leaves a draft release. See `.github/workflows/release.yml`.
-5. Sign and publish it, in a terminal of your own (minisign asks for the release key's password):
+5. Sign and publish it, in a terminal of your own (minisign asks for the release key's password), from the repo checkout the tag was pushed from:
    ```powershell
-   pwsh -File .github/scripts/Sign-Release.ps1 vX.Y.Z
+   pwsh -NoProfile -File $env:USERPROFILE\.minisign\Sign-Release.ps1 vX.Y.Z
    ```
-   It checks the draft's files (checksums, and build provenance from that tag's commit on `main`), signs `SHA256SUMS.txt` with the release key, uploads `SHA256SUMS.txt.minisig` and publishes the release. PolyRec's self-updater installs only releases signed with one of the keys in `keys/`: the release key, or the backup key kept offline should it be lost (`-KeyFile <backup key>`). Neither secret key is ever on GitHub, so nothing there can sign a release.
+   That's a copy of `.github/scripts/Sign-Release.ps1` kept next to your keys, outside the repo, because anyone able to push to GitHub could change the repo's copy, and it runs while you type the password. Install it once after reading it (`Copy-Item .github/scripts/Sign-Release.ps1 $env:USERPROFILE\.minisign\`). Re-install it, after reading the diff, when it tells you the repo's copy has changed.
+
+   It:
+   - checks that `keys/` at the tag are your public keys;
+   - lists what changed since the last release you signed, flagging files that change the build, the release or the keys, and waits for you to type the tag;
+   - checks the draft's files: checksums, and build provenance from that tag's commit on `main`;
+   - signs `SHA256SUMS.txt`;
+   - uploads `SHA256SUMS.txt.minisig`;
+   - checks the draft holds exactly those four files, then publishes it.
+
+   PolyRec's self-updater installs only releases signed with one of the keys in `keys/`: the release key, or the backup key kept offline should it be lost (`-KeyFile <backup key>`).
+
+   Signing says you've looked at what's in the release, so read the list. Never take the password off the release key to save typing it.
 
 ## Code of Conduct
 
