@@ -151,20 +151,22 @@ fn cut_off_recording(name: &OsStr) -> Option<(String, u128)> {
 }
 
 fn recover(path: &Path, app: &str, started: u128, dir: &Path) -> Result<PathBuf, AppError> {
-    // Whether it reads at all, and how many audio tracks it has.
-    let audio_tracks = crate::encode::remux::count_audio_tracks(path)?;
     let started = UNIX_EPOCH + Duration::from_millis(started as u64);
-    let saved = reserve_recovered_recording_path(app, started.into(), dir)?;
-    crate::encode::fmp4::finish(path, &saved, audio_tracks).inspect_err(|_| {
-        let _ = std::fs::remove_file(&saved);
-    })?;
-    Ok(saved)
+    crate::encode::fmp4::finish(
+        path,
+        || Ok(reserve_recovered_recording_path(app, started.into(), dir)?),
+        // Asked only of a file written before recordings were finished in
+        // place: whether it reads at all, and how many audio tracks it has.
+        || crate::encode::remux::count_audio_tracks(path),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::fmp4::tests::{record_fragmented, top_level};
+    use crate::encode::fmp4::tests::{
+        cut_off_after_index_copy, record_finished, record_fragmented, top_level,
+    };
     use std::time::{Duration, UNIX_EPOCH};
 
     fn millis(at: SystemTime) -> u128 {
@@ -194,6 +196,49 @@ mod tests {
             !top_level(&recovered[0]).contains(&"moof".to_owned()),
             "a plain MP4"
         );
+    }
+
+    /// PolyRec quit (or the power went) while finishing a recording, after
+    /// its index was written but before its header went in: it's finished
+    /// at the next start all the same.
+    #[test]
+    fn a_recording_whose_finish_was_cut_off_after_its_index_is_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(60);
+        let leftover = dir
+            .path()
+            .join(format!("game_recording_{}.tmp.mp4", millis(started)));
+        let elsewhere = tempfile::tempdir().unwrap();
+        let finished = elsewhere.path().join("rec.mp4");
+        record_finished(&finished, 90);
+        cut_off_after_index_copy(&finished, &leftover);
+
+        let recovered = recover_cut_off_recordings(dir.path(), SystemTime::now());
+        assert_eq!(recovered.len(), 1, "{recovered:?}");
+        assert!(!leftover.exists());
+        assert_eq!(
+            std::fs::read(&recovered[0]).unwrap(),
+            std::fs::read(&finished).unwrap(),
+            "finished as at Stop"
+        );
+    }
+
+    /// Cut off after the recording was finished, before it was moved to
+    /// its name: it's moved as it is.
+    #[test]
+    fn a_recording_finished_but_not_renamed_is_recovered_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(60);
+        let leftover = dir
+            .path()
+            .join(format!("game_recording_{}.tmp.mp4", millis(started)));
+        record_finished(&leftover, 90);
+        let bytes = std::fs::read(&leftover).unwrap();
+
+        let recovered = recover_cut_off_recordings(dir.path(), SystemTime::now());
+        assert_eq!(recovered.len(), 1, "{recovered:?}");
+        assert!(!leftover.exists());
+        assert_eq!(std::fs::read(&recovered[0]).unwrap(), bytes);
     }
 
     /// A recording started after this start is one being written; a file

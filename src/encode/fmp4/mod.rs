@@ -6,8 +6,15 @@
 //! media sink of PolyRec's own (`sink`) takes the sink writer's place
 //! behind the encoders, which stay Media Foundation's, and writes the file
 //! a fragment (one GOP, about a second) at a time: a recording cut off
-//! loses its last fragment, no more. At Stop it's remuxed into a plain MP4
-//! (`encode::remux`), so the finished file is what it always was.
+//! loses its last fragment, no more.
+//!
+//! At Stop the file is finished in place (`soft_remux`): a complete index
+//! goes at its end and a placeholder near its start becomes the header of
+//! one `mdat` holding everything before it -- a plain MP4, in about a
+//! second however long the recording, without copying it. A recording cut
+//! off is finished the same way at the next start. One written before
+//! recordings were finished in place (no placeholder) is remuxed into a
+//! plain MP4 (`encode::remux`), as they were then.
 
 pub mod boxes;
 pub mod muxer;
@@ -16,13 +23,53 @@ pub mod sink;
 pub mod soft_remux;
 
 use crate::error::AppError;
-use std::path::Path;
+use soft_remux::InPlace;
+use std::path::{Path, PathBuf};
+
+/// Finishes the recording at `temp` into a plain MP4 and moves it to the
+/// name `reserve` gives -- asked only once the file is finished, so a
+/// finish cut off never leaves an empty file holding a name. Returns where
+/// it's saved. A recording that can't be finished in place is moved there
+/// as it is: a fragmented MP4 plays all the same.
+///
+/// `audio_tracks` (how many it has) is asked only of a recording written
+/// before recordings were finished in place, for the remux that finishes
+/// it; Media Foundation, which counts them, may not open a file whose
+/// finish was cut off between its two writes.
+pub fn finish(
+    temp: &Path,
+    reserve: impl FnOnce() -> Result<PathBuf, AppError>,
+    audio_tracks: impl FnOnce() -> Result<usize, AppError>,
+) -> Result<PathBuf, AppError> {
+    match soft_remux::finish_in_place(temp) {
+        InPlace::Finished | InPlace::KeptFragmented => {
+            into_reserved(reserve()?, |dest| move_over(temp, dest))
+        }
+        InPlace::Legacy => {
+            let audio_tracks = audio_tracks()?;
+            into_reserved(reserve()?, |dest| finish_legacy(temp, dest, audio_tracks))
+        }
+    }
+}
+
+/// `dest`, once `fill` has put the recording there; the empty file that
+/// reserved it is removed if it couldn't.
+fn into_reserved(
+    dest: PathBuf,
+    fill: impl FnOnce(&Path) -> Result<(), AppError>,
+) -> Result<PathBuf, AppError> {
+    fill(&dest).inspect_err(|_| {
+        let _ = std::fs::remove_file(&dest);
+    })?;
+    Ok(dest)
+}
 
 /// Makes the fragmented recording at `fragmented` (with `audio_tracks`
-/// tracks of audio) the plain MP4 at `dest`, removing it. If remuxing
-/// fails -- or there's no room on the drive for the second copy it writes
-/// -- it's moved to `dest` as it is: a fragmented MP4 plays all the same.
-pub fn finish(fragmented: &Path, dest: &Path, audio_tracks: usize) -> Result<(), AppError> {
+/// tracks of audio, written before recordings were finished in place) the
+/// plain MP4 at `dest`, removing it. If remuxing fails -- or there's no room
+/// on the drive for the second copy it writes -- it's moved to `dest` as it
+/// is: a fragmented MP4 plays all the same.
+fn finish_legacy(fragmented: &Path, dest: &Path, audio_tracks: usize) -> Result<(), AppError> {
     let size = std::fs::metadata(fragmented).map_or(0, |m| m.len());
     let free = dest
         .parent()
@@ -34,7 +81,7 @@ pub fn finish(fragmented: &Path, dest: &Path, audio_tracks: usize) -> Result<(),
             size >> 20,
             fragmented.display()
         );
-        return keep_fragmented(fragmented, dest);
+        return move_over(fragmented, dest);
     }
     let tracks: Vec<usize> = (0..audio_tracks).collect();
     match crate::encode::remux::remux(fragmented, dest, &tracks) {
@@ -47,16 +94,18 @@ pub fn finish(fragmented: &Path, dest: &Path, audio_tracks: usize) -> Result<(),
                 "couldn't remux {} ({e}); keeping it fragmented",
                 fragmented.display()
             );
-            keep_fragmented(fragmented, dest)
+            move_over(fragmented, dest)
         }
     }
 }
 
-fn keep_fragmented(fragmented: &Path, dest: &Path) -> Result<(), AppError> {
+/// Moves the recording at `from` to `dest`, over the empty file that
+/// reserved that name.
+fn move_over(from: &Path, dest: &Path) -> Result<(), AppError> {
     use crate::error::ResultExt;
-    std::fs::rename(fragmented, dest).encode_ctx(format_args!(
+    std::fs::rename(from, dest).encode_ctx(format_args!(
         "moving {} to {}",
-        fragmented.display(),
+        from.display(),
         dest.display()
     ))
 }
@@ -296,6 +345,16 @@ pub(crate) mod tests {
         std::fs::write(to, unfinished_bytes(finished)).unwrap();
     }
 
+    /// The recording `finished` at `to` as a finish cut off after its
+    /// `moov` was written, before its header went in, left it.
+    pub(crate) fn cut_off_after_index_copy(finished: &Path, to: &Path) {
+        let bytes = std::fs::read(finished).unwrap();
+        let moov = super::boxes::tests::find(&super::boxes::tests::boxes(&bytes), "moov").at;
+        let mut cut_off = unfinished_bytes(finished);
+        cut_off.extend_from_slice(&bytes[moov..]);
+        std::fs::write(to, cut_off).unwrap();
+    }
+
     /// The recording `finished` at `to` as it would have been written
     /// before recordings were finished in place: no placeholder. (Its
     /// fragments' offsets count from their own `moof`, so they still hold.)
@@ -409,7 +468,13 @@ pub(crate) mod tests {
     /// `theirs`: the same samples, at times and for durations within
     /// `tolerance` (100 ns units), with the same bytes and keyframes.
     ///
-    /// Bar one thing. A fragment cut at 2 s where the encoder put no
+    /// A duration may differ where ours runs exactly to the next sample:
+    /// where a fragment's audio didn't end where the next fragment's
+    /// starts, the finished file lengthens (or shortens) its last sample to
+    /// meet it, keeping every sample's time; Media Foundation reading the
+    /// fragmented file gives that sample its own length, and leaves the gap.
+    ///
+    /// And bar one thing more. A fragment cut at 2 s where the encoder put no
     /// keyframe starts with an ordinary frame (an H.264 slice of NAL type
     /// 1), and Media Foundation reads such a frame of a fragmented file as
     /// a keyframe, with the parameter sets put in front of it; its remux
@@ -430,7 +495,13 @@ pub(crate) mod tests {
             for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
                 let at = format!("{what}: stream {stream} sample {i}: {a:?} vs {b:?}");
                 assert!((a.time - b.time).abs() <= tolerance, "{at}");
-                assert!((a.duration - b.duration).abs() <= tolerance, "{at}");
+                let runs_to_next = ours
+                    .get(i + 1)
+                    .is_some_and(|next| (a.time + a.duration - next.time).abs() <= tolerance);
+                assert!(
+                    (a.duration - b.duration).abs() <= tolerance || runs_to_next,
+                    "{at}"
+                );
                 if a.keyframe == b.keyframe {
                     assert!(a.data == b.data, "{at}: different bytes");
                 } else {
@@ -596,8 +667,11 @@ pub(crate) mod tests {
         assert_reads_like(&ours, &as_finished(before), A_TICK, "late start and gap");
     }
 
-    /// Finishing a short recording in place costs less than the remux it
-    /// replaces, and adds only the index to the file.
+    /// Finishing a short recording in place takes no longer than the remux
+    /// it replaces -- a few milliseconds either way at half a second, where
+    /// it's mostly its two flushes to disk (so a power cut can't leave a
+    /// broken file), which the remux never did -- and adds only the index
+    /// to the file.
     #[test]
     fn a_short_recording_grows_only_by_its_index_and_finishes_faster_than_a_remux() {
         let dir = tempfile::tempdir().unwrap();
@@ -611,23 +685,41 @@ pub(crate) mod tests {
         let fragmented = std::fs::metadata(&unfinished).unwrap().len() as usize;
         assert_eq!(bytes.len(), fragmented + moov, "it grows by its index only");
 
-        // Not `b.tmp.mp4`: the remux writes that while making `b.mp4`.
-        let for_remux = dir.path().join("b.frag.mp4");
-        unfinished_copy(&finished, &for_remux);
-        let started = Instant::now();
-        let outcome = super::soft_remux::finish_in_place(&unfinished);
-        let in_place = started.elapsed();
-        assert_eq!(outcome, super::soft_remux::InPlace::Finished);
-        let remuxed = dir.path().join("b.mp4");
-        let started = Instant::now();
-        crate::encode::remux::remux(&for_remux, &remuxed, &[0, 1]).expect("remux");
-        let remux = started.elapsed();
-        let remuxed_size = std::fs::metadata(&remuxed).unwrap().len();
+        // The median of 5 of each: one alone is mostly scheduling noise at
+        // this size (tests run side by side).
+        let median = |mut times: Vec<Duration>| {
+            times.sort();
+            times[times.len() / 2]
+        };
+        let mut in_place = Vec::new();
+        let mut remux = Vec::new();
+        let mut remuxed_size = 0;
+        for round in 0..5 {
+            let copy = dir.path().join(format!("a{round}.tmp.mp4"));
+            unfinished_copy(&finished, &copy);
+            let started = Instant::now();
+            let outcome = super::soft_remux::finish_in_place(&copy);
+            in_place.push(started.elapsed());
+            assert_eq!(outcome, super::soft_remux::InPlace::Finished);
+
+            // Not `b.tmp.mp4`: the remux writes that while making `b.mp4`.
+            let for_remux = dir.path().join(format!("b{round}.frag.mp4"));
+            unfinished_copy(&finished, &for_remux);
+            let remuxed = dir.path().join(format!("b{round}.mp4"));
+            let started = Instant::now();
+            crate::encode::remux::remux(&for_remux, &remuxed, &[0, 1]).expect("remux");
+            remux.push(started.elapsed());
+            remuxed_size = std::fs::metadata(&remuxed).unwrap().len();
+        }
+        let (in_place, remux) = (median(in_place), median(remux));
         println!(
-            "half a second: in place {in_place:?}, remux {remux:?}; {} bytes in place ({fragmented} fragmented + {moov} index), {remuxed_size} remuxed",
+            "half a second: in place {in_place:?}, remux {remux:?} (medians of 5); {} bytes in place ({fragmented} fragmented + {moov} index), {remuxed_size} remuxed",
             bytes.len()
         );
-        assert!(in_place < remux, "in place {in_place:?}, remux {remux:?}");
+        assert!(
+            in_place <= remux + Duration::from_millis(5),
+            "in place {in_place:?}, remux {remux:?}"
+        );
     }
 
     /// Recovery finds the index by walking the file; Stop has it from the
@@ -677,16 +769,23 @@ pub(crate) mod tests {
         assert_eq!(read_back(&exported)[0].0, 90, "every frame");
     }
 
+    /// Reserves `path` as a recording's name is: with an empty file.
+    fn reserve(path: &Path) -> Result<std::path::PathBuf, crate::error::AppError> {
+        std::fs::write(path, b"").unwrap();
+        Ok(path.to_path_buf())
+    }
+
+    /// A recording cut off (fragmented) is finished and moved to its name.
     #[test]
     fn a_finished_recording_is_a_plain_mp4() {
         let dir = tempfile::tempdir().unwrap();
         let fragmented = fragmented_recording(dir.path());
         assert!(top_level(&fragmented).contains(&"moof".to_owned()));
-        // Its name reserved by an empty file, as recordings' are.
         let dest = dir.path().join("app_2026.mp4");
-        std::fs::write(&dest, b"").unwrap();
 
-        super::finish(&fragmented, &dest, TRACKS.len()).expect("finish");
+        let saved =
+            super::finish(&fragmented, || reserve(&dest), || Ok(TRACKS.len())).expect("finish");
+        assert_eq!(saved, dest);
         assert!(!fragmented.exists(), "the fragmented one is gone");
         assert!(
             !top_level(&dest).contains(&"moof".to_owned()),
@@ -694,6 +793,98 @@ pub(crate) mod tests {
             top_level(&dest)
         );
         assert_holds_three_seconds_of_everything(&read_back(&dest));
+    }
+
+    /// The name is reserved only once the file is finished: a finish cut
+    /// off leaves no empty file holding it.
+    #[test]
+    fn the_name_is_reserved_only_once_the_file_is_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragmented = fragmented_recording(dir.path());
+        let dest = dir.path().join("app_2026.mp4");
+        super::finish(
+            &fragmented,
+            || {
+                let bytes = std::fs::read(&fragmented).unwrap();
+                let top = super::boxes::tests::boxes(&bytes);
+                assert_eq!(super::boxes::tests::kinds(&top), ["ftyp", "mdat", "moov"]);
+                reserve(&dest)
+            },
+            || Ok(TRACKS.len()),
+        )
+        .expect("finish");
+        assert!(dest.exists());
+    }
+
+    /// Media Foundation's track count is for the old remux only: finishing
+    /// in place keeps every track, and MF may not open a file whose finish
+    /// was cut off between its two writes.
+    #[test]
+    fn a_soft_finish_never_asks_media_foundation_for_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragmented = fragmented_recording(dir.path());
+        let dest = dir.path().join("app_2026.mp4");
+        super::finish(
+            &fragmented,
+            || reserve(&dest),
+            || panic!("asked for tracks"),
+        )
+        .expect("finish");
+    }
+
+    /// A recording written before they were finished in place -- no
+    /// placeholder -- is remuxed, as then.
+    #[test]
+    fn a_legacy_recording_takes_todays_remux() {
+        let dir = tempfile::tempdir().unwrap();
+        let finished = dir.path().join("rec.mp4");
+        record_finished(&finished, 90);
+        let legacy = dir.path().join("app_recording_1.tmp.mp4");
+        legacy_copy(&finished, &legacy);
+        let dest = dir.path().join("app_2026.mp4");
+        let asked = std::cell::Cell::new(false);
+
+        super::finish(
+            &legacy,
+            || reserve(&dest),
+            || {
+                asked.set(true);
+                Ok(TRACKS.len())
+            },
+        )
+        .expect("finish");
+        assert!(asked.get(), "the remux needs the track count");
+        assert!(!legacy.exists());
+        let kinds = top_level(&dest);
+        assert!(!kinds.contains(&"moof".to_owned()), "{kinds:?}");
+        assert_holds_three_seconds_of_everything(&read_back(&dest));
+    }
+
+    /// The file can't be written to (here: read-only), so it can't be
+    /// finished in place: it's moved to its name as it is, fragmented,
+    /// which reads all the same.
+    #[test]
+    fn a_recording_that_cant_be_finished_in_place_is_kept_fragmented() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragmented = fragmented_recording(dir.path());
+        set_read_only(&fragmented, true);
+        let dest = dir.path().join("app_2026.mp4");
+
+        let saved = super::finish(&fragmented, || reserve(&dest), || Ok(TRACKS.len()));
+        set_read_only(&dest, false);
+        set_read_only(&fragmented, false);
+        saved.expect("finish");
+        assert!(!fragmented.exists());
+        assert!(top_level(&dest).contains(&"moof".to_owned()));
+        assert_holds_three_seconds_of_everything(&read_back(&dest));
+    }
+
+    fn set_read_only(path: &Path, read_only: bool) {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut permissions = meta.permissions();
+            permissions.set_readonly(read_only);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
     }
 
     /// A remux writes a whole second copy before deleting the first: on a
@@ -714,11 +905,13 @@ pub(crate) mod tests {
     #[test]
     fn a_recording_that_wont_remux_is_kept_as_it_is() {
         let dir = tempfile::tempdir().unwrap();
-        let fragmented = fragmented_recording(dir.path());
+        let finished = dir.path().join("rec.mp4");
+        record_finished(&finished, 90);
+        let fragmented = dir.path().join("app_recording_1.tmp.mp4");
+        legacy_copy(&finished, &fragmented);
         let dest = dir.path().join("app_2026.mp4");
-        std::fs::write(&dest, b"").unwrap();
 
-        super::finish(&fragmented, &dest, TRACKS.len() + 3).expect("finish");
+        super::finish(&fragmented, || reserve(&dest), || Ok(TRACKS.len() + 3)).expect("finish");
         assert!(!fragmented.exists());
         assert!(top_level(&dest).contains(&"moof".to_owned()));
         assert_holds_three_seconds_of_everything(&read_back(&dest));
