@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `polyrec.log` and `crash.log` could keep growing if their previous copy (`.old`) was held open by another program; the log now starts over instead.
 - For contributors: an empty Media Foundation buffer is no longer read through a pointer that may be null, and an encoder setting read back as something other than a number is freed.
 
+## [v0.5.159] - 2026-11-08
+
 ### Security
 
 - `polyrec.log` no longer records window titles, so a browser tab or chat name can't end up in a bug report pasted from it, and a path in your own folder is written as `%USERPROFILE%`, without your Windows user name (in `crash.log` too).
