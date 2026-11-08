@@ -88,7 +88,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: 'The end of `%APPDATA%\PolyRec\polyrec.log` (from around when it went wrong), and `crash.log` if there is one. They name files and apps PolyRec recorded: look them over before pasting.'
+      description: 'The end of `%APPDATA%\PolyRec\polyrec.log` (from around when it went wrong), and `crash.log` if there is one. They name the apps and files PolyRec recorded (window titles are not logged, and paths in your own folder show as `%USERPROFILE%`): look them over before pasting.'
       render: shell
     validations:
       required: false

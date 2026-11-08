@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `polyrec.log` no longer records window titles, so a browser tab or chat name can't end up in a bug report pasted from it, and a path in your own folder is written as `%USERPROFILE%`, without your Windows user name (in `crash.log` too).
+
 ## [v0.5.158] - 2026-11-08
 
 ### Fixed
