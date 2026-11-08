@@ -1298,4 +1298,88 @@ pub(crate) mod tests {
         drop(file);
         assert_eq!(std::fs::read(&path).unwrap(), legacy);
     }
+
+    /// The longest recording here -- 3.3 h of 60 fps video and three AAC
+    /// tracks, 2.4 million samples -- in 1-byte samples, finished in place
+    /// in seconds whichever way the index comes: from the muxer at Stop, or
+    /// walked from the file at the next start. (The remux took 376 s.)
+    #[test]
+    fn three_hours_finish_in_seconds() {
+        use std::io::BufWriter;
+        use std::time::{Duration, Instant};
+        const FRAMES: u64 = 712_800;
+        const HNS: u64 = 10_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.tmp.mp4");
+        let mut tracks = three_tracks();
+        tracks.push(TrackInfo {
+            id: 4,
+            ..tracks[1].clone()
+        });
+
+        let generating = Instant::now();
+        let file = File::create(&path).unwrap();
+        let mut muxer = Muxer::new(BufWriter::with_capacity(1 << 20, file), tracks).unwrap();
+        let mut audio = 0u64;
+        for frame in 0..FRAMES {
+            let frame_sample = Sample {
+                time: (frame * HNS / 60) as i64,
+                duration: (HNS / 60) as i64,
+                keyframe: frame % 120 == 0,
+                data: vec![1],
+            };
+            muxer.push(0, frame_sample).unwrap();
+            let frame_end = ((frame + 1) * HNS / 60) as i64;
+            loop {
+                let at = (audio * 1024 * HNS / 48_000) as i64;
+                if at >= frame_end {
+                    break;
+                }
+                for track in 1..=3 {
+                    let sound = Sample {
+                        time: at,
+                        duration: (1024 * HNS / 48_000) as i64,
+                        keyframe: true,
+                        data: vec![2],
+                    };
+                    muxer.push(track, sound).unwrap();
+                }
+                audio += 1;
+            }
+        }
+        let muxed = muxer.finish().unwrap();
+        let mut file = muxed.out.into_inner().unwrap();
+        // The next start's case: the same file, never finished.
+        let copy = dir.path().join("copy.tmp.mp4");
+        std::fs::copy(&path, &copy).unwrap();
+        let generating = generating.elapsed();
+
+        let started = Instant::now();
+        complete(&mut file, &muxed.head, &muxed.index).expect("complete");
+        let at_stop = started.elapsed();
+        drop(file);
+        let started = Instant::now();
+        assert_eq!(finish_in_place(&copy), InPlace::Finished);
+        let at_start = started.elapsed();
+
+        let finished = std::fs::read(&path).unwrap();
+        let moov = finished.len() as u64 - muxed.index.end();
+        println!(
+            "3.3 h: {} samples ({FRAMES} frames, {audio} per audio track), a {} MB index in a {} MB file; finished at Stop in {at_stop:?}, at the next start in {at_start:?} (made in {generating:?})",
+            muxed.index.sample_count(),
+            moov >> 20,
+            finished.len() >> 20
+        );
+        assert_eq!(audio, 556_875, "3.3 h of AAC frames");
+        assert_eq!(muxed.index.sample_count() as u64, FRAMES + 3 * audio);
+        assert!(at_stop < Duration::from_secs(2), "at Stop: {at_stop:?}");
+        assert!(
+            at_start < Duration::from_secs(2),
+            "at the next start: {at_start:?}"
+        );
+        assert!(
+            finished == std::fs::read(&copy).unwrap(),
+            "the same file either way"
+        );
+    }
 }
