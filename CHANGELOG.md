@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.160] - 2026-11-08
+
 ### Fixed
 
 - Opening PolyRec while another copy of it was still saving a recording could, rarely, delete that recording: tidying up after a save that was cut off short now holds both of its files to itself from the check until they're removed, so a save still going on is left alone.
