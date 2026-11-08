@@ -13,6 +13,7 @@ pub mod boxes;
 pub mod muxer;
 pub mod nal;
 pub mod sink;
+pub mod soft_remux;
 
 use crate::error::AppError;
 use std::path::Path;
