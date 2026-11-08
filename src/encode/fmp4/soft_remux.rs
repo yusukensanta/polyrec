@@ -4,8 +4,13 @@
 //! `ftyp` (`boxes::PLACEHOLDER`) becomes the header of one `mdat` holding
 //! everything before that `moov`. No media is copied or moved.
 
-use super::boxes::{RunSample, boxed, co64, ctts, stsc, stss, stsz, stts, with_duration};
-use std::io;
+use super::boxes::{
+    PLACEHOLDER, RunSample, boxed, co64, ctts, mdat_header, stsc, stss, stsz, stts, with_duration,
+};
+use std::fs::File;
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use std::time::Instant;
 
 /// Where every sample of a fragmented file is, and how long it lasts: what
 /// a complete `moov` is built from. Kept by the muxer as it writes, or
@@ -232,6 +237,358 @@ fn complete_trak(trak: &[u8], index: &Index, movie_timescale: u64) -> io::Result
     Ok((built, duration))
 }
 
+/// What finishing a recording's file in place came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InPlace {
+    /// A plain MP4 now -- or already, its finish cut off just before the
+    /// rename -- under the same name.
+    Finished,
+    /// Written with the placeholder but not finished: it holds no whole
+    /// fragment, it's damaged between two, or it couldn't be written to.
+    /// Still a fragmented MP4, which reads as it is.
+    KeptFragmented,
+    /// No placeholder: written before recordings were finished in place
+    /// (or not a recording at all), for the remux that finished them then.
+    Legacy,
+}
+
+/// Finishes the recording at `path` in place, whatever state an earlier
+/// finish was cut off in (see the spec's state table): a fragmented file
+/// is indexed from its fragments and finished; one already finished is
+/// left as it is.
+pub fn finish_in_place(path: &Path) -> InPlace {
+    let started = Instant::now();
+    let layout = match read_start(path) {
+        Ok(start) => layout(&start),
+        Err(e) => {
+            tracing::warn!("couldn't read {} ({e})", path.display());
+            return InPlace::Legacy;
+        }
+    };
+    let outcome = match layout {
+        Layout::Finished => InPlace::Finished,
+        Layout::Other => InPlace::Legacy,
+        Layout::Placeholder { .. } => finish_fragmented(path).unwrap_or_else(|e| {
+            tracing::warn!(
+                "couldn't finish {} in place ({e}); keeping it fragmented",
+                path.display()
+            );
+            InPlace::KeptFragmented
+        }),
+    };
+    tracing::info!(
+        "{}: {outcome:?}, in {:?}",
+        path.display(),
+        started.elapsed()
+    );
+    outcome
+}
+
+fn finish_fragmented(path: &Path) -> io::Result<InPlace> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Held for this process alone while it's changed.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(path)?;
+    let scan = scan(&mut file)?;
+    if scan.damaged {
+        tracing::warn!(
+            "{} is damaged {} bytes in, between two fragments; keeping it fragmented as it is",
+            path.display(),
+            scan.index.end()
+        );
+        return Ok(InPlace::KeptFragmented);
+    }
+    if scan.index.sample_count() == 0 {
+        tracing::warn!("{} holds no whole fragment", path.display());
+        return Ok(InPlace::KeptFragmented);
+    }
+    complete(&mut file, &scan.head, &scan.index)?;
+    Ok(InPlace::Finished)
+}
+
+/// Finishes the fragmented file `file` in place, given its init segment
+/// `head` (as written at its start) and the index of its samples: drops
+/// whatever follows the last whole fragment, appends the complete `moov`,
+/// then turns the placeholder into the header of an `mdat` holding
+/// everything before that `moov`, each step on disk before the next.
+///
+/// If writing fails, the file is put back as the fragmented file it was,
+/// which reads as it is.
+pub fn complete(file: &mut File, head: &[u8], index: &Index) -> io::Result<()> {
+    let started = Instant::now();
+    let Layout::Placeholder { at } = layout(head) else {
+        return Err(invalid("no placeholder after ftyp"));
+    };
+    let stub = stub_moov(head, at)?;
+    let moov = complete_moov(stub, index)?;
+    let end = index.end();
+    if end < (at + 16) + stub.len() as u64 {
+        return Err(invalid("the index ends before the stub moov does"));
+    }
+    file.set_len(end)?;
+    if let Err(e) = write_finish(file, at, end, &moov) {
+        // A moov half-written at its end could stop the fragmented file
+        // reading at all.
+        let _ = file
+            .seek(SeekFrom::Start(at))
+            .and_then(|_| file.write_all(&PLACEHOLDER));
+        let _ = file.set_len(end);
+        let _ = file.sync_all();
+        return Err(e);
+    }
+    tracing::info!(
+        "finished in place: {} samples, a {} KB index, in {:?}",
+        index.sample_count(),
+        moov.len() >> 10,
+        started.elapsed()
+    );
+    Ok(())
+}
+
+fn write_finish(file: &mut File, at: u64, end: u64, moov: &[u8]) -> io::Result<()> {
+    file.seek(SeekFrom::Start(end))?;
+    file.write_all(moov)?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(at))?;
+    file.write_all(&mdat_header(end - at))?;
+    file.sync_all()
+}
+
+/// What follows `ftyp` at the start of a file.
+enum Layout {
+    /// The placeholder, `at` bytes in: a fragmented recording, to finish.
+    Placeholder { at: u64 },
+    /// A 64-bit `mdat` header: finished in place.
+    Finished,
+    /// Anything else.
+    Other,
+}
+
+fn layout(start: &[u8]) -> Layout {
+    if start.get(4..8) != Some(b"ftyp") {
+        return Layout::Other;
+    }
+    let Ok(at) = be32(start, 0) else {
+        return Layout::Other;
+    };
+    match start.get(at as usize..at as usize + 16) {
+        Some(next) if next == PLACEHOLDER => Layout::Placeholder { at: u64::from(at) },
+        Some(next) if next[..8] == [0, 0, 0, 1, b'm', b'd', b'a', b't'] => Layout::Finished,
+        _ => Layout::Other,
+    }
+}
+
+/// Enough of the start of the file at `path` to tell its `layout`.
+fn read_start(path: &Path) -> io::Result<Vec<u8>> {
+    let mut start = Vec::with_capacity(64);
+    File::open(path)?.take(64).read_to_end(&mut start)?;
+    Ok(start)
+}
+
+/// The stub `moov` in `head`, after the placeholder at `at`.
+fn stub_moov(head: &[u8], at: u64) -> io::Result<&[u8]> {
+    let moov_at = at as usize + 16;
+    let size = be32(head, moov_at)? as usize;
+    match head.get(moov_at..moov_at + size) {
+        Some(moov) if size >= 8 && &moov[4..8] == b"moov" => Ok(moov),
+        _ => Err(invalid("no stub moov after the placeholder")),
+    }
+}
+
+/// The longest `moof` or stub `moov` read whole: far past any PolyRec
+/// writes (a 2-second fragment at 240 fps is about 10 KB).
+const MAX_HEADER_BOX: u64 = 16 << 20;
+
+/// A fragmented file read for finishing: its init segment, and the index
+/// of every whole fragment's samples up to where it ends or is cut off.
+struct Scan {
+    head: Vec<u8>,
+    index: Index,
+    /// Whether it stopped at damage between two fragments rather than at
+    /// the end of what was written.
+    damaged: bool,
+}
+
+/// Walks the fragments of `file` (which has the placeholder), reading
+/// only their `moof` boxes and `mdat` headers, never the media.
+fn scan(file: &mut File) -> io::Result<Scan> {
+    let len = file.metadata()?.len();
+    let mut reader = BufReader::with_capacity(16 << 10, file);
+    let start = read_at(&mut reader, 0, len.min(64))?;
+    let Layout::Placeholder { at } = layout(&start) else {
+        return Err(invalid("no placeholder after ftyp"));
+    };
+    let moov_at = at + 16;
+    let header = read_at(&mut reader, moov_at, 8)?;
+    let moov_size = u64::from(be32(&header, 0)?);
+    if &header[4..8] != b"moov" || !(8..=MAX_HEADER_BOX).contains(&moov_size) {
+        return Err(invalid("no stub moov after the placeholder"));
+    }
+    let head = read_at(&mut reader, 0, moov_at + moov_size)?;
+    let mut index = Index::new(&track_ids(stub_moov(&head, at)?)?);
+    let mut at = head.len() as u64;
+    index.set_end(at);
+    let damaged = loop {
+        match next_fragment(&mut reader, at, len)? {
+            Next::Fragment { runs, end } => {
+                let known = runs
+                    .iter()
+                    .all(|run| index.add_run(run.track_id, run.data_at, run.base, &run.samples));
+                if !known {
+                    break true;
+                }
+                at = end;
+                index.set_end(end);
+            }
+            Next::End => break false,
+            Next::Damage => break true,
+        }
+    };
+    Ok(Scan {
+        head,
+        index,
+        damaged,
+    })
+}
+
+/// What's at a point between fragments.
+enum Next {
+    /// A whole fragment, ending at `end`.
+    Fragment { runs: Vec<Run>, end: u64 },
+    /// The end of what was written: the file's end, a fragment cut off,
+    /// a zeroed tail a power cut left, or the `moov` of a finish cut off.
+    End,
+    /// Anything else.
+    Damage,
+}
+
+/// A track's run of samples in a fragment, as its `traf` gives it.
+struct Run {
+    track_id: u32,
+    /// Where its data starts in the file.
+    data_at: u64,
+    base: u64,
+    samples: Vec<RunSample>,
+}
+
+fn next_fragment<R: Read + Seek>(reader: &mut R, at: u64, len: u64) -> io::Result<Next> {
+    if len - at < 8 {
+        return Ok(Next::End);
+    }
+    let header = read_at(reader, at, 8)?;
+    if header == [0; 8] || &header[4..8] == b"moov" {
+        return Ok(Next::End);
+    }
+    let size = u64::from(be32(&header, 0)?);
+    if &header[4..8] != b"moof" || !(8..=MAX_HEADER_BOX).contains(&size) {
+        return Ok(Next::Damage);
+    }
+    let mdat_at = at + size;
+    if mdat_at > len || len - mdat_at < 8 {
+        return Ok(Next::End);
+    }
+    let moof = read_at(reader, at, size)?;
+    let mdat = read_at(reader, mdat_at, (len - mdat_at).min(16))?;
+    if mdat[..8] == [0; 8] {
+        return Ok(Next::End);
+    }
+    if &mdat[4..8] != b"mdat" {
+        return Ok(Next::Damage);
+    }
+    let (mdat_size, mdat_header) = match be32(&mdat, 0)? {
+        1 if mdat.len() < 16 => return Ok(Next::End),
+        1 => (be64(&mdat, 8)?, 16),
+        size if size < 8 => return Ok(Next::Damage),
+        size => (u64::from(size), 8),
+    };
+    if mdat_size < mdat_header || mdat_size > len - mdat_at {
+        return Ok(Next::End);
+    }
+    let Some(runs) = parse_moof(&moof, at) else {
+        return Ok(Next::Damage);
+    };
+    let data_start = mdat_at + mdat_header;
+    let data_end = mdat_at + mdat_size;
+    let inside = runs.iter().all(|run| {
+        let size: u64 = run.samples.iter().map(|s| u64::from(s.size)).sum();
+        run.data_at >= data_start && run.data_at + size <= data_end
+    });
+    if !inside {
+        return Ok(Next::Damage);
+    }
+    Ok(Next::Fragment {
+        runs,
+        end: data_end,
+    })
+}
+
+/// The runs of the `moof` (whole) starting `moof_at` bytes into the file,
+/// as `boxes::fragment` writes them; `None` for any other layout.
+fn parse_moof(moof: &[u8], moof_at: u64) -> Option<Vec<Run>> {
+    const DEFAULT_BASE_IS_MOOF: u32 = 0x02_0000;
+    const TRUN_FLAGS: u32 = 0x0001 | 0x0100 | 0x0200 | 0x0400;
+    let mut runs = Vec::new();
+    for (kind, traf) in parse(body(moof)).ok()? {
+        if &kind != b"traf" {
+            continue;
+        }
+        let parts = parse(body(traf)).ok()?;
+        let tfhd = one(&parts, b"tfhd").ok()?;
+        if be32(tfhd, 8).ok()? & 0x00ff_ffff != DEFAULT_BASE_IS_MOOF {
+            return None;
+        }
+        let tfdt = one(&parts, b"tfdt").ok()?;
+        let base = match tfdt.get(8)? {
+            1 => be64(tfdt, 12).ok()?,
+            _ => u64::from(be32(tfdt, 12).ok()?),
+        };
+        let trun = one(&parts, b"trun").ok()?;
+        if be32(trun, 8).ok()? & 0x00ff_ffff != TRUN_FLAGS {
+            return None;
+        }
+        let count = be32(trun, 12).ok()? as usize;
+        if trun.len() != 20 + count * 12 {
+            return None;
+        }
+        let samples = (0..count)
+            .map(|i| {
+                let at = 20 + i * 12;
+                Some(RunSample {
+                    duration: be32(trun, at).ok()?,
+                    size: be32(trun, at + 4).ok()?,
+                    keyframe: be32(trun, at + 8).ok()? & 0x0001_0000 == 0,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        runs.push(Run {
+            track_id: be32(tfhd, 12).ok()?,
+            data_at: moof_at + u64::from(be32(trun, 16).ok()?),
+            base,
+            samples,
+        });
+    }
+    Some(runs)
+}
+
+/// The `track_ID`s of the stub `moov`'s tracks, in order.
+fn track_ids(stub: &[u8]) -> io::Result<Vec<u32>> {
+    parse(body(stub))?
+        .iter()
+        .filter(|(kind, _)| kind == b"trak")
+        .map(|(_, trak)| be32(one(&parse(body(trak))?, b"tkhd")?, 20))
+        .collect()
+}
+
+fn read_at<R: Read + Seek>(reader: &mut R, at: u64, len: u64) -> io::Result<Vec<u8>> {
+    reader.seek(SeekFrom::Start(at))?;
+    let mut out = vec![0; len as usize];
+    reader.read_exact(&mut out)?;
+    Ok(out)
+}
+
 /// The boxes one after another in `data`, each whole: (type, bytes).
 /// 32-bit sizes only: this reads the stub `moov`, PolyRec's own.
 fn parse(data: &[u8]) -> io::Result<Vec<([u8; 4], &[u8])>> {
@@ -270,6 +627,12 @@ fn be32(b: &[u8], at: usize) -> io::Result<u32> {
         .ok_or_else(|| invalid("a box too short"))
 }
 
+fn be64(b: &[u8], at: usize) -> io::Result<u64> {
+    b.get(at..at + 8)
+        .map(|v| u64::from_be_bytes(v.try_into().unwrap()))
+        .ok_or_else(|| invalid("a box too short"))
+}
+
 fn invalid(what: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what.into())
 }
@@ -278,6 +641,7 @@ fn invalid(what: impl Into<String>) -> io::Error {
 pub(crate) mod tests {
     use super::super::boxes::tests::{be32, be64, boxes, children, entries, find, kinds, whole};
     use super::super::boxes::{RunSample, TrackInfo, TrackKind, init_segment};
+    use super::super::muxer::{Muxed, Muxer, Sample};
     use super::super::nal::VideoCodec;
     use super::*;
 
@@ -425,7 +789,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn complete(index: &Index) -> Vec<u8> {
+    fn moov_for(index: &Index) -> Vec<u8> {
         let head = init_segment(&tracks());
         complete_moov(moov_in(&head), index).expect("complete_moov")
     }
@@ -445,7 +809,7 @@ pub(crate) mod tests {
             9000,
             &[sample(3000, 5, true), sample(3000, 6, false)]
         ));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
 
         let top = boxes(&moov);
         assert_eq!(kinds(&top), ["moov"]);
@@ -489,7 +853,7 @@ pub(crate) mod tests {
     fn a_track_that_starts_late_is_offset_by_ctts() {
         let mut index = Index::new(&[1, 2]);
         assert!(index.add_run(2, 200, 1182, &[sample(1024, 4, true); 3]));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
         let audio = stbl(&moov, 1);
         let audio_kinds: Vec<&str> = audio.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
@@ -509,7 +873,7 @@ pub(crate) mod tests {
         let mut index = Index::new(&[1, 2]);
         assert!(index.add_run(2, 0, 0, &[sample(1024, 1, true); 2]));
         assert!(index.add_run(2, 10, 2050, &[sample(1024, 1, true)]));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
         let audio = stbl(&moov, 1);
         assert_eq!(
             entries(table(&audio, "stts"), 2),
@@ -524,7 +888,7 @@ pub(crate) mod tests {
         let mut index = Index::new(&[1, 2]);
         assert!(index.add_run(2, 0, 0, &[sample(1024, 1, true), sample(10, 1, true)]));
         assert!(index.add_run(2, 10, 1000, &[sample(1024, 1, true)]));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
         assert_eq!(durations(table(&stbl(&moov, 1), "stts")), [1024, 0, 1024]);
     }
 
@@ -532,7 +896,7 @@ pub(crate) mod tests {
     fn offsets_past_4_gib_survive() {
         let mut index = Index::new(&[1, 2]);
         assert!(index.add_run(1, 5 << 30, 0, &[sample(3000, 1, true)]));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
         assert_eq!(offsets(table(&stbl(&moov, 0), "co64")), [5 << 30]);
     }
 
@@ -543,7 +907,7 @@ pub(crate) mod tests {
         let long = u32::MAX - 10;
         assert!(index.add_run(1, 0, 0, &[sample(long, 1, true)]));
         assert!(index.add_run(1, 1, u64::from(long), &[sample(3000, 1, false)]));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
         let mdhd = header(&moov, "mdhd", 0);
         assert_eq!(mdhd[8], 1, "version 1");
         assert_eq!(duration(&mdhd), u64::from(long) + 3000);
@@ -558,7 +922,7 @@ pub(crate) mod tests {
     fn a_track_with_no_samples_keeps_an_empty_trak() {
         let mut index = Index::new(&[1, 2]);
         assert!(index.add_run(1, 100, 0, &[sample(3000, 1, true)]));
-        let moov = complete(&index);
+        let moov = moov_for(&index);
         let top = boxes(&moov);
         assert_eq!(kinds(&children(&top[0], 0)), ["mvhd", "trak", "trak"]);
         let audio = stbl(&moov, 1);
@@ -591,5 +955,276 @@ pub(crate) mod tests {
             complete_moov(moov_in(&head), &Index::new(&[1])).is_err(),
             "a trak the index hasn't"
         );
+    }
+
+    // -- Finishing a file in place --
+
+    const MS: i64 = 10_000;
+
+    /// Video and two audio tracks.
+    fn three_tracks() -> Vec<TrackInfo> {
+        let mut tracks = tracks();
+        tracks.push(TrackInfo {
+            id: 3,
+            timescale: 48_000,
+            kind: TrackKind::Audio {
+                channels: 1,
+                sample_rate: 48_000,
+                audio_specific_config: vec![0x11, 0x88],
+            },
+        });
+        tracks
+    }
+
+    /// What the muxer writes for 600 ms of `tracks` -- three fragments --
+    /// feeding the audio tracks in `fed` (by index) and not the others;
+    /// every sample with bytes of its own. With what was pushed, per track.
+    fn muxed_with(tracks: Vec<TrackInfo>, fed: &[usize]) -> (Muxed<Vec<u8>>, Vec<Vec<Vec<u8>>>) {
+        let mut pushed = vec![Vec::new(); tracks.len()];
+        let mut muxer = Muxer::new(Vec::new(), tracks).unwrap();
+        let mut n = 0u8;
+        for (i, ms) in (0..600).step_by(100).enumerate() {
+            n = n.wrapping_add(1);
+            let data = vec![n; 3 + usize::from(n % 7)];
+            pushed[0].push(data.clone());
+            let frame = Sample {
+                time: ms * MS,
+                duration: 100 * MS,
+                keyframe: i % 2 == 0,
+                data,
+            };
+            muxer.push(0, frame).unwrap();
+            for &track in fed {
+                for half in [0, 50] {
+                    n = n.wrapping_add(1);
+                    let data = vec![n; 2 + usize::from(n % 5)];
+                    pushed[track].push(data.clone());
+                    let sound = Sample {
+                        time: (ms + half) * MS,
+                        duration: 50 * MS,
+                        keyframe: true,
+                        data,
+                    };
+                    muxer.push(track, sound).unwrap();
+                }
+            }
+        }
+        (muxer.finish().unwrap(), pushed)
+    }
+
+    struct Case {
+        dir: tempfile::TempDir,
+        muxed: Muxed<Vec<u8>>,
+        pushed: Vec<Vec<Vec<u8>>>,
+        /// The recording finished from the muxer's own index.
+        finished: Vec<u8>,
+    }
+
+    impl Case {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let (muxed, pushed) = muxed_with(three_tracks(), &[1, 2]);
+            let reference = dir.path().join("reference.mp4");
+            std::fs::write(&reference, &muxed.out).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&reference)
+                .unwrap();
+            complete(&mut file, &muxed.head, &muxed.index).expect("complete");
+            drop(file);
+            let finished = std::fs::read(&reference).unwrap();
+            Self {
+                dir,
+                muxed,
+                pushed,
+                finished,
+            }
+        }
+
+        /// A recording's temporary file holding `bytes`.
+        fn file(&self, bytes: &[u8]) -> std::path::PathBuf {
+            let path = self.dir.path().join("app_recording_1.tmp.mp4");
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+
+        /// The complete `moov` the finished file ends with.
+        fn moov(&self) -> &[u8] {
+            let top = boxes(&self.finished);
+            let at = find(&top, "moov").at;
+            &self.finished[at..]
+        }
+    }
+
+    #[test]
+    fn the_walk_finds_the_index_the_muxer_kept() {
+        let case = Case::new();
+        let path = case.file(&case.muxed.out);
+        let scan = scan(&mut std::fs::File::open(&path).unwrap()).expect("scan");
+        assert!(!scan.damaged);
+        assert_eq!(scan.head, case.muxed.head);
+        assert_eq!(scan.index, case.muxed.index);
+    }
+
+    /// At Stop the sink finishes from the muxer's index; recovery, from the
+    /// walk. Both make the same file.
+    #[test]
+    fn finishing_from_the_walk_or_the_muxer_makes_the_same_file() {
+        let case = Case::new();
+        let path = case.file(&case.muxed.out);
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        assert_eq!(std::fs::read(&path).unwrap(), case.finished);
+    }
+
+    #[test]
+    fn a_finished_file_is_ftyp_mdat_moov_and_its_tables_point_at_the_samples() {
+        let case = Case::new();
+        let file = &case.finished;
+        let top = boxes(file);
+        assert_eq!(kinds(&top), ["ftyp", "mdat", "moov"]);
+        assert_eq!(
+            file[top[1].at..top[1].at + 8],
+            [0, 0, 0, 1, b'm', b'd', b'a', b't'],
+            "a 64-bit mdat header"
+        );
+        assert_eq!(top[1].at, 32, "where the placeholder was");
+        assert_eq!(top[1].at + 16 + top[1].body.len(), top[2].at);
+        assert_eq!(sample_bytes(file, case.moov()), case.pushed);
+        assert_eq!(
+            file.len(),
+            case.muxed.out.len() + case.moov().len(),
+            "nothing copied: the file grows by its moov only"
+        );
+    }
+
+    /// A crash or power cut partway through writing a fragment.
+    #[test]
+    fn a_cut_off_last_fragment_is_dropped() {
+        let case = Case::new();
+        let top = boxes(&case.muxed.out);
+        let last_mdat = top.iter().rfind(|b| b.kind == "mdat").unwrap();
+        let cut = last_mdat.at + 8 + last_mdat.body.len() / 2;
+        let path = case.file(&case.muxed.out[..cut]);
+
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        let file = std::fs::read(&path).unwrap();
+        let top = boxes(&file);
+        assert_eq!(kinds(&top), ["ftyp", "mdat", "moov"]);
+        // The last fragment held 2 frames and 4 samples of each audio track.
+        let expected: Vec<Vec<Vec<u8>>> = case
+            .pushed
+            .iter()
+            .zip([2, 4, 4])
+            .map(|(samples, lost)| samples[..samples.len() - lost].to_vec())
+            .collect();
+        assert_eq!(sample_bytes(&file, whole(&file, &top[2])), expected);
+    }
+
+    /// Cut off after the moov was appended, before the header went in.
+    #[test]
+    fn a_trailing_moov_from_a_cut_off_finish_is_replaced() {
+        let case = Case::new();
+        let path = case.file(&[case.muxed.out.as_slice(), case.moov()].concat());
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        assert_eq!(std::fs::read(&path).unwrap(), case.finished);
+    }
+
+    #[test]
+    fn a_trailing_moov_cut_off_partway_is_replaced() {
+        let case = Case::new();
+        let half = &case.moov()[..case.moov().len() / 2];
+        let path = case.file(&[case.muxed.out.as_slice(), half].concat());
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        assert_eq!(std::fs::read(&path).unwrap(), case.finished);
+    }
+
+    /// A power cut can leave a file longer than what reached the disk,
+    /// the rest zeros.
+    #[test]
+    fn a_zero_filled_tail_counts_as_cut_off() {
+        let case = Case::new();
+        let path = case.file(&[case.muxed.out.as_slice(), &[0; 4096]].concat());
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        assert_eq!(std::fs::read(&path).unwrap(), case.finished);
+    }
+
+    /// Cut off after the header went in, before the rename.
+    #[test]
+    fn a_file_finished_but_not_renamed_is_left_as_it_is() {
+        let case = Case::new();
+        let path = case.file(&case.finished);
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        assert_eq!(std::fs::read(&path).unwrap(), case.finished);
+    }
+
+    /// Written before soft remux: no placeholder. Today's remux takes it.
+    #[test]
+    fn a_file_without_the_placeholder_is_legacy() {
+        let case = Case::new();
+        let legacy = [&case.muxed.out[..32], &case.muxed.out[48..]].concat();
+        let path = case.file(&legacy);
+        assert_eq!(finish_in_place(&path), InPlace::Legacy);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+    }
+
+    /// Something wrong between whole fragments isn't a cut-off end:
+    /// truncating there would throw away every fragment after it.
+    #[test]
+    fn damage_in_the_middle_is_never_truncated() {
+        let case = Case::new();
+        let mut damaged = case.muxed.out.clone();
+        let second_moof = boxes(&damaged)
+            .iter()
+            .filter(|b| b.kind == "moof")
+            .nth(1)
+            .unwrap()
+            .at;
+        damaged[second_moof + 4..second_moof + 8].copy_from_slice(b"junk");
+        let path = case.file(&damaged);
+        assert_eq!(finish_in_place(&path), InPlace::KeptFragmented);
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    }
+
+    #[test]
+    fn a_file_with_no_whole_fragment_is_kept_fragmented() {
+        let case = Case::new();
+        let bytes = &case.muxed.out[..case.muxed.head.len() + 20];
+        let path = case.file(bytes);
+        assert_eq!(finish_in_place(&path), InPlace::KeptFragmented);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_track_that_never_got_a_sample_still_finishes() {
+        let case = Case::new();
+        let (muxed, pushed) = muxed_with(three_tracks(), &[1]);
+        let path = case.file(&muxed.out);
+        assert_eq!(finish_in_place(&path), InPlace::Finished);
+        let file = std::fs::read(&path).unwrap();
+        let top = boxes(&file);
+        let moov = whole(&file, &top[2]);
+        let traks = children(&boxes(moov)[0], 0)
+            .iter()
+            .filter(|b| b.kind == "trak")
+            .count();
+        assert_eq!(traks, 3, "the empty track stays");
+        assert_eq!(sample_bytes(&file, moov), pushed);
+    }
+
+    #[test]
+    fn complete_refuses_a_head_without_the_placeholder() {
+        let case = Case::new();
+        let legacy = [&case.muxed.out[..32], &case.muxed.out[48..]].concat();
+        let path = case.file(&legacy);
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let head = [&case.muxed.head[..32], &case.muxed.head[48..]].concat();
+        assert!(complete(&mut file, &head, &case.muxed.index).is_err());
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
     }
 }
