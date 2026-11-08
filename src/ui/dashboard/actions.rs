@@ -590,7 +590,6 @@ impl App {
             tracing::warn!("not starting a recording while the last one is still being saved");
             return;
         }
-        let source_title = source.window_title.clone();
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
         let inputs = self.resolve_capture_inputs();
         let track_count = inputs.devices.len() + inputs.app_sources.len();
@@ -609,7 +608,7 @@ impl App {
         ) {
             Ok(path) => {
                 tracing::info!(
-                    "recording started: source={source_title:?} audio_tracks={track_count} output={}",
+                    "recording started: app={app_name:?} audio_tracks={track_count} output={}",
                     path.display()
                 );
                 self.fps_shortfall_warned = false;
@@ -626,7 +625,7 @@ impl App {
                 self.last_recording.started(audio_labels, app_name);
             }
             Err(e) => {
-                tracing::error!("start_capture failed for source={source_title:?}: {e}");
+                tracing::error!("start_capture failed for app={app_name:?}: {e}");
                 let prefix = self.config.lang().strings().couldnt_start_recording_prefix;
                 self.error_message = Some(format!("{prefix}{e}"));
             }

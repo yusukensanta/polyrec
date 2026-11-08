@@ -3,6 +3,7 @@
 //! `config.toml`. The release build has no console, so before this all of
 //! it was lost. `RUST_LOG` still picks what's logged.
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -58,6 +59,8 @@ pub struct LogFile {
     max_bytes: u64,
     /// The file, and how long it is.
     open: Option<(File, u64)>,
+    /// The user's own folder, hidden in what's written (see `hide_home`).
+    home: String,
 }
 
 impl LogFile {
@@ -66,6 +69,7 @@ impl LogFile {
             path,
             max_bytes,
             open: None,
+            home: std::env::var("USERPROFILE").unwrap_or_default(),
         }
     }
 
@@ -98,12 +102,62 @@ impl LogFile {
     }
 }
 
+/// How the user's own folder is written in the log.
+const HOME_HIDDEN: &str = "%USERPROFILE%";
+
+/// `text` with the user's own folder `home` (`C:\Users\<name>`) as
+/// `%USERPROFILE%`, written plainly or with its backslashes doubled as
+/// `{:?}` prints a path: users paste the log into public bug reports, and
+/// it shouldn't carry their Windows user name. Matched regardless of ASCII
+/// case, as Windows matches paths; a folder whose name only starts with the
+/// user's (`C:\Users\yusuke` for `C:\Users\yu`) is left as it is.
+fn hide_home<'a>(text: &'a [u8], home: &str) -> Cow<'a, [u8]> {
+    if home.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let escaped = home.replace('\\', r"\\");
+    let mut text = Cow::Borrowed(text);
+    for folder in [escaped.as_bytes(), home.as_bytes()] {
+        if let Some(hidden) = replace_folder(&text, folder) {
+            text = Cow::Owned(hidden);
+        }
+    }
+    text
+}
+
+/// `text` with each `folder` in it as `HOME_HIDDEN`, if it has any.
+fn replace_folder(text: &[u8], folder: &[u8]) -> Option<Vec<u8>> {
+    // A folder's name goes on past `folder` if what follows could be part of it.
+    let name_ends = |next: Option<&u8>| {
+        next.is_none_or(|&b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b >= 0x80))
+    };
+    let mut hidden = Vec::new();
+    let (mut copied, mut at) = (0, 0);
+    while at + folder.len() <= text.len() {
+        let end = at + folder.len();
+        if text[at..end].eq_ignore_ascii_case(folder) && name_ends(text.get(end)) {
+            hidden.extend_from_slice(&text[copied..at]);
+            hidden.extend_from_slice(HOME_HIDDEN.as_bytes());
+            (copied, at) = (end, end);
+        } else {
+            at += 1;
+        }
+    }
+    (copied > 0).then(|| {
+        hidden.extend_from_slice(&text[copied..]);
+        hidden
+    })
+}
+
 impl Write for LogFile {
+    /// Writes all of `buf`, with the user's own folder hidden (`hide_home`):
+    /// a line is never written in part.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let line = hide_home(buf, &self.home);
         let (file, len) = self.file()?;
-        let written = file.write(buf)?;
-        *len += written as u64;
-        Ok(written)
+        file.write_all(&line)?;
+        *len += line.len() as u64;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -148,6 +202,51 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "first\nsecond\nthird\n"
+        );
+    }
+
+    /// Users paste the log into public bug reports: a path in their own
+    /// folder, written plainly or as Rust prints it with `{:?}`, comes out
+    /// as `%USERPROFILE%`, without their Windows user name.
+    #[test]
+    fn a_path_in_the_users_folder_is_logged_without_their_user_name() {
+        let home = std::env::var("USERPROFILE").expect("USERPROFILE is set on Windows");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("polyrec.log");
+        let subscriber = tracing_subscriber::registry()
+            .with(file_layer(LogFile::new(path.clone(), MAX_LOG_BYTES)));
+        let video = PathBuf::from(&home).join("Videos").join("a.mp4");
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("saved {} ({video:?})", video.display());
+        });
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.ends_with(
+                "saved %USERPROFILE%\\Videos\\a.mp4 (\"%USERPROFILE%\\\\Videos\\\\a.mp4\")\n"
+            ),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn only_the_users_own_folder_is_hidden_not_one_its_name_starts() {
+        let hidden = hide_home(
+            br"C:\Users\yu\a C:\Users\yusuke\b c:\users\YU",
+            r"C:\Users\yu",
+        );
+        assert_eq!(
+            &*hidden,
+            br"%USERPROFILE%\a C:\Users\yusuke\b %USERPROFILE%".as_slice()
+        );
+    }
+
+    #[test]
+    fn a_user_name_in_another_script_is_hidden_too() {
+        let home = r"C:\Users\中山";
+        let line = format!(r"{home}\Videos and {home}x");
+        assert_eq!(
+            &*hide_home(line.as_bytes(), home),
+            r"%USERPROFILE%\Videos and C:\Users\中山x".as_bytes()
         );
     }
 
