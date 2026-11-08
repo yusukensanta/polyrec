@@ -1,12 +1,14 @@
 //! Performs the actual update once the user clicks "Update Now" on the
 //! version banner `update_check` surfaced -- downloads the right release
 //! asset for how this copy of PolyRec is installed, verifies its SHA256
-//! against the release's published `SHA256SUMS.txt` and requires GitHub's
-//! build-provenance attestation saying PolyRec's own release workflow built
-//! it (both never skipped: they're what stands between a compromised or
-//! corrupted download and either replacing the running executable or
-//! launching an installer), then either swaps the running exe in place
-//! (portable) or silently re-runs the installer (installed via Inno Setup).
+//! against the release's published `SHA256SUMS.txt` -- which has to be
+//! signed with the release key (`verify_signed_sums`) -- and requires
+//! GitHub's build-provenance attestation saying PolyRec's own release
+//! workflow built it (none of it ever skipped: it's what stands between a
+//! compromised or corrupted download and either replacing the running
+//! executable or launching an installer), then either swaps the running exe
+//! in place (portable) or silently re-runs the installer (installed via
+//! Inno Setup).
 
 use crate::error::{AppError, ResultExt};
 use base64::Engine as _;
@@ -156,9 +158,61 @@ fn release_asset_url(version_tag: &str, filename: &str) -> String {
     format!("https://github.com/{REPO}/releases/download/{version_tag}/{filename}")
 }
 
+/// The minisign public keys a release's `SHA256SUMS.txt` has to be signed
+/// with, either one: the release key every release is signed with, and a
+/// backup kept offline should it be lost. Their secret halves are never on
+/// GitHub -- the maintainer signs each release on their own machine
+/// (`.github/scripts/Sign-Release.ps1`) -- so someone able to publish a
+/// release (a stolen login or token, a compromised workflow) still can't
+/// make one this installs.
+const RELEASE_KEYS: [&str; 2] = [
+    include_str!("../keys/polyrec-release.pub"),
+    include_str!("../keys/polyrec-release-backup.pub"),
+];
+
+/// What a release's signature has to say it's for -- its trusted comment,
+/// which the signature covers -- so one release's signed checksums can't
+/// be passed off as another's.
+fn signed_for(version_tag: &str) -> String {
+    format!("polyrec {version_tag}")
+}
+
+/// Checks `signature` (a `.minisig` file) is one of `keys`' over `sums`,
+/// made for `version_tag`.
+fn verify_signed_sums(
+    sums: &[u8],
+    signature: &str,
+    keys: &[&str],
+    version_tag: &str,
+) -> Result<(), AppError> {
+    let signature = minisign_verify::Signature::decode(signature)
+        .update_ctx("SHA256SUMS.txt.minisig isn't a minisign signature")?;
+    let signed_with_a_key = keys.iter().any(|key| {
+        minisign_verify::PublicKey::decode(key)
+            .is_ok_and(|key| key.verify(sums, &signature, false).is_ok())
+    });
+    if !signed_with_a_key {
+        return Err(AppError::Update(
+            "SHA256SUMS.txt isn't signed with PolyRec's release key".into(),
+        ));
+    }
+    let expected = signed_for(version_tag);
+    if signature.trusted_comment() != expected {
+        return Err(AppError::Update(format!(
+            "SHA256SUMS.txt was signed for {:?}, not {expected:?}",
+            signature.trusted_comment()
+        )));
+    }
+    Ok(())
+}
+
 async fn fetch_expected_sha256(version_tag: &str, filename: &str) -> Result<String, AppError> {
-    let sums_url = release_asset_url(version_tag, "SHA256SUMS.txt");
-    let bytes = download_bytes(&sums_url).await?;
+    let bytes = download_bytes(&release_asset_url(version_tag, "SHA256SUMS.txt")).await?;
+    let signature =
+        download_bytes(&release_asset_url(version_tag, "SHA256SUMS.txt.minisig")).await?;
+    let signature =
+        String::from_utf8(signature).update_ctx("SHA256SUMS.txt.minisig wasn't valid UTF-8")?;
+    verify_signed_sums(&bytes, &signature, &RELEASE_KEYS, version_tag)?;
     let text = String::from_utf8(bytes).update_ctx("SHA256SUMS.txt wasn't valid UTF-8")?;
     parse_sha256sums(&text, filename).ok_or_else(|| {
         AppError::Update(format!(
@@ -332,15 +386,16 @@ fn is_release_build_of(
 /// `digest_hex`: one PolyRec's release workflow (`release.yml`), run for
 /// `version_tag`, recorded for `filename` (`is_release_build_of`).
 ///
-/// `SHA256SUMS.txt` comes from the same release as the file it vouches for,
-/// so on its own it only says the download arrived intact: someone able to
-/// publish a release could publish both. This says the file is what
-/// PolyRec's own release build produced. Releases can't be changed once
-/// published, and one made any other way -- its files uploaded by hand,
-/// with a stolen token, say -- has no such attestation.
+/// The release key's signature on `SHA256SUMS.txt` says the maintainer
+/// published this release; this says its file is what PolyRec's own
+/// release build produced, not something uploaded by hand alongside --
+/// should the release key ever sign the wrong thing. Anyone able to run
+/// the release workflow can get such an attestation, which is why it isn't
+/// enough on its own.
 ///
 /// The attestation's Sigstore signature isn't checked here: this trusts
-/// GitHub's API, over TLS, to hand back the attestations it holds.
+/// GitHub's API, over TLS, to hand back the attestations it holds. The
+/// maintainer checks it in full before signing (`Sign-Release.ps1`).
 ///
 /// Blocking: an update whose build can't be confirmed -- offline, or
 /// GitHub's API rate limit -- isn't installed, and says why. That can be
@@ -790,6 +845,102 @@ mod tests {
         assert!(!dir.exists());
     }
 
+    /// Signed with throwaway keys made for these tests (`minisign -G -W`,
+    /// then `minisign -S -t "polyrec v0.5.139"`; `-l` for the legacy one),
+    /// whose secret halves were deleted straight after.
+    mod signed_sums {
+        use super::*;
+
+        const SUMS: &[u8] = include_bytes!("../tests/fixtures/release_signing/SHA256SUMS.txt");
+        const MAIN: &str = include_str!("../tests/fixtures/release_signing/main.pub");
+        const BACKUP: &str = include_str!("../tests/fixtures/release_signing/backup.pub");
+        const OTHER: &str = include_str!("../tests/fixtures/release_signing/other.pub");
+        const BY_MAIN: &str = include_str!("../tests/fixtures/release_signing/by_main.minisig");
+        const BY_BACKUP: &str = include_str!("../tests/fixtures/release_signing/by_backup.minisig");
+        const BY_OTHER: &str = include_str!("../tests/fixtures/release_signing/by_other.minisig");
+        const BY_MAIN_FOR_V0_5_138: &str =
+            include_str!("../tests/fixtures/release_signing/by_main_for_v0.5.138.minisig");
+        const LEGACY_BY_MAIN: &str =
+            include_str!("../tests/fixtures/release_signing/legacy_by_main.minisig");
+
+        fn verify(signature: &str, version_tag: &str) -> Result<(), AppError> {
+            verify_signed_sums(SUMS, signature, &[MAIN, BACKUP], version_tag)
+        }
+
+        #[test]
+        fn checksums_signed_with_the_release_key_are_accepted() {
+            verify(BY_MAIN, "v0.5.139").unwrap();
+        }
+
+        #[test]
+        fn checksums_signed_with_the_backup_key_are_accepted() {
+            verify(BY_BACKUP, "v0.5.139").unwrap();
+        }
+
+        /// Someone able to publish a release, but without the release key,
+        /// signing with a key of their own.
+        #[test]
+        fn checksums_signed_with_any_other_key_are_refused() {
+            assert!(verify(BY_OTHER, "v0.5.139").is_err());
+            assert!(verify_signed_sums(SUMS, BY_OTHER, &[OTHER], "v0.5.139").is_ok());
+        }
+
+        #[test]
+        fn checksums_changed_after_signing_are_refused() {
+            let mut changed = SUMS.to_vec();
+            changed[0] = b'3';
+            assert!(verify_signed_sums(&changed, BY_MAIN, &[MAIN, BACKUP], "v0.5.139").is_err());
+        }
+
+        /// An older release's signed checksums, offered as a newer release's
+        /// -- or as one whose tag starts the same.
+        #[test]
+        fn checksums_signed_for_another_release_are_refused() {
+            assert!(verify(BY_MAIN_FOR_V0_5_138, "v0.5.139").is_err());
+            assert!(verify(BY_MAIN, "v0.5.13").is_err());
+            assert!(verify(BY_MAIN, "v0.5.1390").is_err());
+        }
+
+        #[test]
+        fn a_legacy_signature_is_refused() {
+            assert!(verify(LEGACY_BY_MAIN, "v0.5.139").is_err());
+        }
+
+        #[test]
+        fn something_that_isnt_a_signature_is_refused() {
+            for signature in ["", "not a signature", MAIN] {
+                assert!(verify(signature, "v0.5.139").is_err(), "{signature:?}");
+            }
+        }
+
+        /// The keys built in are the two real ones, not these tests' -- and
+        /// not one key twice, which would leave no backup.
+        #[test]
+        fn the_release_keys_are_two_different_real_keys() {
+            let lines: Vec<&str> = RELEASE_KEYS
+                .iter()
+                .map(|key| {
+                    minisign_verify::PublicKey::decode(key).expect("a minisign public key");
+                    key.lines().nth(1).unwrap()
+                })
+                .collect();
+            assert_ne!(lines[0], lines[1]);
+            for test_key in [MAIN, BACKUP, OTHER] {
+                assert!(!lines.contains(&test_key.lines().nth(1).unwrap()));
+            }
+        }
+
+        /// The keys the user guide tells people to check a download with.
+        #[test]
+        fn the_user_guide_shows_the_release_keys() {
+            const GUIDE: &str = include_str!("../docs/USER_GUIDE.md");
+            for key in RELEASE_KEYS {
+                let key = key.lines().nth(1).unwrap();
+                assert!(GUIDE.contains(&format!("-P {key}")), "{key}");
+            }
+        }
+    }
+
     #[test]
     fn parse_sha256sums_finds_matching_line() {
         let text = "abc123  polyrec-v0.4.0-windows-x64.zip\ndef456  polyrec-v0.4.0-windows-x64-setup.exe\n";
@@ -886,13 +1037,15 @@ mod tests {
         );
     }
 
-    /// End-to-end against a real, already-published release: downloads the
-    /// real zip and SHA256SUMS.txt over the network, verifies the real
-    /// checksum and build provenance, and extracts the real polyrec.exe
-    /// entry -- proving every custom bit of logic in this file (URL
-    /// construction, SHA256SUMS.txt parsing against CI's actual output
-    /// format, the attestation lookup, zip extraction against CI's actual
-    /// archive) against genuine GitHub data. Deliberately does NOT call
+    /// End-to-end against a real, already-published release -- v0.5.161, the
+    /// first signed with the release key: downloads the real zip,
+    /// SHA256SUMS.txt and its signature over the network, verifies the real
+    /// signature, checksum and build provenance, and extracts the real
+    /// polyrec.exe entry -- proving every custom bit of logic in this file
+    /// (URL construction, the signature against `Sign-Release.ps1`'s actual
+    /// output, SHA256SUMS.txt parsing against CI's actual output format, the
+    /// attestation lookup, zip extraction against CI's actual archive)
+    /// against genuine GitHub data. Deliberately does NOT call
     /// self_replace/spawn a process -- that mechanism was validated
     /// separately, live, in complete isolation (a throwaway scratch binary
     /// pair, not this repo's own exe), since doing it here would mean
@@ -901,9 +1054,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn download_and_verify_and_extract_against_a_real_published_release() {
-        let zip_bytes = download_and_verify("v0.5.139", V0_5_139_ZIP)
+        let zip_bytes = download_and_verify("v0.5.161", "polyrec-v0.5.161-windows-x64.zip")
             .await
-            .expect("download_and_verify failed against the real v0.5.139 release");
+            .expect("download_and_verify failed against the real v0.5.161 release");
         println!("downloaded {} bytes", zip_bytes.len());
 
         let exe_bytes = extract_exe_from_zip(&zip_bytes, MAX_UPDATE_BYTES)

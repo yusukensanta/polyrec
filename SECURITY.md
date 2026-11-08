@@ -44,6 +44,7 @@ This policy covers PolyRec itself: the Rust application and its release/CI pipel
 **In scope:**
 - Privilege escalation or arbitrary code execution via a malicious recording target, config file, or hotkey binding.
 - The update-check mechanism (`src/update_check.rs`) executing or opening anything other than the intended GitHub release page.
+- The self-updater (`src/self_update.rs`) installing anything whose `SHA256SUMS.txt` isn't signed with the release key (see "How updates are verified" below), or that doesn't match it.
 - Path traversal or unintended file writes via the output directory or export path.
 - Credential/token leakage in logs or the release pipeline.
 - Supply-chain issues in the release pipeline itself (unpinned dependencies, mutable Action references, unverifiable build artifacts).
@@ -51,7 +52,17 @@ This policy covers PolyRec itself: the Rust application and its release/CI pipel
 **Out of scope:**
 - Vulnerabilities in the Rust toolchain, Windows itself, or third-party crates (report those to the respective upstream projects — `cargo audit` findings for crates PolyRec doesn't actually exercise on Windows are tracked, not necessarily fixed; see recent security-audit commits for the reasoning).
 - Issues that require the attacker to already have local code-execution or admin access on the machine running PolyRec.
-- SmartScreen/AV warnings on the executable — releases are currently **not** Authenticode-signed by a certificate Windows trusts. The release workflow still asks SignPath to sign each build, but those requests fail (the free tier's yearly size quota is used up), and the few early releases that did carry a signature (v0.5.39 and before) used a self-signed certificate Windows doesn't trust. Windows therefore shows "Unknown Publisher". Verify a download with the published `SHA256SUMS.txt` and its build provenance attestation instead (see "Verifying a download" in the [User Guide](docs/USER_GUIDE.md#verifying-a-download-optional)).
+- SmartScreen/AV warnings on the executable — releases are currently **not** Authenticode-signed by a certificate Windows trusts. The release workflow still asks SignPath to sign each build, but those requests fail (the free tier's yearly size quota is used up), and the few early releases that did carry a signature (v0.5.39 and before) used a self-signed certificate Windows doesn't trust. Windows therefore shows "Unknown Publisher". Verify a download with the published `SHA256SUMS.txt`, its signature and its build provenance attestation instead (see "Verifying a download" in the [User Guide](docs/USER_GUIDE.md#verifying-a-download-optional)).
+
+## How updates are verified
+
+From v0.5.161, PolyRec's self-updater installs a release only if all of these hold:
+
+1. Its `SHA256SUMS.txt` is signed (minisign, Ed25519) with one of the two public keys built into PolyRec, the same ones as in [`keys/`](keys): the release key, or a backup key kept offline should it be lost. The signature's trusted comment must name that exact release (`polyrec vX.Y.Z`), so one release's signed checksums can't be passed off as another's.
+2. The downloaded file's SHA-256 matches its line in that file.
+3. GitHub holds a build provenance attestation saying `release.yml` built that file for that tag.
+
+Neither secret key is ever on GitHub: the release workflow leaves each release as a draft, and the maintainer checks it, signs it and publishes it from their own machine (`.github/scripts/Sign-Release.ps1`). So someone who gets the maintainer's GitHub login or a token, or compromises the workflow, can publish a release but can't make PolyRec install it.
 
 ## Security Advisories
 

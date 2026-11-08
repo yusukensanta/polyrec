@@ -168,11 +168,11 @@ Uses `tracing`/`tracing-subscriber` for structured logging.
 
 ## CI/CD
 
-The release pipeline (`.github/workflows/release.yml`) triggers on a `v*.*.*` tag push or a published GitHub Release, and:
+The release pipeline (`.github/workflows/release.yml`) triggers on a `v*.*.*` tag push, and:
 - Verifies the tag matches `Cargo.toml`'s `version` field (bump `Cargo.toml` and retag if these drift).
 - Builds `cargo build --release --locked`.
 - Packages a zip, generates `SHA256SUMS.txt`, and attests build provenance.
-- Publishes to GitHub Releases.
+- Leaves it as a **draft** GitHub Release. The maintainer signs and publishes it (see Release Process below).
 
 Make sure `cargo build --release`, `cargo clippy --all-targets`, and `cargo test` all pass before submitting a PR.
 
@@ -203,7 +203,12 @@ Make sure `cargo build --release`, `cargo clippy --all-targets`, and `cargo test
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
-4. CI builds, verifies the tag matches `Cargo.toml`, and publishes the release automatically. See `.github/workflows/release.yml`.
+4. CI builds, verifies the tag matches `Cargo.toml`, and leaves a draft release. See `.github/workflows/release.yml`.
+5. Sign and publish it, in a terminal of your own (minisign asks for the release key's password):
+   ```powershell
+   pwsh -File .github/scripts/Sign-Release.ps1 vX.Y.Z
+   ```
+   It checks the draft's files (checksums, and build provenance from that tag's commit on `main`), signs `SHA256SUMS.txt` with the release key, uploads `SHA256SUMS.txt.minisig` and publishes the release. PolyRec's self-updater installs only releases signed with one of the keys in `keys/`: the release key, or the backup key kept offline should it be lost (`-KeyFile <backup key>`). Neither secret key is ever on GitHub, so nothing there can sign a release.
 
 ## Code of Conduct
 

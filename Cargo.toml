@@ -37,6 +37,10 @@ sha2 = "0.11"
 # the JSON inside them. Both already came in through reqwest.
 base64 = "0.23"
 serde_json = "1"
+# Checking a release's SHA256SUMS.txt is signed with the release key (see
+# self_update::verify_signed_sums). Small, no dependencies of its own; by
+# minisign's author.
+minisign-verify = "0.3"
 self-replace = "1"
 # The default "libappindicator" feature is the Linux tray backend; off, the
 # lockfile stays free of its GTK3 bindings (unmaintained, so `cargo audit`

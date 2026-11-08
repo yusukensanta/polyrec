@@ -10,13 +10,22 @@ Grab the latest release from the [Releases page](https://github.com/yusukensanta
 - **`polyrec-vX.Y.Z-windows-x64-setup.exe`** — a normal installer. Double-click, click through the wizard, get a Start Menu shortcut and an Add/Remove Programs entry. Recommended if you just want to install it like any other app.
 - **`polyrec-vX.Y.Z-windows-x64.zip`** — portable, no installer: unzip and run `polyrec.exe` directly. Nothing is written outside the folder you unzip it to.
 
-Either way, the app checks for newer releases on launch and shows a banner if one's available. Clicking it opens an "Update Now" / "Not Now" confirmation (with a separate link to view release notes without updating) — choosing **Update Now** downloads the release, verifies its SHA256 against the published `SHA256SUMS.txt`, then either swaps the running exe in place (portable) or silently re-launches the installer (installed, triggering the usual UAC prompt). Nothing downloads or installs without that confirmation.
+Either way, the app checks for newer releases on launch and shows a banner if one's available. Clicking it opens an "Update Now" / "Not Now" confirmation (with a separate link to view release notes without updating) — choosing **Update Now** downloads the release, checks its published `SHA256SUMS.txt` is signed with the maintainer's release key, verifies the download's SHA256 against it and its build provenance, then either swaps the running exe in place (portable) or silently re-launches the installer (installed, triggering the usual UAC prompt). Nothing downloads or installs without that confirmation.
 
 The installer is unsigned (no code-signing certificate), so Windows SmartScreen will show an "Unknown Publisher" warning on first run — click **More info → Run anyway**. See [SECURITY.md](../SECURITY.md) for why, and the verification steps below if you want independent confirmation of what you're running instead of just trusting the warning-click.
 
 ### Verifying a download (optional)
 
-Each release includes a `SHA256SUMS.txt` and a build provenance attestation covering both the installer and the zip, so you don't have to just trust that the file on the release page is what CI actually built.
+Each release includes a `SHA256SUMS.txt`, its signature `SHA256SUMS.txt.minisig`, and a build provenance attestation covering both the installer and the zip, so you don't have to just trust that the file on the release page is what CI actually built.
+
+Signature (requires [minisign](https://jedisct1.github.io/minisign/), e.g. `winget install jedisct1.minisign`) — confirms the checksums are the ones the maintainer signed with the release key, which is never on GitHub, so someone who got into the GitHub account couldn't have made them:
+
+```powershell
+minisign -Vm SHA256SUMS.txt -P RWRjDayf52/Qtwseb0oGvRR1EXVtD48nEi6j0j0Pg9POeALygRz7w8RF
+# "Signature and comment signature verified", trusted comment "polyrec vX.Y.Z"
+```
+
+That's the release key. Should a release ever be signed with the backup key instead, check it with `-P RWQ0RXHEI1lTp5pQZW2Ps4TceBQIxt0u2vPiXVlGWc8bf3GNXQ8o9seZ`. Both are also in the repo's [`keys/`](../keys) folder. Releases before v0.5.161 aren't signed.
 
 Checksum (PowerShell):
 
@@ -53,7 +62,7 @@ Releases are also immutable once published — assets can't be silently replaced
 - **Highlight** — an optional rolling background buffer (30–300s, configurable) that keeps recording even when you're not; hit the save-highlight hotkey to export the last N seconds without having started a manual recording.
 - **Quality settings** (**Quality**) — FPS (30/60), codec (H265 with automatic fallback to H264 if your machine lacks an HEVC encoder, or H264 directly), resolution mode, bitrate (auto-calculated from resolution×fps, or a manual Mbps override), and encoder mode (hardware GPU encoder by default, or software to free up the GPU). With the hardware encoder, the experimental **Keep frames on the GPU** checkbox hands each frame to the encoder without copying it through system memory, which cuts PolyRec's CPU use while recording by about three quarters; leave it off if a recording ever looks wrong, and it falls back on its own where the encoder doesn't support it.
 - **Export** — remux the recording with only the audio tracks you want, no re-encoding.
-- **Update check** — compares your version against the latest GitHub release on launch and offers an in-app, checksum-verified self-update.
+- **Update check** — compares your version against the latest GitHub release on launch and offers an in-app self-update, installed only when signed with the release key.
 - **English / 日本語** — UI language toggle, persisted in config.
 - **Keyboard** — Tab moves between PolyRec's controls, Space or Enter presses the one in focus, and Esc closes a pop-up. Once you move with the keyboard, a ring shows where focus is, as in Windows' own apps; a click hides it again.
 - **Theme** — PolyRec follows Windows' light or dark mode (**Settings → Personalization → Colors**) in its own indigo palette — indigo for what's selected and what you can press, red for recording — and switches to Windows' own colours under a high-contrast theme. With **Animation effects** off (**Settings → Accessibility → Visual effects**), nothing in it animates. The recording overlay stays dark in every theme, since it sits over games.
