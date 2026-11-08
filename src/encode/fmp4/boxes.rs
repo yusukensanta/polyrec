@@ -236,27 +236,39 @@ pub(super) fn ctts(sample_count: u32, offset: u32) -> Vec<u8> {
 
 /// The whole version-0 `mvhd`, `tkhd` or `mdhd` box `header` with
 /// `duration`: still version 0 if that fits in 32 bits, else version 1,
-/// whose times and duration take 64. Everything else stays.
-pub(super) fn with_duration(header: &[u8], duration: u64) -> Vec<u8> {
-    debug_assert_eq!(header[8], 0, "a version-0 box");
+/// whose times and duration take 64. Everything else stays. Read from a
+/// file at recovery, `header` may be damaged: a box too short, or of
+/// another version, is refused.
+pub(super) fn with_duration(header: &[u8], duration: u64) -> std::io::Result<Vec<u8>> {
     // After size, type, version and flags: created and modified, then the
     // timescale (`mvhd`, `mdhd`) or the track_ID and 4 reserved bytes
     // (`tkhd`), then the duration.
-    let duration_at = if &header[4..8] == b"tkhd" { 28 } else { 24 };
+    let duration_at = if header.get(4..8) == Some(b"tkhd") {
+        28
+    } else {
+        24
+    };
+    if header.len() < duration_at + 4 || header[8] != 0 {
+        let kind = String::from_utf8_lossy(header.get(4..8).unwrap_or_default());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("a {kind} box PolyRec didn't write"),
+        ));
+    }
     if let Ok(short) = u32::try_from(duration) {
         let mut out = header.to_vec();
         out[duration_at..duration_at + 4].copy_from_slice(&short.to_be_bytes());
-        return out;
+        return Ok(out);
     }
     let be32 = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap());
     let mut kind = [0; 4];
     kind.copy_from_slice(&header[4..8]);
-    full_box(&kind, 1, be32(8) & 0x00ff_ffff, |o| {
+    Ok(full_box(&kind, 1, be32(8) & 0x00ff_ffff, |o| {
         o.u64(u64::from(be32(12))).u64(u64::from(be32(16)));
         o.bytes(&header[20..duration_at]);
         o.u64(duration);
         o.bytes(&header[duration_at + 4..]);
-    })
+    }))
 }
 
 /// `values` as (how many in a row, value) pairs.
@@ -793,14 +805,14 @@ pub(crate) mod tests {
             // then the duration.
             let duration_at = if what == "tkhd" { 28 } else { 24 };
 
-            let short = with_duration(old, 100);
+            let short = with_duration(old, 100).unwrap();
             assert_eq!(short.len(), old.len(), "{what}");
             assert_eq!(short[8], 0, "{what}: version 0");
             assert_eq!(be32(&short, duration_at), 100, "{what}");
             assert_eq!(short[..duration_at], old[..duration_at], "{what}");
             assert_eq!(short[duration_at + 4..], old[duration_at + 4..], "{what}");
 
-            let long = with_duration(old, 1 << 33);
+            let long = with_duration(old, 1 << 33).unwrap();
             assert_eq!(long.len(), old.len() + 12, "{what}");
             assert_eq!(be32(&long, 0) as usize, long.len(), "{what}: its size");
             assert_eq!(long[4..8], old[4..8], "{what}");

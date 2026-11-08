@@ -183,7 +183,7 @@ pub fn complete_moov(stub_moov: &[u8], index: &Index) -> io::Result<Vec<u8>> {
         traks.push(built);
         movie_duration = movie_duration.max(duration);
     }
-    let mvhd = with_duration(mvhd, movie_duration);
+    let mvhd = with_duration(mvhd, movie_duration)?;
     Ok(boxed(b"moov", |o| {
         o.bytes(&mvhd);
         for trak in &traks {
@@ -255,8 +255,8 @@ fn complete_trak(
             o.bytes(&stss(&table.sync_samples()));
         }
     });
-    let mdhd = with_duration(mdhd, media_duration);
-    let mut tkhd = with_duration(tkhd, duration);
+    let mdhd = with_duration(mdhd, media_duration)?;
+    let mut tkhd = with_duration(tkhd, duration)?;
     // track_ID: after the 32- or 64-bit creation and modification times.
     let id_at = if tkhd[8] == 0 { 20 } else { 28 };
     tkhd[id_at..id_at + 4].copy_from_slice(&new_id.to_be_bytes());
@@ -352,7 +352,7 @@ fn finish_fragmented(path: &Path) -> io::Result<InPlace> {
 ///
 /// If writing fails, the file is put back as the fragmented file it was,
 /// which reads as it is.
-pub fn complete(file: &mut File, head: &[u8], index: &Index) -> io::Result<()> {
+pub fn complete(file: &mut impl Disk, head: &[u8], index: &Index) -> io::Result<()> {
     let started = Instant::now();
     let Layout::Placeholder { at } = layout(head) else {
         return Err(invalid("no placeholder after ftyp"));
@@ -365,13 +365,7 @@ pub fn complete(file: &mut File, head: &[u8], index: &Index) -> io::Result<()> {
     }
     file.set_len(end)?;
     if let Err(e) = write_finish(file, at, end, &moov) {
-        // A moov half-written at its end could stop the fragmented file
-        // reading at all.
-        let _ = file
-            .seek(SeekFrom::Start(at))
-            .and_then(|_| file.write_all(&PLACEHOLDER));
-        let _ = file.set_len(end);
-        let _ = file.sync_all();
+        undo_finish(file, at, end);
         return Err(e);
     }
     tracing::info!(
@@ -383,13 +377,48 @@ pub fn complete(file: &mut File, head: &[u8], index: &Index) -> io::Result<()> {
     Ok(())
 }
 
-fn write_finish(file: &mut File, at: u64, end: u64, moov: &[u8]) -> io::Result<()> {
+/// Puts a file whose finish failed back as the fragmented file it was,
+/// which reads as it is: a `moov` half-written at its end could stop it
+/// reading at all. The placeholder goes back, onto the disk, before the
+/// `moov` goes: the other way round, a power cut between could leave an
+/// `mdat` header with no `moov` after the data, which nothing reads. If
+/// the placeholder can't go back, the `moov` stays: the header may be in,
+/// and with its `moov` the file is whole.
+fn undo_finish(file: &mut impl Disk, at: u64, end: u64) {
+    let restored = file
+        .seek(SeekFrom::Start(at))
+        .and_then(|_| file.write_all(&PLACEHOLDER))
+        .and_then(|()| file.sync_all());
+    if restored.is_ok() {
+        let _ = file.set_len(end).and_then(|()| file.sync_all());
+    }
+}
+
+fn write_finish(file: &mut impl Disk, at: u64, end: u64, moov: &[u8]) -> io::Result<()> {
     file.seek(SeekFrom::Start(end))?;
     file.write_all(moov)?;
     file.sync_all()?;
     file.seek(SeekFrom::Start(at))?;
     file.write_all(&mdat_header(end - at))?;
     file.sync_all()
+}
+
+/// What finishing a file in place does to it, besides writing: a
+/// `File`'s own (a test's stand-in fails where it's told to).
+pub trait Disk: Write + Seek {
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+    /// Gets everything written so far onto the disk.
+    fn sync_all(&mut self) -> io::Result<()>;
+}
+
+impl Disk for File {
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        File::set_len(self, len)
+    }
+
+    fn sync_all(&mut self) -> io::Result<()> {
+        File::sync_all(self)
+    }
 }
 
 /// What follows `ftyp` at the start of a file.
@@ -1020,6 +1049,32 @@ pub(crate) mod tests {
         );
     }
 
+    /// Recovery reads the stub from the file: a damaged one is refused, not
+    /// a panic -- which would stop the other leftovers being recovered, at
+    /// every start.
+    #[test]
+    fn a_damaged_stub_is_refused_not_a_panic() {
+        let index = Index::new(&[1, 2]);
+        // An mvhd cut short just after its timescale.
+        let mut mvhd = vec![0, 0, 0, 24, b'm', b'v', b'h', b'd'];
+        mvhd.extend([0; 12]);
+        mvhd.extend(1000u32.to_be_bytes());
+        let mut moov = (8 + mvhd.len() as u32).to_be_bytes().to_vec();
+        moov.extend(b"moov");
+        moov.extend(&mvhd);
+        assert!(complete_moov(&moov, &index).is_err(), "a short mvhd");
+
+        // A tkhd that says version 1, laid out as version 0.
+        let head = init_segment(&tracks());
+        let mut stub = moov_in(&head).to_vec();
+        let tkhd = stub.windows(4).position(|w| w == b"tkhd").unwrap();
+        stub[tkhd + 4] = 1;
+        assert!(
+            complete_moov(&stub, &index).is_err(),
+            "a tkhd of another version"
+        );
+    }
+
     // -- Finishing a file in place --
 
     const MS: i64 = 10_000;
@@ -1297,6 +1352,107 @@ pub(crate) mod tests {
         assert!(complete(&mut file, &head, &case.muxed.index).is_err());
         drop(file);
         assert_eq!(std::fs::read(&path).unwrap(), legacy);
+    }
+
+    /// A file in memory that fails the writes and syncs it's told to, by
+    /// number (from 1), and does the rest.
+    struct FailingDisk {
+        data: Vec<u8>,
+        at: u64,
+        writes: usize,
+        syncs: usize,
+        fail_writes: Vec<usize>,
+        fail_syncs: Vec<usize>,
+    }
+
+    impl FailingDisk {
+        fn new(data: &[u8], fail_writes: &[usize], fail_syncs: &[usize]) -> Self {
+            Self {
+                data: data.to_vec(),
+                at: 0,
+                writes: 0,
+                syncs: 0,
+                fail_writes: fail_writes.to_vec(),
+                fail_syncs: fail_syncs.to_vec(),
+            }
+        }
+    }
+
+    impl Write for FailingDisk {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.fail_writes.contains(&self.writes) {
+                return Err(io::Error::other("write failed"));
+            }
+            let at = self.at as usize;
+            if self.data.len() < at + buf.len() {
+                self.data.resize(at + buf.len(), 0);
+            }
+            self.data[at..at + buf.len()].copy_from_slice(buf);
+            self.at += buf.len() as u64;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for FailingDisk {
+        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+            self.at = match to {
+                SeekFrom::Start(at) => at,
+                SeekFrom::End(by) => self.data.len() as u64 + by as u64,
+                SeekFrom::Current(by) => self.at + by as u64,
+            };
+            Ok(self.at)
+        }
+    }
+
+    impl Disk for FailingDisk {
+        fn set_len(&mut self, len: u64) -> io::Result<()> {
+            self.data.resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn sync_all(&mut self) -> io::Result<()> {
+            self.syncs += 1;
+            if self.fail_syncs.contains(&self.syncs) {
+                return Err(io::Error::other("sync failed"));
+            }
+            Ok(())
+        }
+    }
+
+    /// Writing the index failed: the file is the fragmented one it was.
+    #[test]
+    fn a_finish_failing_to_write_its_index_puts_the_fragmented_file_back() {
+        let case = Case::new();
+        let mut disk = FailingDisk::new(&case.muxed.out, &[1], &[]);
+        assert!(complete(&mut disk, &case.muxed.head, &case.muxed.index).is_err());
+        assert!(disk.data == case.muxed.out);
+    }
+
+    /// The header went in, but getting it onto the disk failed: the file is
+    /// put back as the fragmented one it was.
+    #[test]
+    fn a_finish_that_fails_after_its_header_puts_the_fragmented_file_back() {
+        let case = Case::new();
+        let mut disk = FailingDisk::new(&case.muxed.out, &[], &[2]);
+        assert!(complete(&mut disk, &case.muxed.head, &case.muxed.index).is_err());
+        assert!(disk.data == case.muxed.out);
+    }
+
+    /// The header went in and putting the placeholder back failed too: the
+    /// index stays, so the file is a whole, finished one -- never a header
+    /// with nothing after the data it holds, which nothing could read.
+    #[test]
+    fn a_finish_whose_undoing_fails_is_left_whole() {
+        let case = Case::new();
+        // Writes: the moov, the header, then the placeholder back.
+        let mut disk = FailingDisk::new(&case.muxed.out, &[3], &[2]);
+        assert!(complete(&mut disk, &case.muxed.head, &case.muxed.index).is_err());
+        assert!(disk.data == case.finished);
     }
 
     /// The longest recording here -- 3.3 h of 60 fps video and three AAC

@@ -40,6 +40,10 @@ pub struct Muxer<W: Write> {
     /// How many bytes have gone to `out`: where the next fragment starts.
     written: u64,
     index: Index,
+    /// A write failed: part of a fragment may be in `out` all the same, so
+    /// `written` and `index` no longer describe it, and nothing more is
+    /// written.
+    failed: bool,
     tracks: Vec<TrackInfo>,
     /// The video track's index in `tracks`.
     video: Option<usize>,
@@ -70,6 +74,7 @@ impl<W: Write> Muxer<W> {
             written: head.len() as u64,
             head,
             index,
+            failed: false,
             pending: vec![Vec::new(); tracks.len()],
             tracks,
             video,
@@ -83,6 +88,7 @@ impl<W: Write> Muxer<W> {
     /// given to `new`), writing the fragment before it first if it starts
     /// the next.
     pub fn push(&mut self, track: usize, sample: Sample) -> io::Result<()> {
+        self.writable()?;
         if Some(track) == self.video {
             if !self.reordered && self.last_video_time.is_some_and(|last| sample.time < last) {
                 self.reordered = true;
@@ -102,6 +108,14 @@ impl<W: Write> Muxer<W> {
         Ok(())
     }
 
+    /// Whether writing can go on: not once a write has failed.
+    fn writable(&self) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other("an earlier write to the file failed"));
+        }
+        Ok(())
+    }
+
     /// Writes what's left as a last fragment.
     pub fn finish(mut self) -> io::Result<Muxed<W>> {
         self.write_fragment(None)?;
@@ -115,6 +129,7 @@ impl<W: Write> Muxer<W> {
     /// Writes the samples before `until` (a time; all of them without one)
     /// as the next fragment, if there are any.
     fn write_fragment(&mut self, until: Option<i64>) -> io::Result<()> {
+        self.writable()?;
         let mut runs = Vec::new();
         for (index, track) in self.tracks.iter().enumerate() {
             let pending = &mut self.pending[index];
@@ -139,8 +154,14 @@ impl<W: Write> Muxer<W> {
         }
         self.sequence += 1;
         let made = fragment(self.sequence, &runs);
-        self.out.write_all(&made.bytes)?;
-        self.out.flush()?;
+        if let Err(e) = self
+            .out
+            .write_all(&made.bytes)
+            .and_then(|()| self.out.flush())
+        {
+            self.failed = true;
+            return Err(e);
+        }
         // Indexed only once written whole: the index never holds a
         // fragment the file doesn't.
         let moof_at = self.written;
@@ -406,5 +427,64 @@ mod tests {
         assert!(muxed.out.starts_with(&muxed.head));
         assert_eq!(muxed.index.end(), muxed.out.len() as u64);
         assert_eq!(muxed.index.sample_count(), 2);
+    }
+
+    /// Takes everything, except that the first write to reach `at` bytes
+    /// stops there, and the write after it fails: a write cut short, as on
+    /// a drive that filled up and then had room again.
+    struct CutShort {
+        out: Vec<u8>,
+        at: usize,
+        state: u8,
+    }
+
+    impl Write for CutShort {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self.state {
+                0 if self.out.len() + buf.len() > self.at => {
+                    let fits = self.at - self.out.len();
+                    self.out.extend_from_slice(&buf[..fits]);
+                    self.state = 1;
+                    Ok(fits)
+                }
+                1 => {
+                    self.state = 2;
+                    Err(io::Error::other("full"))
+                }
+                _ => {
+                    self.out.extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Part of a fragment may be in the file after a write that failed, so
+    /// what the muxer knows of the file no longer holds: it writes nothing
+    /// more and doesn't finish, rather than finish a file its index doesn't
+    /// describe.
+    #[test]
+    fn after_a_write_fails_nothing_more_is_written_or_finished() {
+        let head = init_segment(&tracks()).len();
+        let out = CutShort {
+            out: Vec::new(),
+            at: head + 5,
+            state: 0,
+        };
+        let mut muxer = Muxer::new(out, tracks()).unwrap();
+        muxer.push(0, frame(0, true)).unwrap();
+        assert!(
+            muxer.push(0, frame(100, true)).is_err(),
+            "the fragment's write failed"
+        );
+        assert!(
+            muxer.push(0, frame(200, true)).is_err(),
+            "and nothing after it"
+        );
+        assert!(muxer.finish().is_err());
     }
 }

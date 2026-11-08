@@ -675,10 +675,10 @@ pub(crate) mod tests {
     }
 
     /// Finishing a short recording in place takes no longer than the remux
-    /// it replaces -- a few milliseconds either way at half a second, where
-    /// it's mostly its two flushes to disk (so a power cut can't leave a
-    /// broken file), which the remux never did -- and adds only the index
-    /// to the file.
+    /// it replaces, or too little to notice -- a few milliseconds either way
+    /// at half a second, where it's mostly its two flushes to disk (so a
+    /// power cut can't leave a broken file), which the remux never did --
+    /// and adds only the index to the file.
     #[test]
     fn a_short_recording_grows_only_by_its_index_and_finishes_faster_than_a_remux() {
         let dir = tempfile::tempdir().unwrap();
@@ -723,10 +723,59 @@ pub(crate) mod tests {
             "half a second: in place {in_place:?}, remux {remux:?} (medians of 5); {} bytes in place ({fragmented} fragmented + {moov} index), {remuxed_size} remuxed",
             bytes.len()
         );
+        // No slower than the remux -- or else too quick to notice: on a slow
+        // virtual disk (CI's) a flush alone can take tens of milliseconds.
         assert!(
-            in_place <= remux + Duration::from_millis(5),
+            in_place <= remux.max(Duration::from_millis(50)),
             "in place {in_place:?}, remux {remux:?}"
         );
+    }
+
+    /// A track that never got a sample -- the user stopped before an app's
+    /// audio first came (see the writer's test of it) -- keeps an empty
+    /// `trak`, and a short recording like that reads, decodes and exports.
+    /// Media Foundation leaves the empty track out (2 audio streams, so
+    /// Export offers 2); players reading the file's tracks see all 3. Before,
+    /// such a recording was worse off: Media Foundation won't open the
+    /// fragmented file at all ("byte stream type ... unsupported"), so the
+    /// remux failed and it was kept fragmented, unplayable in Windows Media
+    /// Player. (In a thread: a stream that never ended would hang reading.)
+    #[test]
+    fn a_recording_with_a_track_that_never_got_a_sample_reads() {
+        const THREE: [(u32, u16); 3] = [(48_000, 2); 3];
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("rec.mp4");
+            let writer = RecordingWriter::new(&path, &params_with(&THREE)).expect("writer");
+            writer.begin_writing().unwrap();
+            // Tracks 0 and 1 get audio; track 2 none.
+            record_tracks(&writer, &THREE[..2], 15, false);
+            writer.finalize().expect("finalize");
+
+            assert_eq!(
+                top_level(&path),
+                ["ftyp", "mdat", "moov"],
+                "finished in place"
+            );
+            assert_eq!(top_level_tracks(&path).len(), 4, "every track in the file");
+            assert_eq!(crate::encode::remux::count_audio_tracks(&path).unwrap(), 2);
+            let read = mf_samples(&path);
+            assert_eq!(read.len(), 3, "video and the two audio streams with sound");
+            assert_eq!(read[0].len(), 15, "every frame");
+            assert!(read[1..].iter().all(|stream| !stream.is_empty()));
+            assert_eq!(decoded_frames(&path), 15);
+            let exported = dir.path().join("export.mp4");
+            crate::encode::remux::remux(&path, &exported, &[1]).expect("export");
+            assert_eq!(
+                crate::encode::remux::count_audio_tracks(&exported).unwrap(),
+                1
+            );
+            let _ = done.send(());
+        });
+        result
+            .recv_timeout(Duration::from_secs(60))
+            .expect("reading it hung or failed");
     }
 
     /// Recovery finds the index by walking the file; Stop has it from the
