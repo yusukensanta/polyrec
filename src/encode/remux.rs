@@ -583,7 +583,13 @@ impl PcmPieces for TrackDecoder {
                 buffer
                     .Lock(&mut data, None, Some(&mut cur_len))
                     .encode_ctx(format_args!("Lock(audio {idx})"))?;
-                let bytes = std::slice::from_raw_parts(data, cur_len as usize);
+                // An empty buffer may lock to no pointer at all, which
+                // `from_raw_parts` mustn't be given.
+                let bytes: &[u8] = if cur_len == 0 {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(data, cur_len as usize)
+                };
                 let samples: Vec<i16> = bytes
                     .as_chunks::<2>()
                     .0

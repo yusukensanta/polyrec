@@ -562,7 +562,13 @@ unsafe fn read_sample(sample: &IMFSample) -> Result<Sample> {
         let mut data = std::ptr::null_mut();
         let mut len = 0u32;
         buffer.Lock(&mut data, None, Some(&mut len))?;
-        let bytes = std::slice::from_raw_parts(data, len as usize).to_vec();
+        // An empty buffer may lock to no pointer at all, which
+        // `from_raw_parts` mustn't be given.
+        let bytes = if len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(data, len as usize).to_vec()
+        };
         buffer.Unlock()?;
         Ok(Sample {
             time: sample.GetSampleTime()?,

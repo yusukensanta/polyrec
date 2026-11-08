@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening PolyRec while another copy of it was still saving a recording could, rarely, delete that recording: tidying up after a save that was cut off short now holds both of its files to itself from the check until they're removed, so a save still going on is left alone.
+- `polyrec.log` and `crash.log` could keep growing if their previous copy (`.old`) was held open by another program; the log now starts over instead.
+- For contributors: an empty Media Foundation buffer is no longer read through a pointer that may be null, and an encoder setting read back as something other than a number is freed.
+
 ## [v0.5.159] - 2026-11-08
 
 ### Security

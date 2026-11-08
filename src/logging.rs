@@ -83,10 +83,12 @@ impl LogFile {
         }
         if self.open.is_none() {
             let mut len = std::fs::metadata(&self.path).map_or(0, |meta| meta.len());
-            // Should it fail (another PolyRec has the file open, say), the
-            // log goes on as it is, and tries again a whole log later.
             if len > self.max_bytes {
-                let _ = std::fs::rename(&self.path, self.path.with_extension("log.old"));
+                // Should keeping it fail (something holds the last one), the
+                // log starts over without it rather than growing on.
+                if std::fs::rename(&self.path, self.path.with_extension("log.old")).is_err() {
+                    File::create(&self.path)?;
+                }
                 len = 0;
             }
             if let Some(dir) = self.path.parent() {
@@ -264,5 +266,28 @@ mod tests {
             std::fs::read_to_string(dir.path().join("polyrec.log.old")).unwrap(),
             "0123456789a\n"
         );
+    }
+
+    /// Should the last log be held where it's kept (open in a viewer that
+    /// doesn't share it), the log still can't grow past its limit: it starts
+    /// over without keeping this one.
+    #[test]
+    fn a_log_that_cant_keep_the_last_one_still_starts_over() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("polyrec.log");
+        let old = dir.path().join("polyrec.log.old");
+        std::fs::write(&old, b"the one before").unwrap();
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&old)
+            .unwrap();
+        let mut log = LogFile::new(path.clone(), 10);
+        log.write_all(b"0123456789").unwrap();
+        log.write_all(b"a\n").unwrap();
+        log.write_all(b"next\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next\n");
     }
 }
