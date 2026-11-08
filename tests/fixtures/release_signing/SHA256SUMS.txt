@@ -1,0 +1,2 @@
+27904c60da11f267d9aaa1fc1cadc92f8458e058dcb65ea540c5261fc42bca83  polyrec-v0.5.139-windows-x64.zip
+08615281a0d9aff91fbe5ae64557571b3e1ca2cd8b69228e01c8fcc84e2694dc  polyrec-v0.5.139-windows-x64-setup.exe

@@ -1,18 +1,22 @@
 name: Release
 
-# Two independent triggers, since both are valid ways to cut a release:
-# 1. push a v*.*.* tag directly -- softprops/action-gh-release creates the
-#    GitHub Release itself in that case.
-# 2. publish a Release through the GitHub UI/API against an existing tag --
-#    no new tag push happens, so trigger 1 alone would never fire for this.
-#    action-gh-release detects the already-existing release by tag name and
-#    just uploads the zip to it instead of erroring.
+# A pushed v*.*.* tag builds that release and leaves it as a DRAFT: nobody
+# (and no copy of PolyRec checking for updates) sees it yet. The maintainer
+# then runs .github/scripts/Sign-Release.ps1 locally (a copy kept outside
+# the repo), which checks what this built and what changed since the last
+# release, signs its SHA256SUMS.txt with the release key -- kept off GitHub,
+# so nothing here can produce that signature -- uploads the signature and
+# publishes the release. PolyRec only installs an update whose checksums
+# carry it (self_update::verify_signed_sums).
+#
+# There's deliberately no `release: published` trigger: publishing the
+# signed draft would set this off again, and a rebuild uploading different
+# bytes over the signed ones would break the signature (immutable releases
+# then block that anyway).
 "on":
   push:
     tags:
       - "v*.*.*"
-  release:
-    types: [published]
 
 permissions:
   contents: write
@@ -23,11 +27,10 @@ permissions:
   id-token: write
   attestations: write
 
-# Creating a Release via the GitHub UI against a brand-new tag fires BOTH
-# triggers above (the tag push, then the release publish) -- queue the second
-# run instead of letting it race the first for the same release's assets.
+# A tag pushed again (deleted and re-pushed) queues behind the run already
+# under way rather than racing it for the same release's assets.
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  group: release-${{ github.ref_name }}
 
 jobs:
   build-and-release:
@@ -50,22 +53,16 @@ jobs:
       - name: Resolve tag
         id: tag
         shell: pwsh
-        # Pass these through env instead of splicing ${{ }} directly into the
-        # script body -- github.event.release.tag_name is attacker-influenced
-        # text (settable by anyone who can publish a release) and this job
-        # holds id-token/attestations write plus a signing secret, so textual
-        # interpolation into a run: block here would be a script-injection
-        # vector. env vars are passed as data, not parsed as script.
+        # Passed through env instead of splicing ${{ }} directly into the
+        # script body -- a ref name is text whoever pushed it chose, and this
+        # job holds id-token/attestations write plus a signing secret, so
+        # textual interpolation into a run: block here would be a
+        # script-injection vector. env vars are passed as data, not parsed
+        # as script.
         env:
-          RESOLVE_EVENT_NAME: ${{ github.event_name }}
-          RESOLVE_RELEASE_TAG: ${{ github.event.release.tag_name }}
           RESOLVE_REF_NAME: ${{ github.ref_name }}
         run: |
-          $tag = if ($env:RESOLVE_EVENT_NAME -eq "release") {
-            $env:RESOLVE_RELEASE_TAG
-          } else {
-            $env:RESOLVE_REF_NAME
-          }
+          $tag = $env:RESOLVE_REF_NAME
           # The trigger's v*.*.* glob also matches names like
           # v1.2.3$(...) -- git allows $ ( ) ' | in a ref. Only a plain
           # vX.Y.Z goes on: it becomes file names, and the steps below get
@@ -240,10 +237,14 @@ jobs:
             polyrec-*.zip
             polyrec-*-setup.exe
 
-      - name: Create/update GitHub Release
+      # A draft, published once its checksums are signed (see the top of
+      # this file): GitHub's "latest release", which PolyRec checks for
+      # updates, never includes drafts.
+      - name: Create/update GitHub Release (draft)
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          draft: true
           files: |
             polyrec-*.zip
             polyrec-*-setup.exe
