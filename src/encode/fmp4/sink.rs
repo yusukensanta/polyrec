@@ -178,7 +178,7 @@ impl Shared {
     /// Writes what's left, and closes the file.
     fn finish(&mut self) -> Result<()> {
         let writing = self.writing.take().ok_or(MF_E_SINK_NO_SAMPLES_PROCESSED)?;
-        let out = writing.muxer.finish().map_err(failed)?;
+        let out = writing.muxer.finish().map_err(failed)?.out;
         out.into_inner().map_err(|e| failed(e.error()))?;
         Ok(())
     }

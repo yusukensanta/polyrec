@@ -1,9 +1,12 @@
 //! Interleaves the tracks' samples into fragments and writes them: the
 //! init segment first, then a fragment each time the video reaches a
 //! keyframe -- each written whole and flushed, so the file up to the last
-//! one reads back whatever happens to the process after.
+//! one reads back whatever happens to the process after. It keeps the
+//! index of every sample it writes, which finishing the file in place
+//! needs (see `soft_remux`).
 
 use super::boxes::{RunSample, TrackInfo, TrackKind, TrackRun, fragment, init_segment};
+use super::soft_remux::Index;
 use std::io::{self, Write};
 
 /// A fragment no longer than this, keyframe or not: an encoder that keeps
@@ -21,8 +24,22 @@ pub struct Sample {
     pub data: Vec<u8>,
 }
 
+/// What a finished muxer leaves: its output, the init segment it began
+/// with, and the index of every sample in it.
+pub struct Muxed<W> {
+    pub out: W,
+    /// The init segment, as written at the start of `out`.
+    pub head: Vec<u8>,
+    pub index: Index,
+}
+
 pub struct Muxer<W: Write> {
     out: W,
+    /// The init segment written.
+    head: Vec<u8>,
+    /// How many bytes have gone to `out`: where the next fragment starts.
+    written: u64,
+    index: Index,
     tracks: Vec<TrackInfo>,
     /// The video track's index in `tracks`.
     video: Option<usize>,
@@ -39,13 +56,20 @@ pub struct Muxer<W: Write> {
 impl<W: Write> Muxer<W> {
     /// Writes the init segment for `tracks` to `out`.
     pub fn new(mut out: W, tracks: Vec<TrackInfo>) -> io::Result<Self> {
-        out.write_all(&init_segment(&tracks))?;
+        let head = init_segment(&tracks);
+        out.write_all(&head)?;
         out.flush()?;
         let video = tracks
             .iter()
             .position(|t| matches!(t.kind, TrackKind::Video { .. }));
+        let ids: Vec<u32> = tracks.iter().map(|t| t.id).collect();
+        let mut index = Index::new(&ids);
+        index.set_end(head.len() as u64);
         Ok(Self {
             out,
+            written: head.len() as u64,
+            head,
+            index,
             pending: vec![Vec::new(); tracks.len()],
             tracks,
             video,
@@ -79,9 +103,13 @@ impl<W: Write> Muxer<W> {
     }
 
     /// Writes what's left as a last fragment.
-    pub fn finish(mut self) -> io::Result<W> {
+    pub fn finish(mut self) -> io::Result<Muxed<W>> {
         self.write_fragment(None)?;
-        Ok(self.out)
+        Ok(Muxed {
+            out: self.out,
+            head: self.head,
+            index: self.index,
+        })
     }
 
     /// Writes the samples before `until` (a time; all of them without one)
@@ -110,8 +138,23 @@ impl<W: Write> Muxer<W> {
             return Ok(());
         }
         self.sequence += 1;
-        self.out.write_all(&fragment(self.sequence, &runs).bytes)?;
-        self.out.flush()
+        let made = fragment(self.sequence, &runs);
+        self.out.write_all(&made.bytes)?;
+        self.out.flush()?;
+        // Indexed only once written whole: the index never holds a
+        // fragment the file doesn't.
+        let moof_at = self.written;
+        for (run, offset) in runs.iter().zip(&made.data_offsets) {
+            self.index.add_run(
+                run.track_id,
+                moof_at + u64::from(*offset),
+                run.base_decode_time,
+                &run.samples,
+            );
+        }
+        self.written += made.bytes.len() as u64;
+        self.index.set_end(self.written);
+        Ok(())
     }
 }
 
@@ -149,6 +192,8 @@ fn run(track: &TrackInfo, samples: &[Sample], next: Option<i64>) -> TrackRun {
 mod tests {
     use super::super::boxes::tests::{boxes, children, kinds};
     use super::super::nal::VideoCodec;
+    use super::super::soft_remux::complete_moov;
+    use super::super::soft_remux::tests::{moov_in, sample_bytes};
     use super::*;
 
     const MS: i64 = 10_000;
@@ -237,7 +282,7 @@ mod tests {
             muxer.push(1, audio(ms)).unwrap();
             muxer.push(1, audio(ms + 50)).unwrap();
         }
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         assert_eq!(
             kinds(&boxes(&file)),
             ["ftyp", "free", "moov", "moof", "mdat", "moof", "mdat"]
@@ -259,7 +304,7 @@ mod tests {
         muxer.push(0, frame(0, true)).unwrap();
         muxer.push(0, frame(40, false)).unwrap();
         muxer.push(0, frame(70, true)).unwrap();
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         let runs = runs(&file);
         assert_eq!(runs[0][0], (1, 0, vec![3600, 2700]));
         // The last of all lasts its own duration.
@@ -272,7 +317,7 @@ mod tests {
         for ms in (0..3000).step_by(100) {
             muxer.push(0, frame(ms, ms == 0)).unwrap();
         }
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         let runs = runs(&file);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0][0].2.len(), 20, "2 s of frames");
@@ -301,11 +346,65 @@ mod tests {
         muxer.push(0, frame(0, true)).unwrap();
         muxer.push(0, frame(100, true)).unwrap();
         muxer.push(1, audio(100)).unwrap();
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         let ids: Vec<Vec<u32>> = runs(&file)
             .iter()
             .map(|f| f.iter().map(|r| r.0).collect())
             .collect();
         assert_eq!(ids, [vec![1], vec![1, 2]]);
+    }
+
+    /// Every sample with bytes of its own, so a table pointing at the
+    /// wrong ones shows: the index finds each, across fragments.
+    #[test]
+    fn the_index_points_at_every_samples_bytes() {
+        let mut muxer = Muxer::new(Vec::new(), tracks()).unwrap();
+        let mut pushed = vec![Vec::new(), Vec::new()];
+        let mut n = 0u8;
+        for (ms, key) in [
+            (0, true),
+            (100, false),
+            (200, true),
+            (300, false),
+            (400, true),
+            (500, false),
+        ] {
+            n += 1;
+            let video = Sample {
+                time: ms * MS,
+                duration: 100 * MS,
+                keyframe: key,
+                data: vec![n; 3 + usize::from(n)],
+            };
+            pushed[0].push(video.data.clone());
+            muxer.push(0, video).unwrap();
+            for half in [0, 50] {
+                n += 1;
+                let sound = Sample {
+                    time: (ms + half) * MS,
+                    duration: 50 * MS,
+                    keyframe: true,
+                    data: vec![n; 2 + usize::from(n % 3)],
+                };
+                pushed[1].push(sound.data.clone());
+                muxer.push(1, sound).unwrap();
+            }
+        }
+        let muxed = muxer.finish().unwrap();
+        assert_eq!(runs(&muxed.out).len(), 3, "three fragments");
+        let moov = complete_moov(moov_in(&muxed.head), &muxed.index).unwrap();
+        assert_eq!(sample_bytes(&muxed.out, &moov), pushed);
+    }
+
+    #[test]
+    fn the_head_is_the_init_segment_and_the_end_is_everything_written() {
+        let mut muxer = Muxer::new(Vec::new(), tracks()).unwrap();
+        muxer.push(0, frame(0, true)).unwrap();
+        muxer.push(0, frame(100, true)).unwrap();
+        let muxed = muxer.finish().unwrap();
+        assert_eq!(muxed.head, init_segment(&tracks()));
+        assert!(muxed.out.starts_with(&muxed.head));
+        assert_eq!(muxed.index.end(), muxed.out.len() as u64);
+        assert_eq!(muxed.index.sample_count(), 2);
     }
 }
