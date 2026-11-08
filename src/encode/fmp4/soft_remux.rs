@@ -148,6 +148,14 @@ impl Index {
 /// `index` holds: the stub's headers and sample descriptions, real
 /// durations, filled sample tables, and no `mvex` -- the file isn't
 /// fragmented any more.
+///
+/// The tracks go in the order Media Foundation's remux, which finished
+/// recordings before, put them in: video, then the audio last first. (Media
+/// Foundation lists a file's streams last `trak` first, and the remux
+/// wrote them in the order it read them.) They're numbered in that order,
+/// as it numbered them. So every player shows a recording's tracks in the
+/// order it always did, and Export -- which reads through Media Foundation
+/// -- in the order they were recorded.
 pub fn complete_moov(stub_moov: &[u8], index: &Index) -> io::Result<Vec<u8>> {
     let [(kind, moov)] = parse(stub_moov)?[..] else {
         return Err(invalid("the stub isn't one box"));
@@ -158,10 +166,20 @@ pub fn complete_moov(stub_moov: &[u8], index: &Index) -> io::Result<Vec<u8>> {
     let parts = parse(body(moov))?;
     let mvhd = one(&parts, b"mvhd")?;
     let movie_timescale = u64::from(be32(mvhd, 20)?);
+    let mut video = Vec::new();
+    let mut audio = Vec::new();
+    for (_, trak) in parts.iter().filter(|(kind, _)| kind == b"trak") {
+        if handler(trak)? == *b"vide" {
+            video.push(*trak);
+        } else {
+            audio.push(*trak);
+        }
+    }
     let mut traks = Vec::new();
     let mut movie_duration = 0;
-    for (_, trak) in parts.iter().filter(|(kind, _)| kind == b"trak") {
-        let (built, duration) = complete_trak(trak, index, movie_timescale)?;
+    for (position, trak) in video.into_iter().chain(audio.into_iter().rev()).enumerate() {
+        let new_id = position as u32 + 1;
+        let (built, duration) = complete_trak(trak, index, movie_timescale, new_id)?;
         traks.push(built);
         movie_duration = movie_duration.max(duration);
     }
@@ -174,9 +192,23 @@ pub fn complete_moov(stub_moov: &[u8], index: &Index) -> io::Result<Vec<u8>> {
     }))
 }
 
-/// The complete `trak` for the stub's `trak`, and its duration in the
-/// movie's timescale.
-fn complete_trak(trak: &[u8], index: &Index, movie_timescale: u64) -> io::Result<(Vec<u8>, u64)> {
+/// The handler type of the `trak` (whole): `vide` or `soun`.
+fn handler(trak: &[u8]) -> io::Result<[u8; 4]> {
+    let mdia = parse(body(one(&parse(body(trak))?, b"mdia")?))?;
+    let hdlr = one(&mdia, b"hdlr")?;
+    hdlr.get(16..20)
+        .map(|h| h.try_into().unwrap())
+        .ok_or_else(|| invalid("an hdlr too short"))
+}
+
+/// The complete `trak` for the stub's `trak`, as track `new_id`, and its
+/// duration in the movie's timescale.
+fn complete_trak(
+    trak: &[u8],
+    index: &Index,
+    movie_timescale: u64,
+    new_id: u32,
+) -> io::Result<(Vec<u8>, u64)> {
     let parts = parse(body(trak))?;
     let tkhd = one(&parts, b"tkhd")?;
     let id = be32(tkhd, 20)?;
@@ -224,7 +256,10 @@ fn complete_trak(trak: &[u8], index: &Index, movie_timescale: u64) -> io::Result
         }
     });
     let mdhd = with_duration(mdhd, media_duration);
-    let tkhd = with_duration(tkhd, duration);
+    let mut tkhd = with_duration(tkhd, duration);
+    // track_ID: after the 32- or 64-bit creation and modification times.
+    let id_at = if tkhd[8] == 0 { 20 } else { 28 };
+    tkhd[id_at..id_at + 4].copy_from_slice(&new_id.to_be_bytes());
     let built = boxed(b"trak", |o| {
         o.bytes(&tkhd);
         o.bytes(&boxed(b"mdia", |o| {
@@ -934,6 +969,34 @@ pub(crate) mod tests {
         assert_eq!(duration(&header(&moov, "tkhd", 1)), 0);
     }
 
+    /// Media Foundation lists a file's streams last `trak` first, and its
+    /// remux -- what finished recordings before -- wrote the audio in the
+    /// order it read it: reversed. Finished in place, the audio goes in
+    /// that same order and numbering, so every player (and Export, which
+    /// reads through Media Foundation) shows the tracks as before.
+    #[test]
+    fn audio_tracks_go_in_the_order_the_remux_wrote_them() {
+        let head = init_segment(&three_tracks());
+        let mut index = Index::new(&[1, 2, 3]);
+        assert!(index.add_run(2, 0, 0, &[sample(1024, 22, true)]));
+        assert!(index.add_run(3, 0, 0, &[sample(1024, 33, true)]));
+        let moov = complete_moov(moov_in(&head), &index).unwrap();
+        let ids: Vec<u32> = (0..3)
+            .map(|n| be32(&header(&moov, "tkhd", n), 20))
+            .collect();
+        assert_eq!(ids, [1, 2, 3], "numbered in their new order");
+        assert!(
+            sizes(table(&stbl(&moov, 0), "stsz")).is_empty(),
+            "video first"
+        );
+        assert_eq!(
+            sizes(table(&stbl(&moov, 1), "stsz")),
+            [33],
+            "the last audio track"
+        );
+        assert_eq!(sizes(table(&stbl(&moov, 2), "stsz")), [22]);
+    }
+
     #[test]
     fn add_run_ignores_an_unknown_track_or_an_empty_run() {
         let mut index = Index::new(&[1, 2]);
@@ -1012,9 +1075,17 @@ pub(crate) mod tests {
         (muxer.finish().unwrap(), pushed)
     }
 
+    /// What was pushed per track, in the order a finished file holds the
+    /// tracks: video, then the audio last first.
+    fn in_file_order(mut pushed: Vec<Vec<Vec<u8>>>) -> Vec<Vec<Vec<u8>>> {
+        pushed[1..].reverse();
+        pushed
+    }
+
     struct Case {
         dir: tempfile::TempDir,
         muxed: Muxed<Vec<u8>>,
+        /// In file order (`in_file_order`).
         pushed: Vec<Vec<Vec<u8>>>,
         /// The recording finished from the muxer's own index.
         finished: Vec<u8>,
@@ -1037,7 +1108,7 @@ pub(crate) mod tests {
             Self {
                 dir,
                 muxed,
-                pushed,
+                pushed: in_file_order(pushed),
                 finished,
             }
         }
@@ -1209,7 +1280,7 @@ pub(crate) mod tests {
             .filter(|b| b.kind == "trak")
             .count();
         assert_eq!(traks, 3, "the empty track stays");
-        assert_eq!(sample_bytes(&file, moov), pushed);
+        assert_eq!(sample_bytes(&file, moov), in_file_order(pushed));
     }
 
     #[test]
