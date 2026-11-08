@@ -11,7 +11,7 @@
 # https://docs.signpath.io/build-system-integration
 #
 # Every signing request on this project's policy requires manual approval
-# (release-signing policy, see installer/polyrec.iss's comment) -- this
+# (release-signing policy) -- this
 # script polls for up to 30 minutes to give a human time to approve it in
 # the SignPath dashboard while the workflow waits.
 function Submit-SignPathRequest {

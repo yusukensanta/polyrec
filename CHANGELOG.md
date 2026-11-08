@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- SECURITY.md said releases are code-signed; they aren't. Signing has failed on every release since mid-2026 (the free signing service's yearly quota is used up), and the few earlier signed releases used a certificate Windows doesn't trust. It now says so and points to the checksum and build provenance checks instead.
+- `SHA256SUMS.txt` now has Unix line endings, so `sha256sum -c SHA256SUMS.txt` works on Linux, macOS and Git Bash (PowerShell's `Get-FileHash` worked already).
+
 ## [v0.5.157] - 2026-11-07
 
 ### Fixed

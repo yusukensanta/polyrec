@@ -131,7 +131,10 @@ jobs:
       # "Unknown Publisher" warning) but shouldn't be able to block
       # shipping entirely -- a failure here now just leaves the exe
       # unsigned and the release continues. See the "Note unsigned
-      # artifacts" step below for how that's surfaced.
+      # artifacts" step below for how that's surfaced. The quota has been
+      # used up since mid-2026, so releases currently ship unsigned (see
+      # SECURITY.md); SHA256SUMS.txt and the provenance attestation below
+      # are what a download is verified by.
       - name: Sign polyrec.exe
         id: sign_exe
         shell: pwsh
@@ -216,10 +219,13 @@ jobs:
       - name: Generate checksums
         shell: pwsh
         run: |
-          Get-ChildItem polyrec-*.zip, polyrec-*-setup.exe | ForEach-Object {
+          $lines = Get-ChildItem polyrec-*.zip, polyrec-*-setup.exe | ForEach-Object {
             $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($_.Name)" | Out-File -FilePath SHA256SUMS.txt -Append -Encoding ASCII
+            "$hash  $($_.Name)"
           }
+          # LF line endings (Out-File would write CRLF), so the standard
+          # `sha256sum -c SHA256SUMS.txt` works on Linux/macOS/Git Bash too.
+          [IO.File]::WriteAllText("$PWD/SHA256SUMS.txt", ($lines -join "`n") + "`n")
           Get-Content SHA256SUMS.txt
 
       # Cryptographically ties this exact file to this exact repo/workflow/commit,

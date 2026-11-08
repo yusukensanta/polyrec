@@ -51,7 +51,7 @@ This policy covers PolyRec itself: the Rust application and its release/CI pipel
 **Out of scope:**
 - Vulnerabilities in the Rust toolchain, Windows itself, or third-party crates (report those to the respective upstream projects — `cargo audit` findings for crates PolyRec doesn't actually exercise on Windows are tracked, not necessarily fixed; see recent security-audit commits for the reasoning).
 - Issues that require the attacker to already have local code-execution or admin access on the machine running PolyRec.
-- SmartScreen/AV warnings on the executable — releases are Authenticode-signed via SignPath Foundation's free OSS code signing, but SmartScreen reputation still builds up gradually after signing starts, not instantly. Verify authenticity via the published `SHA256SUMS.txt` and build provenance attestation (see the README's "Verifying a download" section) in the meantime.
+- SmartScreen/AV warnings on the executable — releases are currently **not** Authenticode-signed by a certificate Windows trusts. The release workflow still asks SignPath to sign each build, but those requests fail (the free tier's yearly size quota is used up), and the few early releases that did carry a signature (v0.5.39 and before) used a self-signed certificate Windows doesn't trust. Windows therefore shows "Unknown Publisher". Verify a download with the published `SHA256SUMS.txt` and its build provenance attestation instead (see "Verifying a download" in the [User Guide](docs/USER_GUIDE.md#verifying-a-download-optional)).
 
 ## Security Advisories
 
