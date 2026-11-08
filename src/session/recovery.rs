@@ -65,16 +65,69 @@ fn remove_cut_off_finishes(polyrec_dir: &Path) {
         let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".tmp.mp4")) else {
             continue;
         };
-        if cut_off_recording(&name).is_some() || in_use(&entry.path()) {
+        if cut_off_recording(&name).is_some() {
             continue;
         }
         let reserved = polyrec_dir.join(format!("{stem}.mp4"));
-        if std::fs::metadata(&reserved).is_ok_and(|m| m.is_file() && m.len() == 0) {
-            tracing::info!("removing a finish cut off: {}", reserved.display());
-            let _ = std::fs::remove_file(entry.path());
-            let _ = std::fs::remove_file(&reserved);
+        if remove_cut_off_finish(&entry.path(), &reserved) {
+            tracing::info!("removed a finish cut off: {}", reserved.display());
         }
     }
+}
+
+/// Removes a finish's `partial` file and the file `reserved` that holds its
+/// name, if `reserved` is still empty: the finish was cut off. Both are held
+/// for this process alone from that check to their removal, so a finish
+/// still going on -- writing its partial, or renaming it over the reserved
+/// name -- is never removed: its files can't be opened, or it can't rename
+/// while they're held, and keeps its recording's fragmented file instead.
+fn remove_cut_off_finish(partial: &Path, reserved: &Path) -> bool {
+    let Some(partial) = open_alone(partial) else {
+        return false;
+    };
+    let Some(reserved) = open_alone(reserved) else {
+        return false;
+    };
+    let empty = reserved
+        .metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.len() == 0);
+    empty && remove_when_closed(&partial) && remove_when_closed(&reserved)
+}
+
+/// `path` opened for this process alone, to be removed: not if anything
+/// else has it open. A link is opened itself, not what it points to.
+fn open_alone(path: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ.0 | DELETE.0)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()
+}
+
+/// Marks `file` (opened by `open_alone`) to be removed once it's closed.
+fn remove_when_closed(file: &std::fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: `file`'s own handle, opened with DELETE access, and `info`
+    // the FILE_DISPOSITION_INFO the call is told it is, alive through it.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileDispositionInfo,
+            (&raw const info).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }
+    .is_ok()
 }
 
 /// Whether something has `path` open, so it can't be opened for this
@@ -247,6 +300,63 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert!(!reserved.exists() && !partial.exists(), "debris removed");
         assert!(kept.exists() && unrelated.exists(), "nothing else touched");
+    }
+
+    /// A finish going on beside recovery -- another copy of PolyRec about
+    /// to rename its finished file over the reserved name -- holds that
+    /// name: neither file of it is removed.
+    #[test]
+    fn a_finish_whose_name_is_held_is_left_alone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(60);
+        record_fragmented(
+            &dir.path()
+                .join(format!("game_recording_{}.tmp.mp4", millis(started))),
+        );
+        let reserved = dir.path().join("game_2026-11-05-01-00-00.mp4");
+        std::fs::write(&reserved, b"").unwrap();
+        let partial = dir.path().join("game_2026-11-05-01-00-00.tmp.mp4");
+        std::fs::write(&partial, b"a finished remux").unwrap();
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(&reserved)
+            .unwrap();
+
+        assert_eq!(
+            recover_cut_off_recordings(dir.path(), SystemTime::now()).len(),
+            1
+        );
+        assert!(reserved.exists() && partial.exists());
+    }
+
+    /// A partial that's a link is removed itself; what it points to stays.
+    /// Making a link takes Developer Mode or an elevated test run (CI's).
+    #[test]
+    fn a_finish_cut_off_through_a_link_removes_only_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(60);
+        record_fragmented(
+            &dir.path()
+                .join(format!("game_recording_{}.tmp.mp4", millis(started))),
+        );
+        let reserved = dir.path().join("game_2026-11-05-01-00-00.mp4");
+        std::fs::write(&reserved, b"").unwrap();
+        let target = elsewhere.path().join("kept.mp4");
+        std::fs::write(&target, b"someone's recording").unwrap();
+        let partial = dir.path().join("game_2026-11-05-01-00-00.tmp.mp4");
+        if let Err(e) = std::os::windows::fs::symlink_file(&target, &partial) {
+            eprintln!("skipped: can't make a link here ({e})");
+            return;
+        }
+
+        recover_cut_off_recordings(dir.path(), SystemTime::now());
+        assert!(!partial.exists() && !reserved.exists(), "debris removed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"someone's recording");
     }
 
     #[test]

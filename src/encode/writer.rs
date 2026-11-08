@@ -25,7 +25,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_ARGB32,
     MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoInterlace_Progressive,
 };
-use windows::Win32::System::Variant::{VARIANT, VT_UI4};
+use windows::Win32::System::Variant::{VARIANT, VT_UI4, VariantClear};
 use windows::core::HSTRING;
 use windows::core::implement;
 use windows::core::{GUID, Interface};
@@ -733,7 +733,14 @@ fn b_frames(api: &ICodecAPI) -> u32 {
     let Err(e) = asked else { return 0 };
     let count = unsafe { api.GetValue(&CODECAPI_AVEncMPVDefaultBPictureCount) }
         .ok()
-        .and_then(|value| variant_as_u32(&value))
+        .and_then(|mut value| {
+            let count = variant_as_u32(&value);
+            // SAFETY: `value` came from GetValue and is ours to clear (the
+            // Win32 VARIANT has no Drop); one that isn't a VT_UI4 may hold
+            // memory of its own.
+            let _ = unsafe { VariantClear(&mut value) };
+            count
+        })
         .unwrap_or(0);
     tracing::info!("video encoder kept its own B-frame count, {count} ({e})");
     count
