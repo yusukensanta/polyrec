@@ -1,6 +1,8 @@
 //! ISO base media file format boxes for a fragmented MP4 (ISO/IEC
-//! 14496-12): the init segment (`ftyp` + `moov`, with empty sample tables
-//! and `mvex`), then a `moof` + `mdat` per fragment.
+//! 14496-12): the init segment (`ftyp`, a placeholder, then `moov` with
+//! empty sample tables and `mvex`), then a `moof` + `mdat` per fragment;
+//! and the sample tables of the complete `moov` a finished file ends with
+//! (see `soft_remux`).
 
 use super::nal::VideoCodec;
 
@@ -51,7 +53,22 @@ pub struct TrackRun {
     pub data: Vec<u8>,
 }
 
-/// `ftyp` + `moov` for `tracks`.
+/// Written straight after `ftyp`: an empty `free` box exactly the size of
+/// a 64-bit `mdat` header (`mdat_header`), which finishing the file writes
+/// over it. Readers skip a `free` box.
+pub const PLACEHOLDER: [u8; 16] = [0, 0, 0, 16, b'f', b'r', b'e', b'e', 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// The header of an `mdat` box of `size` bytes, header included, in the
+/// 64-bit form (`size` 1, then a `largesize`), whatever `size` is.
+pub fn mdat_header(size: u64) -> [u8; 16] {
+    let mut header = [0; 16];
+    header[..4].copy_from_slice(&1u32.to_be_bytes());
+    header[4..8].copy_from_slice(b"mdat");
+    header[8..].copy_from_slice(&size.to_be_bytes());
+    header
+}
+
+/// `ftyp`, the placeholder, then `moov`, for `tracks`.
 pub fn init_segment(tracks: &[TrackInfo]) -> Vec<u8> {
     let mut out = boxed(b"ftyp", |o| {
         o.bytes(b"isom").u32(0x200);
@@ -59,6 +76,7 @@ pub fn init_segment(tracks: &[TrackInfo]) -> Vec<u8> {
             o.bytes(brand);
         }
     });
+    out.extend(PLACEHOLDER);
     out.extend(boxed(b"moov", |o| {
         o.bytes(&full_box(b"mvhd", 0, 0, |o| {
             o.u32(0).u32(0).u32(1000).u32(0); // times, timescale, duration
@@ -80,28 +98,48 @@ pub fn init_segment(tracks: &[TrackInfo]) -> Vec<u8> {
     out
 }
 
+/// A fragment's bytes, and where each run's data starts in them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fragment {
+    /// `moof` + `mdat`.
+    pub bytes: Vec<u8>,
+    /// Per run, its data's offset from the `moof`'s first byte (the
+    /// `trun`'s `data_offset`).
+    pub data_offsets: Vec<u32>,
+}
+
 /// `moof` + `mdat` for fragment number `sequence` (from 1).
-pub fn fragment(sequence: u32, runs: &[TrackRun]) -> Vec<u8> {
+pub fn fragment(sequence: u32, runs: &[TrackRun]) -> Fragment {
     // The data offsets don't change the moof's size: build it once to
     // learn that, then with the offsets.
-    let moof_size = moof(sequence, runs, 0).len() as u32;
-    let mut out = moof(sequence, runs, moof_size + 8);
-    out.extend(boxed(b"mdat", |o| {
+    let moof_size = moof(sequence, runs, &vec![0; runs.len()]).len() as u32;
+    let data_offsets: Vec<u32> = runs
+        .iter()
+        .scan(moof_size + 8, |at, run| {
+            let this = *at;
+            *at += run.data.len() as u32;
+            Some(this)
+        })
+        .collect();
+    let mut bytes = moof(sequence, runs, &data_offsets);
+    bytes.extend(boxed(b"mdat", |o| {
         for run in runs {
             o.bytes(&run.data);
         }
     }));
-    out
+    Fragment {
+        bytes,
+        data_offsets,
+    }
 }
 
-/// `moof` whose runs' data starts `data_start` bytes from its first byte.
-fn moof(sequence: u32, runs: &[TrackRun], data_start: u32) -> Vec<u8> {
+/// `moof` whose runs' data starts `data_offsets` bytes from its first byte.
+fn moof(sequence: u32, runs: &[TrackRun], data_offsets: &[u32]) -> Vec<u8> {
     boxed(b"moof", |o| {
         o.bytes(&full_box(b"mfhd", 0, 0, |o| {
             o.u32(sequence);
         }));
-        let mut data_offset = data_start;
-        for run in runs {
+        for (run, &data_offset) in runs.iter().zip(data_offsets) {
             o.bytes(&boxed(b"traf", |o| {
                 const DEFAULT_BASE_IS_MOOF: u32 = 0x02_0000;
                 o.bytes(&full_box(b"tfhd", 0, DEFAULT_BASE_IS_MOOF, |o| {
@@ -126,9 +164,111 @@ fn moof(sequence: u32, runs: &[TrackRun], data_start: u32) -> Vec<u8> {
                     }
                 }));
             }));
-            data_offset += run.data.len() as u32;
         }
     })
+}
+
+/// `stts`: the samples' durations, equal ones in a row as one entry.
+pub(super) fn stts(durations: &[u32]) -> Vec<u8> {
+    let runs = run_lengths(durations);
+    full_box(b"stts", 0, 0, |o| {
+        o.u32(runs.len() as u32);
+        for (count, duration) in runs {
+            o.u32(count).u32(duration);
+        }
+    })
+}
+
+/// `stsz`: every sample's size (none shared).
+pub(super) fn stsz(sizes: &[u32]) -> Vec<u8> {
+    full_box(b"stsz", 0, 0, |o| {
+        o.u32(0).u32(sizes.len() as u32);
+        for &size in sizes {
+            o.u32(size);
+        }
+    })
+}
+
+/// `stsc`, from each chunk's sample count: an entry where it changes.
+pub(super) fn stsc(samples_per_chunk: &[u32]) -> Vec<u8> {
+    let mut entries: Vec<(u32, u32)> = Vec::new();
+    for (index, &count) in samples_per_chunk.iter().enumerate() {
+        if entries.last().is_none_or(|&(_, last)| last != count) {
+            entries.push((index as u32 + 1, count));
+        }
+    }
+    full_box(b"stsc", 0, 0, |o| {
+        o.u32(entries.len() as u32);
+        for (first_chunk, count) in entries {
+            o.u32(first_chunk).u32(count).u32(1); // sample_description_index
+        }
+    })
+}
+
+/// `co64`: each chunk's offset from the file's first byte.
+pub(super) fn co64(offsets: &[u64]) -> Vec<u8> {
+    full_box(b"co64", 0, 0, |o| {
+        o.u32(offsets.len() as u32);
+        for &offset in offsets {
+            o.u64(offset);
+        }
+    })
+}
+
+/// `stss`: the sync samples' numbers, from 1.
+pub(super) fn stss(sync_samples: &[u32]) -> Vec<u8> {
+    full_box(b"stss", 0, 0, |o| {
+        o.u32(sync_samples.len() as u32);
+        for &sample in sync_samples {
+            o.u32(sample);
+        }
+    })
+}
+
+/// `ctts` putting each of `sample_count` samples `offset` ticks after its
+/// decode time: a track that starts after the others, as Media
+/// Foundation's MP4 sink writes one.
+pub(super) fn ctts(sample_count: u32, offset: u32) -> Vec<u8> {
+    full_box(b"ctts", 0, 0, |o| {
+        o.u32(1).u32(sample_count).u32(offset);
+    })
+}
+
+/// The whole version-0 `mvhd`, `tkhd` or `mdhd` box `header` with
+/// `duration`: still version 0 if that fits in 32 bits, else version 1,
+/// whose times and duration take 64. Everything else stays.
+pub(super) fn with_duration(header: &[u8], duration: u64) -> Vec<u8> {
+    debug_assert_eq!(header[8], 0, "a version-0 box");
+    // After size, type, version and flags: created and modified, then the
+    // timescale (`mvhd`, `mdhd`) or the track_ID and 4 reserved bytes
+    // (`tkhd`), then the duration.
+    let duration_at = if &header[4..8] == b"tkhd" { 28 } else { 24 };
+    if let Ok(short) = u32::try_from(duration) {
+        let mut out = header.to_vec();
+        out[duration_at..duration_at + 4].copy_from_slice(&short.to_be_bytes());
+        return out;
+    }
+    let be32 = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap());
+    let mut kind = [0; 4];
+    kind.copy_from_slice(&header[4..8]);
+    full_box(&kind, 1, be32(8) & 0x00ff_ffff, |o| {
+        o.u64(u64::from(be32(12))).u64(u64::from(be32(16)));
+        o.bytes(&header[20..duration_at]);
+        o.u64(duration);
+        o.bytes(&header[duration_at + 4..]);
+    })
+}
+
+/// `values` as (how many in a row, value) pairs.
+fn run_lengths(values: &[u32]) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &value in values {
+        match runs.last_mut() {
+            Some((count, last)) if *last == value => *count += 1,
+            _ => runs.push((1, value)),
+        }
+    }
+    runs
 }
 
 fn trak(track: &TrackInfo) -> Vec<u8> {
@@ -260,29 +400,30 @@ fn matrix(o: &mut Out) {
 }
 
 /// Big-endian box contents.
-struct Out(Vec<u8>);
+pub(super) struct Out(Vec<u8>);
 
 impl Out {
-    fn bytes(&mut self, b: &[u8]) -> &mut Self {
+    pub(super) fn bytes(&mut self, b: &[u8]) -> &mut Self {
         self.0.extend_from_slice(b);
         self
     }
-    fn zeros(&mut self, n: usize) -> &mut Self {
+    pub(super) fn zeros(&mut self, n: usize) -> &mut Self {
         self.0.resize(self.0.len() + n, 0);
         self
     }
-    fn u16(&mut self, v: u16) -> &mut Self {
+    pub(super) fn u16(&mut self, v: u16) -> &mut Self {
         self.bytes(&v.to_be_bytes())
     }
-    fn u32(&mut self, v: u32) -> &mut Self {
+    pub(super) fn u32(&mut self, v: u32) -> &mut Self {
         self.bytes(&v.to_be_bytes())
     }
-    fn u64(&mut self, v: u64) -> &mut Self {
+    pub(super) fn u64(&mut self, v: u64) -> &mut Self {
         self.bytes(&v.to_be_bytes())
     }
 }
 
-fn boxed(kind: &[u8; 4], body: impl FnOnce(&mut Out)) -> Vec<u8> {
+/// A box of type `kind` whose body `body` writes; its size is filled in.
+pub(super) fn boxed(kind: &[u8; 4], body: impl FnOnce(&mut Out)) -> Vec<u8> {
     let mut out = Out(vec![0; 4]);
     out.bytes(kind);
     body(&mut out);
@@ -291,7 +432,13 @@ fn boxed(kind: &[u8; 4], body: impl FnOnce(&mut Out)) -> Vec<u8> {
     out.0
 }
 
-fn full_box(kind: &[u8; 4], version: u8, flags: u32, body: impl FnOnce(&mut Out)) -> Vec<u8> {
+/// A full box: `boxed`, its body after `version` and `flags`.
+pub(super) fn full_box(
+    kind: &[u8; 4],
+    version: u8,
+    flags: u32,
+    body: impl FnOnce(&mut Out),
+) -> Vec<u8> {
     boxed(kind, |o| {
         o.u32((u32::from(version) << 24) | flags);
         body(o);
@@ -320,14 +467,20 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         let mut at = 0;
         while at + 8 <= data.len() {
-            let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            let mut size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+            let mut header = 8;
+            if size == 1 {
+                // A 64-bit `largesize` follows the type.
+                size = u64::from_be_bytes(data[at + 8..at + 16].try_into().unwrap()) as usize;
+                header = 16;
+            }
             assert!(
-                size >= 8 && at + size <= data.len(),
+                size >= header && at + size <= data.len(),
                 "bad box size {size} at {at}"
             );
             out.push(Mp4Box {
                 kind: String::from_utf8_lossy(&data[at + 4..at + 8]).into_owned(),
-                body: &data[at + 8..at + size],
+                body: &data[at + header..at + size],
                 at: base + at,
             });
             at += size;
@@ -352,8 +505,39 @@ pub(crate) mod tests {
         boxes.iter().map(|b| b.kind.clone()).collect()
     }
 
-    fn be32(b: &[u8], at: usize) -> u32 {
+    pub fn be32(b: &[u8], at: usize) -> u32 {
         u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
+    }
+
+    pub fn be64(b: &[u8], at: usize) -> u64 {
+        u64::from_be_bytes(b[at..at + 8].try_into().unwrap())
+    }
+
+    /// The whole box `b` was read from `data` (header included).
+    pub fn whole<'a>(data: &'a [u8], b: &Mp4Box) -> &'a [u8] {
+        let size = be32(data, b.at) as usize;
+        let size = if size == 1 {
+            be64(data, b.at + 8) as usize
+        } else {
+            size
+        };
+        &data[b.at..b.at + size]
+    }
+
+    /// The entries of the whole table box `table` (a version-0 full box with
+    /// an entry count): `width` u32s each.
+    pub fn entries(table: &[u8], width: usize) -> Vec<Vec<u32>> {
+        assert_eq!(table[8], 0, "version 0");
+        let body = &table[12..];
+        let count = be32(body, 0) as usize;
+        assert_eq!(body.len(), 4 + count * width * 4, "entry count vs size");
+        (0..count)
+            .map(|i| {
+                (0..width)
+                    .map(|j| be32(body, 4 + (i * width + j) * 4))
+                    .collect()
+            })
+            .collect()
     }
 
     fn tracks() -> Vec<TrackInfo> {
@@ -384,8 +568,8 @@ pub(crate) mod tests {
     fn the_init_segment_describes_every_track_and_says_fragments_follow() {
         let init = init_segment(&tracks());
         let top = boxes(&init);
-        assert_eq!(kinds(&top), ["ftyp", "moov"]);
-        let moov = children(&top[1], 0);
+        assert_eq!(kinds(&top), ["ftyp", "free", "moov"]);
+        let moov = children(&top[2], 0);
         assert_eq!(kinds(&moov), ["mvhd", "trak", "trak", "mvex"]);
         let mvex = children(find(&moov, "mvex"), 0);
         assert_eq!(kinds(&mvex), ["trex", "trex"]);
@@ -464,13 +648,15 @@ pub(crate) mod tests {
                 data: vec![0xc1, 0xc2, 0xc3, 0xc4],
             },
         ];
-        let bytes = fragment(7, &runs);
+        let made = fragment(7, &runs);
+        let bytes = made.bytes;
         let top = boxes(&bytes);
         assert_eq!(kinds(&top), ["moof", "mdat"]);
         let moof = children(&top[0], 0);
         assert_eq!(kinds(&moof), ["mfhd", "traf", "traf"]);
         assert_eq!(be32(moof[0].body, 4), 7, "sequence_number");
-        for (traf, run) in moof[1..].iter().zip(&runs) {
+        assert_eq!(made.data_offsets.len(), runs.len());
+        for ((traf, run), told) in moof[1..].iter().zip(&runs).zip(&made.data_offsets) {
             let parts = children(traf, 0);
             assert_eq!(kinds(&parts), ["tfhd", "tfdt", "trun"]);
             assert_eq!(be32(parts[0].body, 4), run.track_id);
@@ -484,6 +670,10 @@ pub(crate) mod tests {
             assert_eq!(be32(trun, 4) as usize, run.samples.len());
             // Data offsets count from the moof's first byte.
             let offset = be32(trun, 8) as usize;
+            assert_eq!(
+                *told as usize, offset,
+                "the offset it reports is the trun's"
+            );
             let data_at = top[0].at + offset;
             assert_eq!(
                 &bytes[data_at..data_at + run.data.len()],
@@ -499,5 +689,129 @@ pub(crate) mod tests {
         let trun = children(&moof[1], 0)[2].body;
         let second_flags = be32(trun, 12 + 12 + 8);
         assert_ne!(second_flags & 0x0001_0000, 0, "a non-sync sample says so");
+    }
+
+    /// Room for the 64-bit `mdat` header a finished file starts with, so
+    /// finishing it never moves anything.
+    #[test]
+    fn the_init_segment_keeps_room_for_a_64_bit_mdat_header() {
+        let init = init_segment(&tracks());
+        let top = boxes(&init);
+        assert_eq!(kinds(&top), ["ftyp", "free", "moov"]);
+        let at = top[1].at;
+        assert_eq!(init[at..at + 16], PLACEHOLDER);
+    }
+
+    #[test]
+    fn an_mdat_header_fits_the_placeholder_exactly() {
+        assert_eq!(
+            mdat_header(0x1_0000_0010),
+            [
+                0, 0, 0, 1, b'm', b'd', b'a', b't', 0, 0, 0, 1, 0, 0, 0, 0x10
+            ]
+        );
+        assert_eq!(mdat_header(0).len(), PLACEHOLDER.len());
+        let mut file = mdat_header(24).to_vec();
+        file.extend([7; 8]);
+        let top = boxes(&file);
+        assert_eq!(kinds(&top), ["mdat"]);
+        assert_eq!(top[0].body, [7; 8]);
+    }
+
+    #[test]
+    fn stts_runs_equal_durations_together() {
+        let table = stts(&[1000, 1000, 1000, 1024, 1000]);
+        assert_eq!(&table[4..8], b"stts");
+        assert_eq!(
+            entries(&table, 2),
+            [vec![3, 1000], vec![1, 1024], vec![1, 1000]]
+        );
+        assert!(entries(&stts(&[]), 2).is_empty());
+    }
+
+    #[test]
+    fn stsc_lists_only_chunks_whose_sample_count_changes() {
+        let table = stsc(&[20, 20, 18, 18, 5]);
+        assert_eq!(&table[4..8], b"stsc");
+        assert_eq!(
+            entries(&table, 3),
+            [vec![1, 20, 1], vec![3, 18, 1], vec![5, 5, 1]]
+        );
+        assert!(entries(&stsc(&[]), 3).is_empty());
+    }
+
+    #[test]
+    fn co64_holds_offsets_past_4_gib() {
+        let table = co64(&[8, 5 << 30]);
+        assert_eq!(&table[4..8], b"co64");
+        assert_eq!(table[8], 0, "version 0");
+        assert_eq!(be32(&table, 12), 2);
+        assert_eq!(be64(&table, 16), 8);
+        assert_eq!(be64(&table, 24), 5 << 30);
+        assert_eq!(table.len(), 32);
+    }
+
+    #[test]
+    fn stsz_stss_and_ctts_hold_what_theyre_given() {
+        let sizes = stsz(&[10, 20, 30]);
+        assert_eq!(&sizes[4..8], b"stsz");
+        assert_eq!(be32(&sizes, 12), 0, "sample_size: they differ");
+        assert_eq!(be32(&sizes, 16), 3, "sample_count");
+        assert_eq!(
+            [be32(&sizes, 20), be32(&sizes, 24), be32(&sizes, 28)],
+            [10, 20, 30]
+        );
+        assert_eq!(sizes.len(), 32);
+
+        let sync = stss(&[1, 4]);
+        assert_eq!(&sync[4..8], b"stss");
+        assert_eq!(entries(&sync, 1), [vec![1], vec![4]]);
+
+        let offset = ctts(3, 1182);
+        assert_eq!(&offset[4..8], b"ctts");
+        assert_eq!(entries(&offset, 2), [vec![3, 1182]]);
+    }
+
+    /// `mvhd`, `tkhd` and `mdhd` hold their duration in 32 bits in version
+    /// 0: about 13 h at the video's 90 kHz. Longer takes version 1.
+    #[test]
+    fn a_duration_past_32_bits_makes_version_1_headers() {
+        let init = init_segment(&tracks());
+        let top = boxes(&init);
+        let moov = children(&top[2], 0);
+        let trak = children(find(&moov, "trak"), 0);
+        let mdia = children(find(&trak, "mdia"), 0);
+        for header in [
+            find(&moov, "mvhd"),
+            find(&trak, "tkhd"),
+            find(&mdia, "mdhd"),
+        ] {
+            let old = whole(&init, header);
+            let what = &header.kind;
+            // After version and flags: created, modified, then the
+            // timescale (the track_ID and 4 reserved bytes in a tkhd),
+            // then the duration.
+            let duration_at = if what == "tkhd" { 28 } else { 24 };
+
+            let short = with_duration(old, 100);
+            assert_eq!(short.len(), old.len(), "{what}");
+            assert_eq!(short[8], 0, "{what}: version 0");
+            assert_eq!(be32(&short, duration_at), 100, "{what}");
+            assert_eq!(short[..duration_at], old[..duration_at], "{what}");
+            assert_eq!(short[duration_at + 4..], old[duration_at + 4..], "{what}");
+
+            let long = with_duration(old, 1 << 33);
+            assert_eq!(long.len(), old.len() + 12, "{what}");
+            assert_eq!(be32(&long, 0) as usize, long.len(), "{what}: its size");
+            assert_eq!(long[4..8], old[4..8], "{what}");
+            assert_eq!(long[8], 1, "{what}: version 1");
+            assert_eq!(long[9..12], old[9..12], "{what}: flags");
+            assert_eq!(be64(&long, 12), u64::from(be32(old, 12)), "{what}");
+            assert_eq!(be64(&long, 20), u64::from(be32(old, 16)), "{what}");
+            assert_eq!(long[28..32], old[20..24], "{what}: timescale / track_ID");
+            assert_eq!(long[32..duration_at + 8], old[24..duration_at], "{what}");
+            assert_eq!(be64(&long, duration_at + 8), 1 << 33, "{what}");
+            assert_eq!(long[duration_at + 16..], old[duration_at + 4..], "{what}");
+        }
     }
 }

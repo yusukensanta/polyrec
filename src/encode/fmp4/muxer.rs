@@ -110,7 +110,7 @@ impl<W: Write> Muxer<W> {
             return Ok(());
         }
         self.sequence += 1;
-        self.out.write_all(&fragment(self.sequence, &runs))?;
+        self.out.write_all(&fragment(self.sequence, &runs).bytes)?;
         self.out.flush()
     }
 }
@@ -240,7 +240,7 @@ mod tests {
         let file = muxer.finish().unwrap();
         assert_eq!(
             kinds(&boxes(&file)),
-            ["ftyp", "moov", "moof", "mdat", "moof", "mdat"]
+            ["ftyp", "free", "moov", "moof", "mdat", "moof", "mdat"]
         );
         let runs = runs(&file);
         // Video at 90 kHz: three frames up to the keyframe at 300 ms.
@@ -288,7 +288,10 @@ mod tests {
         }
         let cut_off = std::mem::take(&mut muxer.out);
         drop(muxer);
-        assert_eq!(kinds(&boxes(&cut_off)), ["ftyp", "moov", "moof", "mdat"]);
+        assert_eq!(
+            kinds(&boxes(&cut_off)),
+            ["ftyp", "free", "moov", "moof", "mdat"]
+        );
         assert_eq!(runs(&cut_off)[0][0].2.len(), 2);
     }
 
