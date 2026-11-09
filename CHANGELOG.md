@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.162] - 2026-11-09
+
 ### Changed
 
 - Saving a recording at Stop no longer copies it. A 3-hour recording used to take minutes to save (6 minutes for the longest one here); it now saves in about a second, however long it is. Saving needs no free space beyond the recording itself, and quitting PolyRec (or Windows shutting down) right after Stop no longer cuts a long save short. The saved file plays as before, with its tracks in the same order. A recording cut off by a crash or a power cut is finished the same way the next time PolyRec starts.
