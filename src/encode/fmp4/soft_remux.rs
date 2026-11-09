@@ -716,7 +716,7 @@ pub(crate) mod tests {
     }
 
     /// The whole boxes of `stbl` of the `n`th `trak` of `moov`, by kind.
-    fn stbl(moov: &[u8], n: usize) -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn stbl(moov: &[u8], n: usize) -> Vec<(String, Vec<u8>)> {
         let top = boxes(moov);
         let traks: Vec<_> = children(&top[0], 0)
             .into_iter()
@@ -731,7 +731,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn table<'a>(stbl: &'a [(String, Vec<u8>)], kind: &str) -> &'a [u8] {
+    pub(crate) fn table<'a>(stbl: &'a [(String, Vec<u8>)], kind: &str) -> &'a [u8] {
         &stbl
             .iter()
             .find(|(k, _)| k == kind)
@@ -741,7 +741,7 @@ pub(crate) mod tests {
 
     /// The whole header box `kind` (`mvhd`, or the `n`th track's `tkhd` or
     /// `mdhd`) of `moov`.
-    fn header(moov: &[u8], kind: &str, n: usize) -> Vec<u8> {
+    pub(crate) fn header(moov: &[u8], kind: &str, n: usize) -> Vec<u8> {
         let top = boxes(moov);
         let parts = children(&top[0], 0);
         if kind == "mvhd" {

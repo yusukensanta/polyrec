@@ -590,6 +590,56 @@ pub(crate) mod tests {
         }
     }
 
+    /// Every frame of a recording lasts exactly as long as the next, at any
+    /// fps: its video counts time in thousandths of a frame, as Media
+    /// Foundation's remux did. It counted in 90 kHz ticks, which 30, 60,
+    /// 120, 144 and 240 fps divide but a display's own rate (recorded when
+    /// it refreshes slower than asked) may not: at 59 fps -- a 59.94 Hz
+    /// display asked for more -- frames took turns lasting 1525 and 1526
+    /// ticks, and editors took the video for a variable-rate one.
+    #[test]
+    fn every_frame_lasts_the_same_whatever_the_fps() {
+        const FPS: u32 = 59;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rec.mp4");
+        let writer = RecordingWriter::new(
+            &path,
+            &EncoderParams {
+                fps: FPS,
+                ..params_with(&[])
+            },
+        )
+        .expect("writer");
+        writer.begin_writing().unwrap();
+        let frames = 2 * u64::from(FPS);
+        for frame in 0..frames {
+            writer
+                .write_video(VideoFrame {
+                    pts: Duration::from_secs(frame) / FPS,
+                    data: vec![(frame % 255) as u8; 64 * 64 * 4].into(),
+                })
+                .expect("write_video");
+        }
+        writer.finalize().expect("finalize");
+
+        let data = std::fs::read(&path).unwrap();
+        let moov = super::soft_remux::tests::moov_in(&data);
+        let mdhd = super::soft_remux::tests::header(moov, "mdhd", 0);
+        assert_eq!(mdhd[8], 0, "a version-0 mdhd");
+        assert_eq!(
+            super::boxes::tests::be32(&mdhd, 20),
+            1000 * FPS,
+            "thousandths of a frame"
+        );
+        let video = super::soft_remux::tests::stbl(moov, 0);
+        let stts = super::soft_remux::tests::table(&video, "stts");
+        assert_eq!(
+            super::boxes::tests::entries(stts, 2),
+            [vec![frames as u32, 1000]],
+            "every frame as long"
+        );
+    }
+
     /// Against what Stop made before: Media Foundation's own remux. Its MP4
     /// sink rescales video to a timescale of its own (from the frame
     /// rate), so times may round differently -- by well under 1 ms. (And
