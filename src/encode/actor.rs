@@ -207,18 +207,18 @@ pub fn spawn_recording_actor(
                 let _ = std::fs::remove_file(&temp_path);
             }
         })?;
-        let final_path =
-            reserve_finished_recording_path(&naming, &app_name, &output_dir).encode_ctx(
-                format_args!("no name to save {} as", finished_temp_path.display()),
-            )?;
-        // Replaces the empty file that reserved the name. On failure the
-        // recording stays where it is, under its temporary name.
-        crate::encode::fmp4::finish(&finished_temp_path, &final_path, audio_tracks).inspect_err(
-            |_| {
-                let _ = std::fs::remove_file(&final_path);
+        // Finished in place by now (see `fmp4::sink`): moved to a name
+        // reserved only now. On failure the recording stays where it is,
+        // under its temporary name.
+        crate::encode::fmp4::finish(
+            &finished_temp_path,
+            || {
+                reserve_finished_recording_path(&naming, &app_name, &output_dir).encode_ctx(
+                    format_args!("no name to save {} as", finished_temp_path.display()),
+                )
             },
-        )?;
-        Ok(final_path)
+            || Ok(audio_tracks),
+        )
     });
 
     (tx, handle)

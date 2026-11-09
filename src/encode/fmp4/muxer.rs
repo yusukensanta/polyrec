@@ -1,9 +1,12 @@
 //! Interleaves the tracks' samples into fragments and writes them: the
 //! init segment first, then a fragment each time the video reaches a
 //! keyframe -- each written whole and flushed, so the file up to the last
-//! one reads back whatever happens to the process after.
+//! one reads back whatever happens to the process after. It keeps the
+//! index of every sample it writes, which finishing the file in place
+//! needs (see `soft_remux`).
 
 use super::boxes::{RunSample, TrackInfo, TrackKind, TrackRun, fragment, init_segment};
+use super::soft_remux::Index;
 use std::io::{self, Write};
 
 /// A fragment no longer than this, keyframe or not: an encoder that keeps
@@ -21,8 +24,26 @@ pub struct Sample {
     pub data: Vec<u8>,
 }
 
+/// What a finished muxer leaves: its output, the init segment it began
+/// with, and the index of every sample in it.
+pub struct Muxed<W> {
+    pub out: W,
+    /// The init segment, as written at the start of `out`.
+    pub head: Vec<u8>,
+    pub index: Index,
+}
+
 pub struct Muxer<W: Write> {
     out: W,
+    /// The init segment written.
+    head: Vec<u8>,
+    /// How many bytes have gone to `out`: where the next fragment starts.
+    written: u64,
+    index: Index,
+    /// A write failed: part of a fragment may be in `out` all the same, so
+    /// `written` and `index` no longer describe it, and nothing more is
+    /// written.
+    failed: bool,
     tracks: Vec<TrackInfo>,
     /// The video track's index in `tracks`.
     video: Option<usize>,
@@ -39,13 +60,21 @@ pub struct Muxer<W: Write> {
 impl<W: Write> Muxer<W> {
     /// Writes the init segment for `tracks` to `out`.
     pub fn new(mut out: W, tracks: Vec<TrackInfo>) -> io::Result<Self> {
-        out.write_all(&init_segment(&tracks))?;
+        let head = init_segment(&tracks);
+        out.write_all(&head)?;
         out.flush()?;
         let video = tracks
             .iter()
             .position(|t| matches!(t.kind, TrackKind::Video { .. }));
+        let ids: Vec<u32> = tracks.iter().map(|t| t.id).collect();
+        let mut index = Index::new(&ids);
+        index.set_end(head.len() as u64);
         Ok(Self {
             out,
+            written: head.len() as u64,
+            head,
+            index,
+            failed: false,
             pending: vec![Vec::new(); tracks.len()],
             tracks,
             video,
@@ -59,6 +88,7 @@ impl<W: Write> Muxer<W> {
     /// given to `new`), writing the fragment before it first if it starts
     /// the next.
     pub fn push(&mut self, track: usize, sample: Sample) -> io::Result<()> {
+        self.writable()?;
         if Some(track) == self.video {
             if !self.reordered && self.last_video_time.is_some_and(|last| sample.time < last) {
                 self.reordered = true;
@@ -78,15 +108,28 @@ impl<W: Write> Muxer<W> {
         Ok(())
     }
 
+    /// Whether writing can go on: not once a write has failed.
+    fn writable(&self) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other("an earlier write to the file failed"));
+        }
+        Ok(())
+    }
+
     /// Writes what's left as a last fragment.
-    pub fn finish(mut self) -> io::Result<W> {
+    pub fn finish(mut self) -> io::Result<Muxed<W>> {
         self.write_fragment(None)?;
-        Ok(self.out)
+        Ok(Muxed {
+            out: self.out,
+            head: self.head,
+            index: self.index,
+        })
     }
 
     /// Writes the samples before `until` (a time; all of them without one)
     /// as the next fragment, if there are any.
     fn write_fragment(&mut self, until: Option<i64>) -> io::Result<()> {
+        self.writable()?;
         let mut runs = Vec::new();
         for (index, track) in self.tracks.iter().enumerate() {
             let pending = &mut self.pending[index];
@@ -110,8 +153,29 @@ impl<W: Write> Muxer<W> {
             return Ok(());
         }
         self.sequence += 1;
-        self.out.write_all(&fragment(self.sequence, &runs))?;
-        self.out.flush()
+        let made = fragment(self.sequence, &runs);
+        if let Err(e) = self
+            .out
+            .write_all(&made.bytes)
+            .and_then(|()| self.out.flush())
+        {
+            self.failed = true;
+            return Err(e);
+        }
+        // Indexed only once written whole: the index never holds a
+        // fragment the file doesn't.
+        let moof_at = self.written;
+        for (run, offset) in runs.iter().zip(&made.data_offsets) {
+            self.index.add_run(
+                run.track_id,
+                moof_at + u64::from(*offset),
+                run.base_decode_time,
+                &run.samples,
+            );
+        }
+        self.written += made.bytes.len() as u64;
+        self.index.set_end(self.written);
+        Ok(())
     }
 }
 
@@ -149,6 +213,8 @@ fn run(track: &TrackInfo, samples: &[Sample], next: Option<i64>) -> TrackRun {
 mod tests {
     use super::super::boxes::tests::{boxes, children, kinds};
     use super::super::nal::VideoCodec;
+    use super::super::soft_remux::complete_moov;
+    use super::super::soft_remux::tests::{moov_in, sample_bytes};
     use super::*;
 
     const MS: i64 = 10_000;
@@ -237,10 +303,10 @@ mod tests {
             muxer.push(1, audio(ms)).unwrap();
             muxer.push(1, audio(ms + 50)).unwrap();
         }
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         assert_eq!(
             kinds(&boxes(&file)),
-            ["ftyp", "moov", "moof", "mdat", "moof", "mdat"]
+            ["ftyp", "free", "moov", "moof", "mdat", "moof", "mdat"]
         );
         let runs = runs(&file);
         // Video at 90 kHz: three frames up to the keyframe at 300 ms.
@@ -259,7 +325,7 @@ mod tests {
         muxer.push(0, frame(0, true)).unwrap();
         muxer.push(0, frame(40, false)).unwrap();
         muxer.push(0, frame(70, true)).unwrap();
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         let runs = runs(&file);
         assert_eq!(runs[0][0], (1, 0, vec![3600, 2700]));
         // The last of all lasts its own duration.
@@ -272,7 +338,7 @@ mod tests {
         for ms in (0..3000).step_by(100) {
             muxer.push(0, frame(ms, ms == 0)).unwrap();
         }
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         let runs = runs(&file);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0][0].2.len(), 20, "2 s of frames");
@@ -288,7 +354,10 @@ mod tests {
         }
         let cut_off = std::mem::take(&mut muxer.out);
         drop(muxer);
-        assert_eq!(kinds(&boxes(&cut_off)), ["ftyp", "moov", "moof", "mdat"]);
+        assert_eq!(
+            kinds(&boxes(&cut_off)),
+            ["ftyp", "free", "moov", "moof", "mdat"]
+        );
         assert_eq!(runs(&cut_off)[0][0].2.len(), 2);
     }
 
@@ -298,11 +367,124 @@ mod tests {
         muxer.push(0, frame(0, true)).unwrap();
         muxer.push(0, frame(100, true)).unwrap();
         muxer.push(1, audio(100)).unwrap();
-        let file = muxer.finish().unwrap();
+        let file = muxer.finish().unwrap().out;
         let ids: Vec<Vec<u32>> = runs(&file)
             .iter()
             .map(|f| f.iter().map(|r| r.0).collect())
             .collect();
         assert_eq!(ids, [vec![1], vec![1, 2]]);
+    }
+
+    /// Every sample with bytes of its own, so a table pointing at the
+    /// wrong ones shows: the index finds each, across fragments.
+    #[test]
+    fn the_index_points_at_every_samples_bytes() {
+        let mut muxer = Muxer::new(Vec::new(), tracks()).unwrap();
+        let mut pushed = vec![Vec::new(), Vec::new()];
+        let mut n = 0u8;
+        for (ms, key) in [
+            (0, true),
+            (100, false),
+            (200, true),
+            (300, false),
+            (400, true),
+            (500, false),
+        ] {
+            n += 1;
+            let video = Sample {
+                time: ms * MS,
+                duration: 100 * MS,
+                keyframe: key,
+                data: vec![n; 3 + usize::from(n)],
+            };
+            pushed[0].push(video.data.clone());
+            muxer.push(0, video).unwrap();
+            for half in [0, 50] {
+                n += 1;
+                let sound = Sample {
+                    time: (ms + half) * MS,
+                    duration: 50 * MS,
+                    keyframe: true,
+                    data: vec![n; 2 + usize::from(n % 3)],
+                };
+                pushed[1].push(sound.data.clone());
+                muxer.push(1, sound).unwrap();
+            }
+        }
+        let muxed = muxer.finish().unwrap();
+        assert_eq!(runs(&muxed.out).len(), 3, "three fragments");
+        let moov = complete_moov(moov_in(&muxed.head), &muxed.index).unwrap();
+        assert_eq!(sample_bytes(&muxed.out, &moov), pushed);
+    }
+
+    #[test]
+    fn the_head_is_the_init_segment_and_the_end_is_everything_written() {
+        let mut muxer = Muxer::new(Vec::new(), tracks()).unwrap();
+        muxer.push(0, frame(0, true)).unwrap();
+        muxer.push(0, frame(100, true)).unwrap();
+        let muxed = muxer.finish().unwrap();
+        assert_eq!(muxed.head, init_segment(&tracks()));
+        assert!(muxed.out.starts_with(&muxed.head));
+        assert_eq!(muxed.index.end(), muxed.out.len() as u64);
+        assert_eq!(muxed.index.sample_count(), 2);
+    }
+
+    /// Takes everything, except that the first write to reach `at` bytes
+    /// stops there, and the write after it fails: a write cut short, as on
+    /// a drive that filled up and then had room again.
+    struct CutShort {
+        out: Vec<u8>,
+        at: usize,
+        state: u8,
+    }
+
+    impl Write for CutShort {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self.state {
+                0 if self.out.len() + buf.len() > self.at => {
+                    let fits = self.at - self.out.len();
+                    self.out.extend_from_slice(&buf[..fits]);
+                    self.state = 1;
+                    Ok(fits)
+                }
+                1 => {
+                    self.state = 2;
+                    Err(io::Error::other("full"))
+                }
+                _ => {
+                    self.out.extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Part of a fragment may be in the file after a write that failed, so
+    /// what the muxer knows of the file no longer holds: it writes nothing
+    /// more and doesn't finish, rather than finish a file its index doesn't
+    /// describe.
+    #[test]
+    fn after_a_write_fails_nothing_more_is_written_or_finished() {
+        let head = init_segment(&tracks()).len();
+        let out = CutShort {
+            out: Vec::new(),
+            at: head + 5,
+            state: 0,
+        };
+        let mut muxer = Muxer::new(out, tracks()).unwrap();
+        muxer.push(0, frame(0, true)).unwrap();
+        assert!(
+            muxer.push(0, frame(100, true)).is_err(),
+            "the fragment's write failed"
+        );
+        assert!(
+            muxer.push(0, frame(200, true)).is_err(),
+            "and nothing after it"
+        );
+        assert!(muxer.finish().is_err());
     }
 }

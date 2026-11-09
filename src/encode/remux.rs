@@ -1703,7 +1703,7 @@ mod tests {
     }
 
     /// What's recorded is what's heard: a tone on one track of a recording
-    /// -- written crash-safe, then remuxed into a plain MP4 as at Stop --
+    /// -- written crash-safe, then finished into a plain MP4 at Stop --
     /// decodes back at its loudness, and the quiet track beside it stays
     /// quiet. Checks everything after capture without playing a sound (the
     /// diagnostics this replaces played one out loud).
@@ -1755,11 +1755,9 @@ mod tests {
             }
         }
         writer.finalize().expect("finalize");
-        let plain = dir.path().join("tone.mp4");
-        remux(&fragmented, &plain, &[0, 1]).expect("remux");
 
         let _mf = MfSession::start_mta().unwrap();
-        let url = HSTRING::from(plain.as_path());
+        let url = HSTRING::from(fragmented.as_path());
         let reader: IMFSourceReader = unsafe { MFCreateSourceReaderFromURL(&url, None).unwrap() };
         let layout = unsafe { discover_stream_layout(&reader).unwrap() };
         let peaks: Vec<u16> = (0..2)

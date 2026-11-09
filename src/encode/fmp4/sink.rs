@@ -4,7 +4,8 @@
 //! Sinks" in the Media Foundation docs): each stream asks for a sample
 //! (`MEStreamSinkRequestSample`) and gets it in `ProcessSample`; markers
 //! are answered once everything before them is in; finalizing writes the
-//! last fragment.
+//! last fragment, then finishes the file in place (`soft_remux`): a plain
+//! MP4 from then on, without copying it.
 //!
 //! Nothing is written until the first sample comes: the video stream's
 //! configuration (its parameter sets) goes in the file's header, and the
@@ -14,10 +15,11 @@
 use super::boxes::{TrackInfo, TrackKind};
 use super::muxer::{Muxer, Sample};
 use super::nal::{self, VideoCodec};
+use super::soft_remux;
 use crate::error::{AppError, ResultExt};
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use windows::Win32::Foundation::{E_FAIL, S_OK};
 use windows::Win32::Media::MediaFoundation::*;
@@ -45,6 +47,7 @@ pub fn create(path: &Path) -> std::result::Result<IMFMediaSink, AppError> {
         streams: Mutex::new(Vec::new()),
         clock: Mutex::new(None),
         shared: Arc::new(Mutex::new(Shared {
+            path: path.to_path_buf(),
             kinds: Vec::new(),
             file: Some(file),
             held: Vec::new(),
@@ -58,6 +61,8 @@ pub fn create(path: &Path) -> std::result::Result<IMFMediaSink, AppError> {
 
 /// What every stream of the sink shares.
 struct Shared {
+    /// The file's path, for the log.
+    path: PathBuf,
     /// What each stream holds, from its media type, in the order they
     /// were added. (The media types themselves stay with the streams.)
     kinds: Vec<Option<Kind>>,
@@ -175,11 +180,19 @@ impl Shared {
         Ok(true)
     }
 
-    /// Writes what's left, and closes the file.
+    /// Writes what's left, finishes the file in place, and closes it. A
+    /// file that can't be finished stays fragmented, which reads as it is:
+    /// the recording still finishes.
     fn finish(&mut self) -> Result<()> {
         let writing = self.writing.take().ok_or(MF_E_SINK_NO_SAMPLES_PROCESSED)?;
-        let out = writing.muxer.finish().map_err(failed)?;
-        out.into_inner().map_err(|e| failed(e.error()))?;
+        let muxed = writing.muxer.finish().map_err(failed)?;
+        let mut file = muxed.out.into_inner().map_err(|e| failed(e.error()))?;
+        if let Err(e) = soft_remux::complete(&mut file, &muxed.head, &muxed.index) {
+            tracing::warn!(
+                "couldn't finish {} in place ({e}); it's kept fragmented",
+                self.path.display()
+            );
+        }
         Ok(())
     }
 }
