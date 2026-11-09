@@ -243,8 +243,8 @@ fn complete_trak(
     let stbl = boxed(b"stbl", |o| {
         o.bytes(stsd).bytes(&stts(&table.durations));
         if first > 0 && !table.durations.is_empty() {
-            // A start 2^32 ticks late (over 13 h) doesn't fit; it can't
-            // happen in a recording.
+            // A start 2^32 ticks late (about 5 h at 240 fps, 20 h at 60)
+            // doesn't fit; it can't happen in a recording.
             let offset = u32::try_from(first).unwrap_or(u32::MAX);
             o.bytes(&ctts(table.durations.len() as u32, offset));
         }
@@ -716,7 +716,7 @@ pub(crate) mod tests {
     }
 
     /// The whole boxes of `stbl` of the `n`th `trak` of `moov`, by kind.
-    fn stbl(moov: &[u8], n: usize) -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn stbl(moov: &[u8], n: usize) -> Vec<(String, Vec<u8>)> {
         let top = boxes(moov);
         let traks: Vec<_> = children(&top[0], 0)
             .into_iter()
@@ -731,7 +731,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn table<'a>(stbl: &'a [(String, Vec<u8>)], kind: &str) -> &'a [u8] {
+    pub(crate) fn table<'a>(stbl: &'a [(String, Vec<u8>)], kind: &str) -> &'a [u8] {
         &stbl
             .iter()
             .find(|(k, _)| k == kind)
@@ -741,7 +741,7 @@ pub(crate) mod tests {
 
     /// The whole header box `kind` (`mvhd`, or the `n`th track's `tkhd` or
     /// `mdhd`) of `moov`.
-    fn header(moov: &[u8], kind: &str, n: usize) -> Vec<u8> {
+    pub(crate) fn header(moov: &[u8], kind: &str, n: usize) -> Vec<u8> {
         let top = boxes(moov);
         let parts = children(&top[0], 0);
         if kind == "mvhd" {

@@ -713,11 +713,13 @@ pub async fn run_video_capture(
 
     let stats = pacer.stats();
     tracing::info!(
-        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats",
+        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats; {} turns of the loop more than a slot after the one before (longest {:?})",
         stats.delivered,
         stats.recorded,
         stats.replaced,
-        stats.repeats
+        stats.repeats,
+        stats.late_turns,
+        stats.longest_turn
     );
     if gone != Some(SourceGone::Failed) {
         output.flush(&res, &tx, sizes).await?;

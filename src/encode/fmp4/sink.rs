@@ -130,6 +130,7 @@ impl Shared {
                     codec,
                     width,
                     height,
+                    fps,
                     header,
                 } => {
                     // The encoder's report, or its first keyframe's sets.
@@ -143,7 +144,7 @@ impl Shared {
                     video = Some((index, codec, sets));
                     TrackInfo {
                         id,
-                        timescale: 90_000,
+                        timescale: video_timescale(fps),
                         kind: TrackKind::Video {
                             codec,
                             width,
@@ -204,6 +205,8 @@ enum Kind {
         codec: VideoCodec,
         width: u16,
         height: u16,
+        /// Its frame rate, if a whole one.
+        fps: Option<u32>,
         /// The encoder's parameter sets, if it reported them.
         header: Option<Vec<u8>>,
     },
@@ -219,20 +222,42 @@ impl Kind {
     /// was added with stays. The encoder's own type has its coded size --
     /// rounded up to whole 16-pixel blocks, 1408 rows for 1392 -- which the
     /// file's tracks would then say; the size asked for is what Media
-    /// Foundation's MP4 sink writes too.
+    /// Foundation's MP4 sink writes too. So does the frame rate, unless only
+    /// the newer type has one.
     fn updated(old: Option<&Kind>, newer: Kind) -> Kind {
         match (old, newer) {
-            (Some(&Kind::Video { width, height, .. }), Kind::Video { codec, header, .. }) => {
+            (
+                Some(&Kind::Video {
+                    width, height, fps, ..
+                }),
                 Kind::Video {
                     codec,
-                    width,
-                    height,
+                    fps: newer_fps,
                     header,
-                }
-            }
+                    ..
+                },
+            ) => Kind::Video {
+                codec,
+                width,
+                height,
+                fps: fps.or(newer_fps),
+                header,
+            },
             (_, newer) => newer,
         }
     }
+}
+
+/// A video track's timescale: thousandths of a frame at a whole `fps`, so
+/// every frame lasts exactly 1000 units -- the unit `FrameGrid`'s slot
+/// times convert to exactly, and Media Foundation's own MP4 sink's. Without
+/// one, 90 kHz. 90 kHz was the unit at any fps once, which 30, 60, 120, 144
+/// and 240 fps divide but a display's own rate may not: at 59 fps frames
+/// took turns lasting 1525 and 1526 units.
+fn video_timescale(fps: Option<u32>) -> u32 {
+    fps.and_then(|fps| fps.checked_mul(1000))
+        .filter(|&units| units > 0)
+        .unwrap_or(90_000)
 }
 
 fn track_kind(media_type: &IMFMediaType) -> std::result::Result<Kind, String> {
@@ -250,6 +275,11 @@ fn track_kind(media_type: &IMFMediaType) -> std::result::Result<Kind, String> {
             let size = media_type
                 .GetUINT64(&MF_MT_FRAME_SIZE)
                 .map_err(|e| e.to_string())?;
+            let fps = media_type
+                .GetUINT64(&MF_MT_FRAME_RATE)
+                .ok()
+                .filter(|rate| *rate as u32 == 1)
+                .map(|rate| (rate >> 32) as u32);
             Ok(Kind::Video {
                 codec: if subtype == MFVideoFormat_HEVC {
                     VideoCodec::Hevc
@@ -258,6 +288,7 @@ fn track_kind(media_type: &IMFMediaType) -> std::result::Result<Kind, String> {
                 },
                 width: (size >> 32) as u16,
                 height: size as u16,
+                fps,
                 header: blob(&MF_MT_MPEG_SEQUENCE_HEADER).filter(|h| !h.is_empty()),
             })
         } else if subtype == MFAudioFormat_AAC {
@@ -652,6 +683,7 @@ mod tests {
             codec: VideoCodec::Hevc,
             width,
             height,
+            fps: Some(60),
             header,
         }
     }

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A recording at a frame rate other than 30, 60, 120, 144 or 240 fps -- which PolyRec records at when the display refreshes slower than the setting, 59 or 165 fps for example -- has every frame exactly as long as the next again. Since v0.5.162 its frames took turns being a hair longer and shorter, and video editors took it for a variable-frame-rate video.
+- A saved highlight runs at one constant frame rate from start to end. The buffer keeps it in 10-second pieces, and every join between two of them put a frame a few milliseconds off the beat, with an extra one in between -- or, on a still screen, left one frame lasting several: editors and upload sites took the clip for a variable-frame-rate video.
+
+### Changed
+
+- While recording, the stats line shows the frame rate the video is recorded at, which it always runs at exactly. It used to show how many new pictures a second had come so far, 55 for a 60 fps recording when the game dropped below 60 at times, which read as the recording missing its frame rate. That count is now in the line's hover text: the frames with no new picture repeat the one before.
+- `polyrec.log` now also says, after each recording, how often PolyRec's capture fell more than a frame behind, to tell a game making fewer frames from PolyRec missing some.
+
 ## [v0.5.162] - 2026-11-09
 
 ### Changed

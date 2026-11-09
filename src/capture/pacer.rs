@@ -41,6 +41,8 @@ pub(crate) struct FramePacer<F> {
     held: Option<F>,
     /// When a frame was last recorded or repeated, or capture started.
     idle_since: Duration,
+    /// When the capture loop last took a turn (`on_frame` or `on_idle`).
+    last_turn: Option<Duration>,
     stats: PacerStats,
 }
 
@@ -57,6 +59,12 @@ pub(crate) struct PacerStats {
     /// The newest frame sent again, nothing new having come for
     /// `STILL_FRAME_REPEAT`.
     pub repeats: u64,
+    /// Turns of the capture loop that came more than a slot after the one
+    /// before: each can leave a slot without a new picture, however many
+    /// the game made.
+    pub late_turns: u64,
+    /// The longest time between two turns.
+    pub longest_turn: Duration,
 }
 
 impl<F> FramePacer<F> {
@@ -70,6 +78,7 @@ impl<F> FramePacer<F> {
             fps,
             held: None,
             idle_since: started,
+            last_turn: None,
             stats: PacerStats::default(),
         }
     }
@@ -86,8 +95,20 @@ impl<F> FramePacer<F> {
         }
     }
 
+    /// Notes a turn of the capture loop at `now` -- see `PacerStats`.
+    fn turn(&mut self, now: Duration) {
+        if let Some(last) = self.last_turn.replace(now) {
+            let gap = now.saturating_sub(last);
+            if gap > self.limiter.interval() {
+                self.stats.late_turns += 1;
+            }
+            self.stats.longest_turn = self.stats.longest_turn.max(gap);
+        }
+    }
+
     /// A new frame was captured at `now`.
     pub(crate) fn on_frame(&mut self, frame: F, now: Duration, paused: bool) -> Step<F> {
+        self.turn(now);
         self.stats.delivered += 1;
         if paused || !self.limiter.admit(now) {
             if self.held.replace(frame).is_some() {
@@ -105,6 +126,7 @@ impl<F> FramePacer<F> {
 
     /// No new frame has come by `now`.
     pub(crate) fn on_idle(&mut self, now: Duration, paused: bool) -> Step<F> {
+        self.turn(now);
         if paused {
             return Step::Wait;
         }
@@ -246,7 +268,7 @@ mod tests {
         pacer.on_frame("b", ms(3), false); // held
         pacer.on_frame("c", ms(6), false); // replaces b
         pacer.on_idle(ms(9), false); // records c
-        pacer.on_idle(ms(259), false); // repeats c
+        pacer.on_idle(ms(259), false); // repeats c, 250 ms after the turn before
         assert_eq!(
             pacer.stats(),
             PacerStats {
@@ -254,8 +276,25 @@ mod tests {
                 recorded: 2,
                 replaced: 1,
                 repeats: 1,
+                late_turns: 1,
+                longest_turn: ms(250),
             }
         );
+    }
+
+    /// A turn of the capture loop more than a slot after the one before can
+    /// leave a slot without a new picture however many the game made: the
+    /// log at the end tells that apart from a game making fewer.
+    #[test]
+    fn stats_count_turns_more_than_a_slot_apart() {
+        let mut pacer = FramePacer::new(60, ms(0));
+        pacer.on_frame("a", ms(0), false);
+        pacer.on_idle(ms(15), false); // within a slot (16.7 ms)
+        pacer.on_frame("b", ms(31), false); // 16 ms on
+        pacer.on_idle(ms(60), false); // 29 ms on: late
+        let stats = pacer.stats();
+        assert_eq!(stats.late_turns, 1);
+        assert_eq!(stats.longest_turn, ms(29));
     }
 
     #[test]

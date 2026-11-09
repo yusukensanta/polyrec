@@ -181,8 +181,12 @@ impl<W: Write> Muxer<W> {
 
 /// `samples` of `track` as a run, the last lasting until `next` if given.
 fn run(track: &TrackInfo, samples: &[Sample], next: Option<i64>) -> TrackRun {
+    // To the nearest tick: a frame's time comes to the sink either as
+    // `FrameGrid` gives it, up to 100 ns late, or -- from an encoder that
+    // works out its own from the frame rate -- rounded to the nearest 100 ns,
+    // so up to 50 ns early; truncating took a tick off those.
     let ticks = |hns: i64| -> u64 {
-        (i128::from(hns.max(0)) * i128::from(track.timescale) / 10_000_000) as u64
+        ((i128::from(hns.max(0)) * i128::from(track.timescale) + 5_000_000) / 10_000_000) as u64
     };
     let last = &samples[samples.len() - 1];
     let ends = samples

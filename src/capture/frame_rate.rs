@@ -85,6 +85,12 @@ impl FrameGrid {
     pub(crate) fn time(self, slot: u64) -> Duration {
         Duration::from_nanos(self.start_hns(slot) as u64 * 100)
     }
+
+    /// The slot `t` falls in: the last one starting at or before it. A
+    /// slot's start as `time` gives it, up to 100 ns late, is in the slot.
+    pub(crate) fn slot_at_or_before(self, t: Duration) -> u64 {
+        (t.as_nanos() * u128::from(self.fps) / 1_000_000_000) as u64
+    }
 }
 
 /// The fps a recording actually runs at: `requested`, unless the display
@@ -283,6 +289,19 @@ mod tests {
         assert_eq!(grid.slot(Duration::from_micros(8_334)), 1);
         assert_eq!(grid.slot(Duration::from_secs(1)), 60);
         assert_eq!(grid.slot(Duration::from_secs(10 * 3600)), 2_160_000);
+    }
+
+    #[test]
+    fn the_slot_a_time_falls_in_starts_at_or_before_it() {
+        let grid = FrameGrid::new(60);
+        assert_eq!(grid.slot_at_or_before(Duration::ZERO), 0);
+        assert_eq!(grid.slot_at_or_before(Duration::from_micros(16_666)), 0);
+        assert_eq!(grid.slot_at_or_before(Duration::from_micros(16_667)), 1);
+        // A slot's own start, as `time` gives it (up to 100 ns late), is
+        // in that slot.
+        for slot in [1, 3, 59, 60, 61, 1_000_000] {
+            assert_eq!(grid.slot_at_or_before(grid.time(slot)), slot);
+        }
     }
 
     #[test]

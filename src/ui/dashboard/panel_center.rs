@@ -283,22 +283,18 @@ impl App {
                 });
             }
 
-            // Stats row: tracks · achieved fps · size so far. Fps and size
-            // say how the recording is going; the raw frame count it used to
-            // show said neither.
-            let mut stats = vec![format!(
-                "{} {}",
-                self.recording_track_count(),
-                s.tracks_word
-            )];
-            if let Some(fps) = achieved_fps(frames, elapsed) {
-                stats.push(format!("{fps:.0} fps"));
-            }
-            if let Some(bytes) = self.recording_status.as_ref().and_then(|c| c.file_bytes) {
-                stats.push(format_bytes(bytes));
-            }
-            ui.label(caption(stats.join("  ·  "), pal().text_muted))
-                .on_hover_text(s.recording_stats_tooltip);
+            // Stats row: tracks · the video's fps · size so far; how many
+            // of its frames were new pictures on hover.
+            let fps = self
+                .session
+                .active()
+                .map_or(self.config.encode.fps(), |active| active.fps.get());
+            let bytes = self.recording_status.as_ref().and_then(|c| c.file_bytes);
+            ui.label(caption(
+                stats_row(s, self.recording_track_count(), fps, bytes),
+                pal().text_muted,
+            ))
+            .on_hover_text(stats_tooltip(s, frames, elapsed, fps));
 
             ui.add_space(SPACE_TIGHT);
             ui.label(caption(
@@ -986,6 +982,34 @@ fn add_rec_button(ui: &mut egui::Ui, enabled: bool, s: &'static Strings) -> egui
     .inner
 }
 
+/// The recording's stats row: its audio tracks, its video's frame rate --
+/// which the video always runs at exactly (see `encode::cfr`) -- and its
+/// file's size so far.
+fn stats_row(s: &Strings, tracks: usize, fps: u32, bytes: Option<u64>) -> String {
+    let mut stats = vec![format!("{tracks} {}", s.tracks_word), format!("{fps} fps")];
+    stats.extend(bytes.map(format_bytes));
+    stats.join("  ·  ")
+}
+
+/// The stats row's hover text: what the row says, and -- once there's a
+/// second of recording to judge by -- how many of the video's `fps` frames a
+/// second were new pictures (`frames` of them over `elapsed`), the rest
+/// repeating the one before.
+fn stats_tooltip(s: &Strings, frames: u64, elapsed: std::time::Duration, fps: u32) -> String {
+    match achieved_fps(frames, elapsed) {
+        Some(new) => format!(
+            "{}
+
+{}",
+            s.recording_stats_tooltip,
+            s.recording_new_pictures_template
+                .replace("{new}", &format!("{new:.0}"))
+                .replace("{fps}", &fps.to_string())
+        ),
+        None => s.recording_stats_tooltip.to_string(),
+    }
+}
+
 /// Frames per second the recording has achieved so far, averaged over its
 /// recorded (pause-excluded) time. `None` for the first second, when a
 /// handful of frames over a fraction of a second says little.
@@ -1277,6 +1301,34 @@ mod achieved_fps_tests {
     fn achieved_fps_waits_for_the_first_second() {
         assert_eq!(achieved_fps(20, Duration::from_millis(400)), None);
         assert_eq!(achieved_fps(0, Duration::ZERO), None);
+    }
+
+    /// The row gives the video's frame rate: every recording runs at exactly
+    /// its fps (see `encode::cfr`). It used to give the new pictures a
+    /// second instead -- fewer whenever the game made fewer, 55 for a 60 fps
+    /// recording -- which read as the recording missing its fps.
+    #[test]
+    fn the_stats_row_gives_the_videos_frame_rate() {
+        let s = crate::i18n::Lang::En.strings();
+        assert_eq!(
+            stats_row(s, 2, 60, Some(500 * 1024 * 1024)),
+            "2 tracks  ·  60 fps  ·  500 MB"
+        );
+        assert_eq!(stats_row(s, 1, 144, None), "1 tracks  ·  144 fps");
+    }
+
+    /// How many of those frames were new pictures goes in the row's hover
+    /// text, once there's a second of recording to say it over.
+    #[test]
+    fn the_stats_hover_says_how_many_frames_were_new_pictures() {
+        let s = crate::i18n::Lang::En.strings();
+        let early = stats_tooltip(s, 20, Duration::from_millis(400), 60);
+        assert_eq!(early, s.recording_stats_tooltip);
+        let later = stats_tooltip(s, 550, Duration::from_secs(10), 60);
+        assert!(later.starts_with(s.recording_stats_tooltip), "{later}");
+        assert!(later.contains("55 of its 60"), "{later}");
+        let ja = crate::i18n::Lang::Ja.strings();
+        assert!(stats_tooltip(ja, 550, Duration::from_secs(10), 60).contains("60"));
     }
 }
 

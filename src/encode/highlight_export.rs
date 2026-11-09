@@ -6,6 +6,7 @@
 //! files into one sink, which needs its own PTS-rebasing logic across the
 //! seams that a single-input remux never has to do.
 
+use crate::capture::frame_rate::FrameGrid;
 use crate::encode::mf::MfSession;
 use crate::encode::remux::{
     ALL_STREAMS, Read, StreamLayout, discover_stream_layout, for_each_sample, read_next,
@@ -15,7 +16,8 @@ use crate::highlight::SegmentInfo;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateSourceReaderFromURL,
+    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MF_MT_FRAME_RATE,
+    MFCreateSourceReaderFromURL, MFSampleExtension_DecodeTimestamp,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -168,16 +170,29 @@ unsafe fn do_concat_and_trim(
         // session), so its native compressed types stand in for all of them. ──
         let (first_reader, first_layout, video_type, audio_types) =
             open_passthrough_reader(oldest)?;
-        // Where the save starts in the oldest segment: `skip_hns` in, or
-        // rather the keyframe before that, where a seek lands -- every
-        // stream starts there. The frames between can't be decoded without
-        // it, so the save comes out up to a GOP longer than asked.
-        let start_hns = if skip_hns > 0 {
+        // Where the save starts in the oldest segment: its first frame from
+        // `skip_hns` in, or rather the keyframe before that, where a seek
+        // lands -- every stream starts there. The frames between can't be
+        // decoded without it, so the save comes out up to a GOP longer than
+        // asked. The save's time 0 is that frame's, whatever sound comes
+        // before it.
+        if skip_hns > 0 {
             seek(&first_reader, skip_hns)?;
-            keyframe_at_or_before(oldest, skip_hns)?
-        } else {
-            0
-        };
+        }
+        let start_hns = keyframe_at_or_before(oldest, skip_hns)?;
+
+        // Every segment's frames sit on the one frame grid of the buffering
+        // session (see `highlight::segment_base`), and a save starts on a
+        // frame, so a save's frames are on a grid from its 0: each goes at
+        // its slot's start exactly as `FrameGrid` gives it, which lands on
+        // the file's own time unit whichever way that's rounded -- adding up
+        // the 100 ns times of segment and offset can land a unit short.
+        let grid = frame_grid(&video_type);
+        // Media Foundation's MP4 sink puts whatever is written first at the
+        // file's 0, so the first frame goes first: any sound read before it
+        // waits until it's written.
+        let mut first_frame_written = false;
+        let mut held_sound: Vec<(u32, IMFSample)> = Vec::new();
 
         let (writer, video_sink, audio_sinks) =
             crate::encode::remux::build_passthrough_sink_writer(
@@ -214,20 +229,52 @@ unsafe fn do_concat_and_trim(
             }
 
             let total_streams = 1 + layout.audio.len();
+            let reordered = decodes_out_of_order(&seg.path)?;
             let label = format!("segment {}", seg.path.display());
             for_each_sample(
                 &reader,
                 total_streams,
                 Some(&label),
                 |stream, s, timestamp| {
-                    if let Some(&sink_idx) = source_to_sink.get(&stream) {
-                        s.SetSampleTime(timestamp + offset_hns)
-                            .encode_ctx("SetSampleTime")?;
-                        write_sample(&writer, sink_idx, &s)?;
+                    let Some(&sink_idx) = source_to_sink.get(&stream) else {
+                        return Ok(());
+                    };
+                    let mut time = timestamp + offset_hns;
+                    if stream == layout.video {
+                        if let Some(grid) = grid {
+                            time = on_grid(grid, time);
+                        }
+                    } else if time < 0 {
+                        // Sound from before the save's first frame.
+                        return Ok(());
+                    }
+                    s.SetSampleTime(time).encode_ctx("SetSampleTime")?;
+                    if let Ok(decoded) = s.GetUINT64(&MFSampleExtension_DecodeTimestamp) {
+                        let reordered = stream == layout.video && reordered;
+                        s.SetUINT64(
+                            &MFSampleExtension_DecodeTimestamp,
+                            decode_time(time, timestamp, decoded as i64, reordered),
+                        )
+                        .encode_ctx("SetUINT64 decode time")?;
+                    }
+                    if stream != layout.video && !first_frame_written {
+                        held_sound.push((sink_idx, s));
+                        return Ok(());
+                    }
+                    write_sample(&writer, sink_idx, &s)?;
+                    if !first_frame_written {
+                        first_frame_written = true;
+                        for (sink_idx, held) in held_sound.drain(..) {
+                            write_sample(&writer, sink_idx, &held)?;
+                        }
                     }
                     Ok(())
                 },
             )?;
+        }
+        // A save without a single frame still gets its sound.
+        for (sink_idx, held) in held_sound.drain(..) {
+            write_sample(&writer, sink_idx, &held)?;
         }
 
         writer.Finalize().encode_ctx("Finalize")?;
@@ -253,6 +300,59 @@ pub(crate) fn video_sample_times(path: &Path) -> Vec<(i64, i64)> {
         .unwrap();
     }
     times
+}
+
+/// The decode time of a sample going at `time` in a save, that was at
+/// `timestamp` in its segment and decoded at `decoded` there.
+///
+/// A stream that starts after the segment's earliest sample has its decode
+/// times counted from the segment's 0 all the same (a `ctts`): moved only
+/// by the segment's place in the save, they came before the last segment's,
+/// and Media Foundation's sink left the segment out. A stream decoded in
+/// order decodes at its time. One that's `reordered` (B-frames, which every
+/// encoder is asked not to use) keeps how far ahead of its time each sample
+/// decoded, so none decodes after it's shown -- at a late start's join its
+/// decode times then step unevenly once.
+fn decode_time(time: i64, timestamp: i64, decoded: i64, reordered: bool) -> u64 {
+    let decode = if reordered {
+        decoded + (time - timestamp)
+    } else {
+        time
+    };
+    decode.max(0) as u64
+}
+
+/// Whether `path`'s video decodes out of order (B-frames): judged by its
+/// first frames, how far ahead of its time each is decoded varying.
+fn decodes_out_of_order(path: &Path) -> Result<bool, AppError> {
+    const FRAMES: usize = 32;
+    let (reader, layout, _, _) = unsafe { open_passthrough_reader(path) }?;
+    let label = format!("frame order in {}", path.display());
+    let mut aheads = Vec::with_capacity(FRAMES);
+    while aheads.len() < FRAMES {
+        match read_next(&reader, layout.video, Some(&label))? {
+            Read::Sample(_, Some(sample), timestamp) => {
+                let decoded = unsafe { sample.GetUINT64(&MFSampleExtension_DecodeTimestamp) };
+                aheads.push(decoded.map_or(0, |d| timestamp - d as i64));
+            }
+            Read::Sample(_, None, _) => {}
+            Read::EndOfStream(_) => break,
+        }
+    }
+    // Times rounded to 100 ns can put one a unit further ahead in order.
+    Ok(aheads.windows(2).any(|pair| (pair[0] - pair[1]).abs() > 1))
+}
+
+/// The frame grid of a video stream's frame rate, if it's a whole one.
+fn frame_grid(video_type: &IMFMediaType) -> Option<FrameGrid> {
+    let packed = unsafe { video_type.GetUINT64(&MF_MT_FRAME_RATE) }.ok()?;
+    let (fps, per) = ((packed >> 32) as u32, packed as u32);
+    (per == 1 && fps > 0).then(|| FrameGrid::new(fps))
+}
+
+/// The start, in 100 ns units, of the slot of `grid` nearest `time`.
+fn on_grid(grid: FrameGrid, time: i64) -> i64 {
+    grid.start_hns(grid.slot(Duration::from_nanos(time.max(0) as u64 * 100)))
 }
 
 /// `duration` in 100 ns units, Media Foundation's.
@@ -478,5 +578,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("saved_empty.mp4");
         assert!(concat_and_trim(&[], 60, &output).is_err());
+    }
+
+    /// A stream decoded in order that started late in its segment (a
+    /// `ctts` of 23 ms, its decode times counted from the segment's 0):
+    /// each sample decodes at its time in the save.
+    #[test]
+    fn a_sample_decoded_in_order_decodes_at_its_time_in_a_save() {
+        assert_eq!(decode_time(3_333_334, 233_333, 0, false), 3_333_334);
+        assert_eq!(decode_time(3_666_667, 566_666, 333_333, false), 3_666_667);
+    }
+
+    /// B-frames: decoded I0 P3 B1 B2 at frames 0 1 2 3, shown at 1 4 2 3.
+    /// Each decodes as far ahead of its time as it did -- moved with it,
+    /// never decoded after it's shown.
+    #[test]
+    fn a_reordered_sample_keeps_how_far_ahead_it_was_decoded() {
+        let frame = 333_333;
+        let moved_by = 10_000_000;
+        for (shown, decoded) in [(1, 0), (4, 1), (2, 2), (3, 3)] {
+            let (timestamp, decoded) = (shown * frame, decoded * frame);
+            let time = timestamp + moved_by;
+            let decode = decode_time(time, timestamp, decoded, true);
+            assert_eq!(decode, (decoded + moved_by) as u64);
+            assert!(decode as i64 <= time);
+        }
+    }
+
+    /// Putting a save's frames on the grid takes the segments' frame rate,
+    /// as their files give it back: a whole one.
+    #[test]
+    fn a_segments_video_gives_its_frame_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment = make_segment(dir.path(), "seg.mp4", 5);
+        let _mf = MfSession::start_mta().unwrap();
+        let (_, _, video_type, _) = unsafe { open_passthrough_reader(&segment.path) }.unwrap();
+        assert_eq!(frame_grid(&video_type), Some(FrameGrid::new(30)));
     }
 }

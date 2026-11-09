@@ -162,6 +162,9 @@ pub struct Strings {
     pub tracks_word: &'static str, // used as "{n} {tracks_word}"
     /// Hover text on the recording stats line (tracks · fps · size).
     pub recording_stats_tooltip: &'static str,
+    /// Added to `recording_stats_tooltip` once a recording has run a second:
+    /// `{new}` of the video's `{fps}` frames a second were new pictures.
+    pub recording_new_pictures_template: &'static str,
     pub saving_recording: &'static str,
     pub select_source_prompt: &'static str,
     /// In the selected source's card when it has no picture to show.
@@ -458,7 +461,8 @@ pub static EN: Strings = Strings {
     state_paused: "PAUSED",
     state_recording: "RECORDING",
     tracks_word: "tracks",
-    recording_stats_tooltip: "Audio tracks, frames per second achieved so far, and the file size so far. Frames are only captured when the picture changes, so a still screen records fewer per second than the setting.",
+    recording_stats_tooltip: "Audio tracks, the video's frame rate, and the file size so far. The video always runs at exactly this frame rate: when no new picture comes in time for a frame, the one before is repeated.",
+    recording_new_pictures_template: "So far, {new} of its {fps} frames a second were new pictures; the rest repeat the one before. A still screen, or a game running below {fps} fps, gives fewer.",
     saving_recording: "Saving recording…",
     select_source_prompt: "Select a source and press REC to start.",
     preview_unavailable: "No preview while it's minimized",
@@ -661,7 +665,8 @@ pub static JA: Strings = Strings {
     state_paused: "一時停止中",
     state_recording: "録画中",
     tracks_word: "トラック",
-    recording_stats_tooltip: "音声トラック数、ここまでの実フレームレート、ここまでのファイルサイズです。フレームは画面が変化したときだけ取り込まれるため、静止した画面では設定より少なくなります。",
+    recording_stats_tooltip: "音声トラック数、動画のフレームレート、ここまでのファイルサイズです。動画は常にこのフレームレートちょうどで記録されます。フレームに間に合う新しい画像がないときは、直前の画像を繰り返します。",
+    recording_new_pictures_template: "ここまで、毎秒 {fps} フレームのうち {new} フレームが新しい画像で、残りは直前の画像の繰り返しです。静止した画面や、ゲームが {fps} fps を下回っているときは少なくなります。",
     saving_recording: "録画を保存中…",
     select_source_prompt: "ソースを選択して「録画」を押すと開始します。",
     preview_unavailable: "最小化中はプレビューできません",

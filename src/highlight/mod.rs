@@ -6,7 +6,7 @@
 //! exclusion with manual recording, foreground-window tracking) lives in
 //! `session::mod` and the dashboard.
 
-use crate::capture::frame_rate::LiveFps;
+use crate::capture::frame_rate::{FrameGrid, LiveFps};
 use crate::disk_space::DiskSpaceGuard;
 use crate::encode::actor::{GIVE_UP_AFTER, StoppedItself, Writes};
 use crate::encode::{EncoderParams, RecordingCommand, RecordingWriter};
@@ -39,8 +39,10 @@ const SEGMENT_SUFFIX: &str = ".mp4";
 #[derive(Debug, Clone)]
 pub struct SegmentInfo {
     pub path: PathBuf,
-    /// Where the segment's time 0 is on the buffering session's clock: its
-    /// first sample's PTS before re-basing. Where it goes in a save.
+    /// Where the segment file's time 0 is on the buffering session's clock:
+    /// the time of its earliest sample as written, which Media Foundation's
+    /// MP4 sink puts at 0 (see `segment_base`) -- a frame's slot, or a sound
+    /// packet's capture time. Where it goes in a save.
     pub start: Duration,
     pub duration: Duration,
 }
@@ -150,6 +152,9 @@ pub fn spawn_highlight_actor(
         let segment_duration = Duration::from_secs(segment_seconds.max(1) as u64);
         let mut disk_guard = DiskSpaceGuard::new(segment_dir.clone());
         let mut writes = Writes::default();
+        // The slot after the last segment's last frame, on the frame grid
+        // (by its fps) of the buffering session's clock.
+        let mut video_end: Option<(u32, u64)> = None;
 
         loop {
             let seg_id = std::time::SystemTime::now()
@@ -169,6 +174,10 @@ pub fn spawn_highlight_actor(
             params.fps = settled_fps;
             fps.set(settled_fps);
             let frame_time = Duration::from_secs(1) / settled_fps.max(1);
+            let grid = FrameGrid::new(settled_fps);
+            let video_end_here = video_end
+                .filter(|&(fps, _)| fps == settled_fps)
+                .map(|(_, slot)| slot);
 
             let seg_start = Instant::now();
             // Capture threads stamp frame/sample PTS from the shared
@@ -177,6 +186,9 @@ pub fn spawn_highlight_actor(
             // touching the capture layer, so each segment's own file starts
             // at PTS ~0 like a normal recording does.
             let mut pts_base: Option<Duration> = None;
+            let mut base_for = |pts: Duration| {
+                *pts_base.get_or_insert_with(|| segment_base(grid, pts, video_end_here, &writer))
+            };
             // Where whatever was written last ends, re-based: the segment's
             // duration. Up to the last sample's *start*, the next segment
             // began on the time of this one's last frame.
@@ -188,7 +200,7 @@ pub fn spawn_highlight_actor(
             loop {
                 match rx.blocking_recv() {
                     Some(RecordingCommand::WriteVideo(mut frame, _slot)) => {
-                        let base = *pts_base.get_or_insert(frame.pts);
+                        let base = base_for(frame.pts);
                         frame.pts = frame.pts.saturating_sub(base);
                         end = end.max(frame.pts + frame_time);
                         let written = writer.write_video(frame);
@@ -204,7 +216,7 @@ pub fn spawn_highlight_actor(
                         }
                     }
                     Some(RecordingCommand::WriteAudio(mut samples)) => {
-                        let base = *pts_base.get_or_insert(samples.pts);
+                        let base = base_for(samples.pts);
                         samples.pts = samples.pts.saturating_sub(base);
                         end = end.max(samples.pts + samples.duration());
                         let track_idx = samples.track_id.0 as usize;
@@ -231,6 +243,13 @@ pub fn spawn_highlight_actor(
                 }
             }
 
+            if let (Some(base), Some(slot)) = (pts_base, writer.video_end()) {
+                video_end = Some((settled_fps, grid.slot_at_or_before(base) + slot));
+            }
+            // The file's 0, and how long it runs from there.
+            let earliest = writer.earliest_written().unwrap_or_default();
+            let start = pts_base.map(|base| base + earliest);
+            let end = end.saturating_sub(earliest);
             // Later segments read texture frames back from the start if this
             // one had to (see `RecordingWriter::takes_textures`).
             if let Some(gpu) = &mut params.gpu {
@@ -240,8 +259,8 @@ pub fn spawn_highlight_actor(
                 Finished::Kept(finished_path) => {
                     let info = SegmentInfo {
                         path: finished_path,
-                        // Something was written: there's a base.
-                        start: pts_base.unwrap_or_default(),
+                        // Something was written: there's a first sample.
+                        start: start.unwrap_or_default(),
                         duration: end,
                     };
                     let mut guard = segments
@@ -281,6 +300,38 @@ pub fn spawn_highlight_actor(
     });
 
     (tx, save_now_tx, handle)
+}
+
+/// What a segment whose first sample was captured at `first` times its
+/// samples from: a slot start on the one frame grid of the buffering
+/// session's clock, so every segment's frames sit on it and a save keeps
+/// the beat across its joins. (Media Foundation's MP4 sink then moves
+/// everything in the file back by its earliest sample's time, putting that
+/// at 0: `SegmentInfo::start` says where that is.)
+///
+/// The video goes on from the slot after the segment before's last frame
+/// (`video_end`). If `first` is past it -- a still window's picture comes
+/// again only every 250 ms -- the segment starts there, its first frame
+/// filling the slots between as the frames before it, rather than leaving
+/// a gap: one frame lasting several in a save. If `first` is before it,
+/// the segment starts at `first`'s slot and its video after that segment's:
+/// a frame there would come between two of it.
+fn segment_base(
+    grid: FrameGrid,
+    first: Duration,
+    video_end: Option<u64>,
+    writer: &RecordingWriter,
+) -> Duration {
+    let slot = grid.slot_at_or_before(first);
+    let start = match video_end {
+        Some(end) if end > slot => {
+            writer.start_video_at(end - slot);
+            slot
+        }
+        Some(end) => end,
+        None => slot,
+    };
+    grid.time(start)
 }
 
 /// Deletes every segment file currently tracked and empties the deque --
@@ -457,10 +508,13 @@ mod tests {
         );
     }
 
-    /// Its first sample's time on the buffering session's clock, where a
-    /// save places it (see `encode::highlight_export`).
+    /// Where the file's 0 is on the buffering session's clock, which a save
+    /// places it at (see `encode::highlight_export`): for a segment that
+    /// begins with a frame, the start of that frame's slot, where it's
+    /// written. (One that begins with sound is in
+    /// `a_save_keeps_one_frame_rate_across_its_joins`.)
     #[tokio::test]
-    async fn a_segment_starts_where_its_first_sample_was_captured() {
+    async fn a_segment_that_begins_with_a_frame_starts_at_its_slot() {
         let dir = tempfile::tempdir().unwrap();
         let segments = Arc::new(Mutex::new(VecDeque::new()));
         let stopped = StoppedItself::default();
@@ -472,7 +526,8 @@ mod tests {
             &segments,
             &stopped,
         );
-        for at in [1500, 1600] {
+        // 10 ms into the 30 fps slot that starts at 1.5 s.
+        for at in [1510, 1610] {
             tx.send(RecordingCommand::video(tiny_video_frame(
                 Duration::from_millis(at),
             )))
@@ -514,6 +569,195 @@ mod tests {
             durations(segments.lock().unwrap().iter()),
             [Duration::from_millis(100) + secs(1) / 30]
         );
+    }
+
+    /// 10 ms of audio captured at `pts`, as WASAPI hands it over.
+    fn audio_packet(pts: Duration) -> RecordingCommand {
+        RecordingCommand::WriteAudio(AudioSamples {
+            track_id: TrackId::new(0),
+            pts,
+            samples: vec![0.0; 480 * 2],
+            sample_rate: 48_000,
+            channels: 2,
+        })
+    }
+
+    /// Ends the open segment with `last`: once the actor has taken
+    /// everything sent before, asks it to save now -- which it does after
+    /// the next sample -- and sends `last`.
+    async fn end_segment_with(
+        tx: &mpsc::Sender<RecordingCommand>,
+        save_now_tx: &mpsc::UnboundedSender<SaveNowRequest>,
+        last: RecordingCommand,
+    ) {
+        while tx.capacity() < tx.max_capacity() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Done writing what it took last, and waiting for more.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        save_now_tx.send(reply_tx).unwrap();
+        tx.send(last).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("save_now reply timed out")
+            .expect("save_now reply sender dropped");
+    }
+
+    /// A save is one video at the buffer's frame rate, joins and all: every
+    /// frame lasts as long as the next, as in a recording. Each segment
+    /// used to keep its own frame timing, from its first sample -- often an
+    /// audio packet a few milliseconds after the segment before's last
+    /// frame -- so at each join the frames came off the beat, with an extra
+    /// one in between, and editors took the save for a variable-frame-rate
+    /// video.
+    #[tokio::test]
+    async fn a_save_keeps_one_frame_rate_across_its_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = Arc::new(Mutex::new(VecDeque::new()));
+        let stopped = StoppedItself::default();
+        let (tx, save_now_tx, handle) = spawn(
+            dir.path(),
+            EncoderParams::tiny_test(Codec::H264, &[(48_000, 2)]),
+            60,
+            Retention::new(60, 60),
+            &segments,
+            &stopped,
+        );
+        let ms = Duration::from_millis;
+        let frame = |n: u64| RecordingCommand::video(tiny_video_frame(secs(n) / 30));
+        // Sends frames `frames` at 30 fps and audio every 10 ms from
+        // `from_ms` up to `to_ms`, in the order they were captured.
+        let send = |frames: std::ops::Range<u64>, from_ms: u64, to_ms: u64| {
+            let tx = tx.clone();
+            async move {
+                let mut events: Vec<(Duration, RecordingCommand)> = frames
+                    .map(|n| (secs(n) / 30, frame(n)))
+                    .chain(
+                        (from_ms..to_ms)
+                            .step_by(10)
+                            .map(|t| (ms(t), audio_packet(ms(t)))),
+                    )
+                    .collect();
+                events.sort_by_key(|(at, _)| *at);
+                for (_, event) in events {
+                    tx.send(event).await.unwrap();
+                }
+            }
+        };
+
+        // The first segment: frames 0-9, to the audio at 300 ms.
+        send(0..10, 0, 300).await;
+        end_segment_with(&tx, &save_now_tx, audio_packet(ms(300))).await;
+        // The second begins with the audio at 310 ms, between frames 9
+        // (300 ms) and 10 (333 ms): frames 10-19, to the audio at 660 ms.
+        send(0..0, 310, 320).await;
+        send(10..20, 320, 660).await;
+        end_segment_with(&tx, &save_now_tx, audio_packet(ms(660))).await;
+        // The third begins with frame 20, captured 6 ms after its slot's
+        // start (667 ms), the audio at 670 ms after it.
+        tx.send(RecordingCommand::video(tiny_video_frame(
+            secs(20) / 30 + ms(6),
+        )))
+        .await
+        .unwrap();
+        send(21..30, 670, 1000).await;
+        tx.send(RecordingCommand::Stop).await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let saved: Vec<SegmentInfo> = segments.lock().unwrap().iter().cloned().collect();
+        assert_eq!(saved.len(), 3, "three segments");
+        // The second file runs from its first sound, at 310 ms, to the end
+        // of its last, at 670 ms.
+        assert_eq!((saved[1].start, saved[1].duration), (ms(310), ms(360)));
+        assert_saves_at_30_fps(dir.path(), &saved, 30);
+    }
+
+    /// Saves `segments` whole, and checks the save has `frames` frames,
+    /// each 1/30 s after the one before.
+    fn assert_saves_at_30_fps(dir: &Path, segments: &[SegmentInfo], frames: usize) {
+        let output = dir.join("saved.mp4");
+        crate::encode::highlight_export::concat_and_trim(segments, 3600, &output)
+            .expect("concat_and_trim");
+        let times: Vec<i64> = crate::encode::highlight_export::video_sample_times(&output)
+            .into_iter()
+            .map(|(time, _)| time)
+            .collect();
+        assert_eq!(times.len(), frames, "a frame a slot, none extra: {times:?}");
+        // 1/30 s in 100 ns units, to the unit reading the file rounds to.
+        let frame_hns = 10_000_000 / 30;
+        assert!(
+            times
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0] - frame_hns).abs() <= 1),
+            "frames 1/30 s apart: {times:?}"
+        );
+    }
+
+    /// A join the segment before's video ended a few frames short of: a
+    /// still window, whose picture is sent again only every 250 ms, at a
+    /// segment's end. The next segment's video starts where that one's
+    /// ended, its first picture filling the frames between, rather than
+    /// leaving them out -- one frame lasting five in the save.
+    #[tokio::test]
+    async fn a_save_has_no_gap_where_a_still_picture_spans_a_join() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = Arc::new(Mutex::new(VecDeque::new()));
+        let stopped = StoppedItself::default();
+        let (tx, save_now_tx, handle) = spawn(
+            dir.path(),
+            EncoderParams::tiny_test(Codec::H264, &[]),
+            60,
+            Retention::new(60, 60),
+            &segments,
+            &stopped,
+        );
+        let frame = |n: u64| RecordingCommand::video(tiny_video_frame(secs(n) / 30));
+        for n in 0..9 {
+            tx.send(frame(n)).await.unwrap();
+        }
+        end_segment_with(&tx, &save_now_tx, frame(9)).await;
+        // The picture sent again four frames on.
+        for n in 14..20 {
+            tx.send(frame(n)).await.unwrap();
+        }
+        tx.send(RecordingCommand::Stop).await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let saved: Vec<SegmentInfo> = segments.lock().unwrap().iter().cloned().collect();
+        assert_eq!(saved.len(), 2, "two segments");
+        assert_saves_at_30_fps(dir.path(), &saved, 20);
+    }
+
+    /// Media Foundation's MP4 sink puts a file's earliest sample at its 0,
+    /// whichever was written first: here the lead-in of its first frame,
+    /// written after the sound that begins the segment but before it in
+    /// time. The segment starts there, at the start of the sound's slot.
+    #[tokio::test]
+    async fn a_segment_starts_at_its_earliest_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = Arc::new(Mutex::new(VecDeque::new()));
+        let stopped = StoppedItself::default();
+        let (tx, _save_now_tx, handle) = spawn(
+            dir.path(),
+            EncoderParams::tiny_test(Codec::H264, &[(48_000, 2)]),
+            60,
+            Retention::new(60, 60),
+            &segments,
+            &stopped,
+        );
+        let ms = Duration::from_millis;
+        // 10 ms into the 30 fps slot at 1 s; the frame nearest the next.
+        tx.send(audio_packet(ms(1010))).await.unwrap();
+        tx.send(RecordingCommand::video(tiny_video_frame(ms(1040))))
+            .await
+            .unwrap();
+        tx.send(audio_packet(ms(1020))).await.unwrap();
+        tx.send(RecordingCommand::Stop).await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let starts: Vec<_> = segments.lock().unwrap().iter().map(|s| s.start).collect();
+        assert_eq!(starts, [ms(1000)]);
     }
 
     /// A writer that can't start (an encoder that won't open, a folder
