@@ -266,6 +266,9 @@ pub struct RecordingWriter {
     /// The newest frame's picture, which every slot after it repeats until
     /// the next frame comes.
     held: std::cell::RefCell<Option<Picture>>,
+    /// The time (in 100 ns units) of the first sample written, of either
+    /// kind -- see `first_written`.
+    first_written: std::cell::Cell<Option<i64>>,
     /// The video encoder's `ICodecAPI`, if it exposes one (hardware and
     /// Microsoft's own encoders do) -- see `video_codec_api`.
     codec_api: Option<ICodecAPI>,
@@ -557,6 +560,7 @@ impl RecordingWriter {
                 output_path: output_path.to_path_buf(),
                 timeline: std::cell::RefCell::new(CfrTimeline::new(fps)),
                 held: std::cell::RefCell::new(None),
+                first_written: std::cell::Cell::new(None),
                 codec_api,
                 keyframes: std::cell::RefCell::new(KeyframeSchedule::new(gop_set.then_some(fps))),
                 input_size: (in_width, in_height),
@@ -622,7 +626,7 @@ impl RecordingWriter {
             let sample = unsafe { make_buffer_sample(buffer, pts_hns, duration_hns)? };
             self.write_video_sample(&sample)
         };
-        match picture {
+        let written = match picture {
             Picture::Memory(buffer) => write_buffer(buffer),
             Picture::Texture(texture) if self.takes_textures() => {
                 let written = unsafe { make_texture_sample(texture, pts_hns, duration_hns) }
@@ -639,7 +643,24 @@ impl RecordingWriter {
                 }
             }
             Picture::Texture(texture) => write_buffer(&self.read_back(texture)?),
+        };
+        self.note_written(written, pts_hns)
+    }
+
+    /// Notes that a sample of time `pts_hns` was `written`, if it was.
+    fn note_written(&self, written: Result<(), AppError>, pts_hns: i64) -> Result<(), AppError> {
+        if written.is_ok() && self.first_written.get().is_none() {
+            self.first_written.set(Some(pts_hns));
         }
+        written
+    }
+
+    /// The time of the first sample written, of either kind: Media
+    /// Foundation's MP4 sink moves every sample back by it, putting it at
+    /// the file's 0 (see `highlight::segment_base`).
+    pub(crate) fn first_written(&self) -> Option<std::time::Duration> {
+        let hns = self.first_written.get()?;
+        Some(std::time::Duration::from_nanos(hns.max(0) as u64 * 100))
     }
 
     /// A frame that came as a texture, in memory. A stream set up for
@@ -684,17 +705,29 @@ impl RecordingWriter {
             })
             .collect();
 
-        unsafe {
+        let written = unsafe {
             let sample = make_sample(&pcm, pts_hns, duration_hns)?;
             self.writer
                 .WriteSample(stream_idx, &sample)
                 .encode_ctx(format_args!("WriteSample audio[{track_idx}]"))
-        }
+        };
+        self.note_written(written, pts_hns)
     }
 
     /// How steady the video has been so far -- see `CfrStats`.
     pub(crate) fn video_stats(&self) -> CfrStats {
         self.timeline.borrow().stats()
+    }
+
+    /// Starts the video at slot `slot` of its frame grid rather than 0,
+    /// before any frame is written -- see `CfrTimeline::start_at`.
+    pub(crate) fn start_video_at(&self, slot: u64) {
+        self.timeline.borrow_mut().start_at(slot);
+    }
+
+    /// The slot after the video's last frame, once one has been written.
+    pub(crate) fn video_end(&self) -> Option<u64> {
+        self.timeline.borrow().end()
     }
 
     pub fn finalize(self) -> Result<PathBuf, AppError> {

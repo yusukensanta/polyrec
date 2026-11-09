@@ -19,6 +19,8 @@ pub(crate) struct CfrTimeline {
     grid: FrameGrid,
     /// The first slot no frame has taken yet.
     next: u64,
+    /// The slot the video starts at (see `start_at`).
+    first: u64,
     stats: CfrStats,
 }
 
@@ -67,6 +69,7 @@ impl CfrTimeline {
         Self {
             grid: FrameGrid::new(fps),
             next: 0,
+            first: 0,
             stats: CfrStats::default(),
         }
     }
@@ -77,6 +80,22 @@ impl CfrTimeline {
 
     pub(crate) fn grid(&self) -> FrameGrid {
         self.grid
+    }
+
+    /// Starts the video at `slot` rather than 0, if no frame has been
+    /// placed yet: the slots before it are left to whatever comes before
+    /// this video -- a Highlight segment's, to the segment before it (see
+    /// `highlight`) -- and nothing fills them.
+    pub(crate) fn start_at(&mut self, slot: u64) {
+        if self.stats.slots == 0 {
+            self.first = slot;
+            self.next = slot;
+        }
+    }
+
+    /// The slot after the video's last frame, once a frame has been placed.
+    pub(crate) fn end(&self) -> Option<u64> {
+        (self.stats.slots > 0).then_some(self.next)
     }
 
     /// Places the frame captured at `pts` (which doesn't go backwards from
@@ -93,13 +112,13 @@ impl CfrTimeline {
         }
         let slot = nearest.max(self.next);
         let fill = self.next..slot;
-        if self.next == 0 {
-            self.stats.lead_in = slot;
+        if self.stats.slots == 0 {
+            self.stats.lead_in = slot - self.next;
         } else {
             self.stats.repeats += slot - self.next;
         }
         self.next = slot + 1;
-        self.stats.slots = self.next;
+        self.stats.slots = self.next - self.first;
         Some(Placement { fill, slot })
     }
 }
@@ -177,6 +196,30 @@ mod tests {
                 dropped: 1,
             }
         );
+    }
+
+    /// A Highlight segment's video goes on from the slot after the segment
+    /// before's last frame (see `highlight`): the slots before it are that
+    /// segment's, and none of them is filled here.
+    #[test]
+    fn a_timeline_can_start_part_way_in() {
+        let mut timeline = CfrTimeline::new(60);
+        timeline.start_at(1);
+        assert_eq!(timeline.place(ms(50)), at(1..3, 3));
+        assert_eq!(
+            timeline.stats(),
+            CfrStats {
+                slots: 3,
+                lead_in: 2,
+                repeats: 0,
+                dropped: 0,
+            }
+        );
+
+        // A first frame nearest a slot before the start takes the start.
+        let mut timeline = CfrTimeline::new(60);
+        timeline.start_at(2);
+        assert_eq!(timeline.place(ms(17)), at(2..2, 2));
     }
 
     #[test]

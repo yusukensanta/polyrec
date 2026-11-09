@@ -6,6 +6,7 @@
 //! files into one sink, which needs its own PTS-rebasing logic across the
 //! seams that a single-input remux never has to do.
 
+use crate::capture::frame_rate::FrameGrid;
 use crate::encode::mf::MfSession;
 use crate::encode::remux::{
     ALL_STREAMS, Read, StreamLayout, discover_stream_layout, for_each_sample, read_next,
@@ -15,7 +16,8 @@ use crate::highlight::SegmentInfo;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MFCreateSourceReaderFromURL,
+    IMFMediaType, IMFSample, IMFSinkWriter, IMFSourceReader, MF_MT_FRAME_RATE,
+    MFCreateSourceReaderFromURL, MFSampleExtension_DecodeTimestamp,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -168,16 +170,29 @@ unsafe fn do_concat_and_trim(
         // session), so its native compressed types stand in for all of them. ──
         let (first_reader, first_layout, video_type, audio_types) =
             open_passthrough_reader(oldest)?;
-        // Where the save starts in the oldest segment: `skip_hns` in, or
-        // rather the keyframe before that, where a seek lands -- every
-        // stream starts there. The frames between can't be decoded without
-        // it, so the save comes out up to a GOP longer than asked.
-        let start_hns = if skip_hns > 0 {
+        // Where the save starts in the oldest segment: its first frame from
+        // `skip_hns` in, or rather the keyframe before that, where a seek
+        // lands -- every stream starts there. The frames between can't be
+        // decoded without it, so the save comes out up to a GOP longer than
+        // asked. The save's time 0 is that frame's, whatever sound comes
+        // before it.
+        if skip_hns > 0 {
             seek(&first_reader, skip_hns)?;
-            keyframe_at_or_before(oldest, skip_hns)?
-        } else {
-            0
-        };
+        }
+        let start_hns = keyframe_at_or_before(oldest, skip_hns)?;
+
+        // Every segment's frames sit on the one frame grid of the buffering
+        // session (see `highlight::segment_base`), and a save starts on a
+        // frame, so a save's frames are on a grid from its 0: each goes at
+        // its slot's start exactly as `FrameGrid` gives it, which lands on
+        // the file's own time unit whichever way that's rounded -- adding up
+        // the 100 ns times of segment and offset can land a unit short.
+        let grid = frame_grid(&video_type);
+        // Media Foundation's MP4 sink puts whatever is written first at the
+        // file's 0, so the first frame goes first: any sound read before it
+        // waits until it's written.
+        let mut first_frame_written = false;
+        let mut held_sound: Vec<(u32, IMFSample)> = Vec::new();
 
         let (writer, video_sink, audio_sinks) =
             crate::encode::remux::build_passthrough_sink_writer(
@@ -214,20 +229,55 @@ unsafe fn do_concat_and_trim(
             }
 
             let total_streams = 1 + layout.audio.len();
+            // Per stream: how far ahead of its own time its first sample was
+            // decoded -- see `decode_time`.
+            let mut decoded_ahead = std::collections::HashMap::new();
             let label = format!("segment {}", seg.path.display());
             for_each_sample(
                 &reader,
                 total_streams,
                 Some(&label),
                 |stream, s, timestamp| {
-                    if let Some(&sink_idx) = source_to_sink.get(&stream) {
-                        s.SetSampleTime(timestamp + offset_hns)
-                            .encode_ctx("SetSampleTime")?;
-                        write_sample(&writer, sink_idx, &s)?;
+                    let Some(&sink_idx) = source_to_sink.get(&stream) else {
+                        return Ok(());
+                    };
+                    let mut time = timestamp + offset_hns;
+                    if stream == layout.video {
+                        if let Some(grid) = grid {
+                            time = on_grid(grid, time);
+                        }
+                    } else if time < 0 {
+                        // Sound from before the save's first frame.
+                        return Ok(());
+                    }
+                    s.SetSampleTime(time).encode_ctx("SetSampleTime")?;
+                    if let Ok(decoded) = s.GetUINT64(&MFSampleExtension_DecodeTimestamp) {
+                        let ahead = timestamp - decoded as i64;
+                        let first_ahead = *decoded_ahead.entry(stream).or_insert(ahead);
+                        s.SetUINT64(
+                            &MFSampleExtension_DecodeTimestamp,
+                            decode_time(time, ahead, first_ahead),
+                        )
+                        .encode_ctx("SetUINT64 decode time")?;
+                    }
+                    if stream != layout.video && !first_frame_written {
+                        held_sound.push((sink_idx, s));
+                        return Ok(());
+                    }
+                    write_sample(&writer, sink_idx, &s)?;
+                    if !first_frame_written {
+                        first_frame_written = true;
+                        for (sink_idx, held) in held_sound.drain(..) {
+                            write_sample(&writer, sink_idx, &held)?;
+                        }
                     }
                     Ok(())
                 },
             )?;
+        }
+        // A save without a single frame still gets its sound.
+        for (sink_idx, held) in held_sound.drain(..) {
+            write_sample(&writer, sink_idx, &held)?;
         }
 
         writer.Finalize().encode_ctx("Finalize")?;
@@ -256,6 +306,31 @@ pub(crate) fn video_sample_times(path: &Path) -> Vec<(i64, i64)> {
 }
 
 /// `duration` in 100 ns units, Media Foundation's.
+/// The decode time of a sample going at `time` in a save, that was decoded
+/// `ahead` of its own time in its segment, the stream's first sample there
+/// `first_ahead`. A stream that starts after the segment's first sample has
+/// its decode times counted from the segment's 0 all the same (a `ctts`),
+/// each `first_ahead` behind: moved by the segment's place in the save like
+/// its times, or Media Foundation's sink took them for times gone by and
+/// left the segment out of the save. Only how much further ahead than its
+/// first each is decoded -- B-frames' reordering -- is kept, so a stream
+/// without any decodes at its times.
+fn decode_time(time: i64, ahead: i64, first_ahead: i64) -> u64 {
+    (time - (ahead - first_ahead)).max(0) as u64
+}
+
+/// The frame grid of a video stream's frame rate, if it's a whole one.
+fn frame_grid(video_type: &IMFMediaType) -> Option<FrameGrid> {
+    let packed = unsafe { video_type.GetUINT64(&MF_MT_FRAME_RATE) }.ok()?;
+    let (fps, per) = ((packed >> 32) as u32, packed as u32);
+    (per == 1 && fps > 0).then(|| FrameGrid::new(fps))
+}
+
+/// The start, in 100 ns units, of the slot of `grid` nearest `time`.
+fn on_grid(grid: FrameGrid, time: i64) -> i64 {
+    grid.start_hns(grid.slot(Duration::from_nanos(time.max(0) as u64 * 100)))
+}
+
 fn hns(duration: Duration) -> i64 {
     (duration.as_nanos() / 100).min(i64::MAX as u128) as i64
 }
@@ -478,5 +553,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("saved_empty.mp4");
         assert!(concat_and_trim(&[], 60, &output).is_err());
+    }
+
+    /// A stream that started late in its segment (a `ctts` of 23 ms): its
+    /// samples decode at their times in the save. A B-frame's reordering
+    /// -- decoded a frame further ahead than the first -- stays.
+    #[test]
+    fn a_save_decodes_each_sample_at_its_time_but_for_reordering() {
+        let late = 233_333;
+        assert_eq!(decode_time(3_333_334, late, late), 3_333_334);
+        assert_eq!(decode_time(3_666_667, late + 333_333, late), 3_333_334);
+        assert_eq!(decode_time(100, 0, 0), 100);
     }
 }
