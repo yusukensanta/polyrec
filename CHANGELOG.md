@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.163] - 2026-11-10
+
 ### Fixed
 
 - A recording at a frame rate other than 30, 60, 120, 144 or 240 fps -- which PolyRec records at when the display refreshes slower than the setting, 59 or 165 fps for example -- has every frame exactly as long as the next again. Since v0.5.162 its frames took turns being a hair longer and shorter, and video editors took it for a variable-frame-rate video.
