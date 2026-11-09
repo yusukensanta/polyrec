@@ -266,9 +266,9 @@ pub struct RecordingWriter {
     /// The newest frame's picture, which every slot after it repeats until
     /// the next frame comes.
     held: std::cell::RefCell<Option<Picture>>,
-    /// The time (in 100 ns units) of the first sample written, of either
-    /// kind -- see `first_written`.
-    first_written: std::cell::Cell<Option<i64>>,
+    /// The time (in 100 ns units) of the earliest sample written, of
+    /// either kind -- see `earliest_written`.
+    earliest_written: std::cell::Cell<Option<i64>>,
     /// The video encoder's `ICodecAPI`, if it exposes one (hardware and
     /// Microsoft's own encoders do) -- see `video_codec_api`.
     codec_api: Option<ICodecAPI>,
@@ -509,10 +509,10 @@ impl RecordingWriter {
                 .map_err(WriterError::Rejected)?;
             let codec_api = video_codec_api(&writer, video_stream);
             let gop_set = codec_api.as_ref().is_some_and(|api| set_gop_size(api, fps));
-            if container == Container::FragmentedMp4
-                && let Some(api) = &codec_api
-                && b_frames(api) > 0
-            {
+            // Asked of every encoder: a Highlight save copies its segments'
+            // frames as they are (see `highlight_export::decode_time`).
+            let b_frames = codec_api.as_ref().map_or(0, b_frames);
+            if container == Container::FragmentedMp4 && b_frames > 0 {
                 // The fragments take the frames in the order the encoder
                 // hands them out as their order in time (see
                 // `fmp4::muxer`), which B-frames break. Media Foundation's
@@ -560,7 +560,7 @@ impl RecordingWriter {
                 output_path: output_path.to_path_buf(),
                 timeline: std::cell::RefCell::new(CfrTimeline::new(fps)),
                 held: std::cell::RefCell::new(None),
-                first_written: std::cell::Cell::new(None),
+                earliest_written: std::cell::Cell::new(None),
                 codec_api,
                 keyframes: std::cell::RefCell::new(KeyframeSchedule::new(gop_set.then_some(fps))),
                 input_size: (in_width, in_height),
@@ -649,17 +649,21 @@ impl RecordingWriter {
 
     /// Notes that a sample of time `pts_hns` was `written`, if it was.
     fn note_written(&self, written: Result<(), AppError>, pts_hns: i64) -> Result<(), AppError> {
-        if written.is_ok() && self.first_written.get().is_none() {
-            self.first_written.set(Some(pts_hns));
+        if written.is_ok() {
+            let earliest = self
+                .earliest_written
+                .get()
+                .map_or(pts_hns, |t| t.min(pts_hns));
+            self.earliest_written.set(Some(earliest));
         }
         written
     }
 
-    /// The time of the first sample written, of either kind: Media
-    /// Foundation's MP4 sink moves every sample back by it, putting it at
-    /// the file's 0 (see `highlight::segment_base`).
-    pub(crate) fn first_written(&self) -> Option<std::time::Duration> {
-        let hns = self.first_written.get()?;
+    /// The time of the earliest sample written, of either kind, whichever
+    /// was written first: Media Foundation's MP4 sink moves every sample
+    /// back by it, putting it at the file's 0 (see `highlight::segment_base`).
+    pub(crate) fn earliest_written(&self) -> Option<std::time::Duration> {
+        let hns = self.earliest_written.get()?;
         Some(std::time::Duration::from_nanos(hns.max(0) as u64 * 100))
     }
 

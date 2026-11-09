@@ -40,7 +40,7 @@ const SEGMENT_SUFFIX: &str = ".mp4";
 pub struct SegmentInfo {
     pub path: PathBuf,
     /// Where the segment file's time 0 is on the buffering session's clock:
-    /// the time its first sample was written at, which Media Foundation's
+    /// the time of its earliest sample as written, which Media Foundation's
     /// MP4 sink puts at 0 (see `segment_base`) -- a frame's slot, or a sound
     /// packet's capture time. Where it goes in a save.
     pub start: Duration,
@@ -247,9 +247,9 @@ pub fn spawn_highlight_actor(
                 video_end = Some((settled_fps, grid.slot_at_or_before(base) + slot));
             }
             // The file's 0, and how long it runs from there.
-            let first_written = writer.first_written().unwrap_or_default();
-            let start = pts_base.map(|base| base + first_written);
-            let end = end.saturating_sub(first_written);
+            let earliest = writer.earliest_written().unwrap_or_default();
+            let start = pts_base.map(|base| base + earliest);
+            let end = end.saturating_sub(earliest);
             // Later segments read texture frames back from the start if this
             // one had to (see `RecordingWriter::takes_textures`).
             if let Some(gpu) = &mut params.gpu {
@@ -303,14 +303,19 @@ pub fn spawn_highlight_actor(
 }
 
 /// What a segment whose first sample was captured at `first` times its
-/// samples from: the start of that sample's frame slot, so every segment's
-/// frames sit on the one frame grid of the buffering session's clock and a
-/// save keeps the beat across its joins. (Media Foundation's MP4 sink then
-/// moves everything in the file back by the time the first sample was
-/// written at, to put it at 0: `SegmentInfo::start` says where that is.)
-/// Its video goes on from the slot after the segment before's last frame
-/// (`video_end`): the slots before that are that segment's, and a frame of
-/// this one's there would come between two of it.
+/// samples from: a slot start on the one frame grid of the buffering
+/// session's clock, so every segment's frames sit on it and a save keeps
+/// the beat across its joins. (Media Foundation's MP4 sink then moves
+/// everything in the file back by its earliest sample's time, putting that
+/// at 0: `SegmentInfo::start` says where that is.)
+///
+/// The video goes on from the slot after the segment before's last frame
+/// (`video_end`). If `first` is past it -- a still window's picture comes
+/// again only every 250 ms -- the segment starts there, its first frame
+/// filling the slots between as the frames before it, rather than leaving
+/// a gap: one frame lasting several in a save. If `first` is before it,
+/// the segment starts at `first`'s slot and its video after that segment's:
+/// a frame there would come between two of it.
 fn segment_base(
     grid: FrameGrid,
     first: Duration,
@@ -318,10 +323,15 @@ fn segment_base(
     writer: &RecordingWriter,
 ) -> Duration {
     let slot = grid.slot_at_or_before(first);
-    if let Some(end) = video_end.filter(|&end| end > slot) {
-        writer.start_video_at(end - slot);
-    }
-    grid.time(slot)
+    let start = match video_end {
+        Some(end) if end > slot => {
+            writer.start_video_at(end - slot);
+            slot
+        }
+        Some(end) => end,
+        None => slot,
+    };
+    grid.time(start)
 }
 
 /// Deletes every segment file currently tracked and empties the deque --
@@ -504,7 +514,7 @@ mod tests {
     /// written. (One that begins with sound is in
     /// `a_save_keeps_one_frame_rate_across_its_joins`.)
     #[tokio::test]
-    async fn a_segment_starts_where_its_first_sample_was_written() {
+    async fn a_segment_that_begins_with_a_frame_starts_at_its_slot() {
         let dir = tempfile::tempdir().unwrap();
         let segments = Arc::new(Mutex::new(VecDeque::new()));
         let stopped = StoppedItself::default();
@@ -660,14 +670,20 @@ mod tests {
         // The second file runs from its first sound, at 310 ms, to the end
         // of its last, at 670 ms.
         assert_eq!((saved[1].start, saved[1].duration), (ms(310), ms(360)));
-        let output = dir.path().join("saved.mp4");
-        crate::encode::highlight_export::concat_and_trim(&saved, 3600, &output)
+        assert_saves_at_30_fps(dir.path(), &saved, 30);
+    }
+
+    /// Saves `segments` whole, and checks the save has `frames` frames,
+    /// each 1/30 s after the one before.
+    fn assert_saves_at_30_fps(dir: &Path, segments: &[SegmentInfo], frames: usize) {
+        let output = dir.join("saved.mp4");
+        crate::encode::highlight_export::concat_and_trim(segments, 3600, &output)
             .expect("concat_and_trim");
         let times: Vec<i64> = crate::encode::highlight_export::video_sample_times(&output)
             .into_iter()
             .map(|(time, _)| time)
             .collect();
-        assert_eq!(times.len(), 30, "a frame a slot, none extra: {times:?}");
+        assert_eq!(times.len(), frames, "a frame a slot, none extra: {times:?}");
         // 1/30 s in 100 ns units, to the unit reading the file rounds to.
         let frame_hns = 10_000_000 / 30;
         assert!(
@@ -676,6 +692,72 @@ mod tests {
                 .all(|pair| (pair[1] - pair[0] - frame_hns).abs() <= 1),
             "frames 1/30 s apart: {times:?}"
         );
+    }
+
+    /// A join the segment before's video ended a few frames short of: a
+    /// still window, whose picture is sent again only every 250 ms, at a
+    /// segment's end. The next segment's video starts where that one's
+    /// ended, its first picture filling the frames between, rather than
+    /// leaving them out -- one frame lasting five in the save.
+    #[tokio::test]
+    async fn a_save_has_no_gap_where_a_still_picture_spans_a_join() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = Arc::new(Mutex::new(VecDeque::new()));
+        let stopped = StoppedItself::default();
+        let (tx, save_now_tx, handle) = spawn(
+            dir.path(),
+            EncoderParams::tiny_test(Codec::H264, &[]),
+            60,
+            Retention::new(60, 60),
+            &segments,
+            &stopped,
+        );
+        let frame = |n: u64| RecordingCommand::video(tiny_video_frame(secs(n) / 30));
+        for n in 0..9 {
+            tx.send(frame(n)).await.unwrap();
+        }
+        end_segment_with(&tx, &save_now_tx, frame(9)).await;
+        // The picture sent again four frames on.
+        for n in 14..20 {
+            tx.send(frame(n)).await.unwrap();
+        }
+        tx.send(RecordingCommand::Stop).await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let saved: Vec<SegmentInfo> = segments.lock().unwrap().iter().cloned().collect();
+        assert_eq!(saved.len(), 2, "two segments");
+        assert_saves_at_30_fps(dir.path(), &saved, 20);
+    }
+
+    /// Media Foundation's MP4 sink puts a file's earliest sample at its 0,
+    /// whichever was written first: here the lead-in of its first frame,
+    /// written after the sound that begins the segment but before it in
+    /// time. The segment starts there, at the start of the sound's slot.
+    #[tokio::test]
+    async fn a_segment_starts_at_its_earliest_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = Arc::new(Mutex::new(VecDeque::new()));
+        let stopped = StoppedItself::default();
+        let (tx, _save_now_tx, handle) = spawn(
+            dir.path(),
+            EncoderParams::tiny_test(Codec::H264, &[(48_000, 2)]),
+            60,
+            Retention::new(60, 60),
+            &segments,
+            &stopped,
+        );
+        let ms = Duration::from_millis;
+        // 10 ms into the 30 fps slot at 1 s; the frame nearest the next.
+        tx.send(audio_packet(ms(1010))).await.unwrap();
+        tx.send(RecordingCommand::video(tiny_video_frame(ms(1040))))
+            .await
+            .unwrap();
+        tx.send(audio_packet(ms(1020))).await.unwrap();
+        tx.send(RecordingCommand::Stop).await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let starts: Vec<_> = segments.lock().unwrap().iter().map(|s| s.start).collect();
+        assert_eq!(starts, [ms(1000)]);
     }
 
     /// A writer that can't start (an encoder that won't open, a folder

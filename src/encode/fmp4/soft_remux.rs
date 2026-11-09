@@ -243,8 +243,8 @@ fn complete_trak(
     let stbl = boxed(b"stbl", |o| {
         o.bytes(stsd).bytes(&stts(&table.durations));
         if first > 0 && !table.durations.is_empty() {
-            // A start 2^32 ticks late (over 13 h) doesn't fit; it can't
-            // happen in a recording.
+            // A start 2^32 ticks late (about 5 h at 240 fps, 20 h at 60)
+            // doesn't fit; it can't happen in a recording.
             let offset = u32::try_from(first).unwrap_or(u32::MAX);
             o.bytes(&ctts(table.durations.len() as u32, offset));
         }

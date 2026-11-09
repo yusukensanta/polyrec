@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A recording at a frame rate other than 30, 60, 120, 144 or 240 fps -- which PolyRec records at when the display refreshes slower than the setting, 59 or 165 fps for example -- has every frame exactly as long as the next again. Since v0.5.162 its frames took turns being a hair longer and shorter, and video editors took it for a variable-frame-rate video.
-- A saved highlight runs at one constant frame rate from start to end. The buffer keeps it in 10-second pieces, and every join between two of them put a frame a few milliseconds off the beat, with an extra one in between: editors and upload sites took the clip for a variable-frame-rate video.
+- A saved highlight runs at one constant frame rate from start to end. The buffer keeps it in 10-second pieces, and every join between two of them put a frame a few milliseconds off the beat, with an extra one in between -- or, on a still screen, left one frame lasting several: editors and upload sites took the clip for a variable-frame-rate video.
 
 ### Changed
 

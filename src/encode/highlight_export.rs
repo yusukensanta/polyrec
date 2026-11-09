@@ -229,9 +229,7 @@ unsafe fn do_concat_and_trim(
             }
 
             let total_streams = 1 + layout.audio.len();
-            // Per stream: how far ahead of its own time its first sample was
-            // decoded -- see `decode_time`.
-            let mut decoded_ahead = std::collections::HashMap::new();
+            let reordered = decodes_out_of_order(&seg.path)?;
             let label = format!("segment {}", seg.path.display());
             for_each_sample(
                 &reader,
@@ -252,11 +250,10 @@ unsafe fn do_concat_and_trim(
                     }
                     s.SetSampleTime(time).encode_ctx("SetSampleTime")?;
                     if let Ok(decoded) = s.GetUINT64(&MFSampleExtension_DecodeTimestamp) {
-                        let ahead = timestamp - decoded as i64;
-                        let first_ahead = *decoded_ahead.entry(stream).or_insert(ahead);
+                        let reordered = stream == layout.video && reordered;
                         s.SetUINT64(
                             &MFSampleExtension_DecodeTimestamp,
-                            decode_time(time, ahead, first_ahead),
+                            decode_time(time, timestamp, decoded as i64, reordered),
                         )
                         .encode_ctx("SetUINT64 decode time")?;
                     }
@@ -305,18 +302,45 @@ pub(crate) fn video_sample_times(path: &Path) -> Vec<(i64, i64)> {
     times
 }
 
-/// `duration` in 100 ns units, Media Foundation's.
-/// The decode time of a sample going at `time` in a save, that was decoded
-/// `ahead` of its own time in its segment, the stream's first sample there
-/// `first_ahead`. A stream that starts after the segment's first sample has
-/// its decode times counted from the segment's 0 all the same (a `ctts`),
-/// each `first_ahead` behind: moved by the segment's place in the save like
-/// its times, or Media Foundation's sink took them for times gone by and
-/// left the segment out of the save. Only how much further ahead than its
-/// first each is decoded -- B-frames' reordering -- is kept, so a stream
-/// without any decodes at its times.
-fn decode_time(time: i64, ahead: i64, first_ahead: i64) -> u64 {
-    (time - (ahead - first_ahead)).max(0) as u64
+/// The decode time of a sample going at `time` in a save, that was at
+/// `timestamp` in its segment and decoded at `decoded` there.
+///
+/// A stream that starts after the segment's earliest sample has its decode
+/// times counted from the segment's 0 all the same (a `ctts`): moved only
+/// by the segment's place in the save, they came before the last segment's,
+/// and Media Foundation's sink left the segment out. A stream decoded in
+/// order decodes at its time. One that's `reordered` (B-frames, which every
+/// encoder is asked not to use) keeps how far ahead of its time each sample
+/// decoded, so none decodes after it's shown -- at a late start's join its
+/// decode times then step unevenly once.
+fn decode_time(time: i64, timestamp: i64, decoded: i64, reordered: bool) -> u64 {
+    let decode = if reordered {
+        decoded + (time - timestamp)
+    } else {
+        time
+    };
+    decode.max(0) as u64
+}
+
+/// Whether `path`'s video decodes out of order (B-frames): judged by its
+/// first frames, how far ahead of its time each is decoded varying.
+fn decodes_out_of_order(path: &Path) -> Result<bool, AppError> {
+    const FRAMES: usize = 32;
+    let (reader, layout, _, _) = unsafe { open_passthrough_reader(path) }?;
+    let label = format!("frame order in {}", path.display());
+    let mut aheads = Vec::with_capacity(FRAMES);
+    while aheads.len() < FRAMES {
+        match read_next(&reader, layout.video, Some(&label))? {
+            Read::Sample(_, Some(sample), timestamp) => {
+                let decoded = unsafe { sample.GetUINT64(&MFSampleExtension_DecodeTimestamp) };
+                aheads.push(decoded.map_or(0, |d| timestamp - d as i64));
+            }
+            Read::Sample(_, None, _) => {}
+            Read::EndOfStream(_) => break,
+        }
+    }
+    // Times rounded to 100 ns can put one a unit further ahead in order.
+    Ok(aheads.windows(2).any(|pair| (pair[0] - pair[1]).abs() > 1))
 }
 
 /// The frame grid of a video stream's frame rate, if it's a whole one.
@@ -331,6 +355,7 @@ fn on_grid(grid: FrameGrid, time: i64) -> i64 {
     grid.start_hns(grid.slot(Duration::from_nanos(time.max(0) as u64 * 100)))
 }
 
+/// `duration` in 100 ns units, Media Foundation's.
 fn hns(duration: Duration) -> i64 {
     (duration.as_nanos() / 100).min(i64::MAX as u128) as i64
 }
@@ -555,14 +580,39 @@ mod tests {
         assert!(concat_and_trim(&[], 60, &output).is_err());
     }
 
-    /// A stream that started late in its segment (a `ctts` of 23 ms): its
-    /// samples decode at their times in the save. A B-frame's reordering
-    /// -- decoded a frame further ahead than the first -- stays.
+    /// A stream decoded in order that started late in its segment (a
+    /// `ctts` of 23 ms, its decode times counted from the segment's 0):
+    /// each sample decodes at its time in the save.
     #[test]
-    fn a_save_decodes_each_sample_at_its_time_but_for_reordering() {
-        let late = 233_333;
-        assert_eq!(decode_time(3_333_334, late, late), 3_333_334);
-        assert_eq!(decode_time(3_666_667, late + 333_333, late), 3_333_334);
-        assert_eq!(decode_time(100, 0, 0), 100);
+    fn a_sample_decoded_in_order_decodes_at_its_time_in_a_save() {
+        assert_eq!(decode_time(3_333_334, 233_333, 0, false), 3_333_334);
+        assert_eq!(decode_time(3_666_667, 566_666, 333_333, false), 3_666_667);
+    }
+
+    /// B-frames: decoded I0 P3 B1 B2 at frames 0 1 2 3, shown at 1 4 2 3.
+    /// Each decodes as far ahead of its time as it did -- moved with it,
+    /// never decoded after it's shown.
+    #[test]
+    fn a_reordered_sample_keeps_how_far_ahead_it_was_decoded() {
+        let frame = 333_333;
+        let moved_by = 10_000_000;
+        for (shown, decoded) in [(1, 0), (4, 1), (2, 2), (3, 3)] {
+            let (timestamp, decoded) = (shown * frame, decoded * frame);
+            let time = timestamp + moved_by;
+            let decode = decode_time(time, timestamp, decoded, true);
+            assert_eq!(decode, (decoded + moved_by) as u64);
+            assert!(decode as i64 <= time);
+        }
+    }
+
+    /// Putting a save's frames on the grid takes the segments' frame rate,
+    /// as their files give it back: a whole one.
+    #[test]
+    fn a_segments_video_gives_its_frame_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment = make_segment(dir.path(), "seg.mp4", 5);
+        let _mf = MfSession::start_mta().unwrap();
+        let (_, _, video_type, _) = unsafe { open_passthrough_reader(&segment.path) }.unwrap();
+        assert_eq!(frame_grid(&video_type), Some(FrameGrid::new(30)));
     }
 }

@@ -982,9 +982,6 @@ fn add_rec_button(ui: &mut egui::Ui, enabled: bool, s: &'static Strings) -> egui
     .inner
 }
 
-/// Frames per second the recording has achieved so far, averaged over its
-/// recorded (pause-excluded) time. `None` for the first second, when a
-/// handful of frames over a fraction of a second says little.
 /// The recording's stats row: its audio tracks, its video's frame rate --
 /// which the video always runs at exactly (see `encode::cfr`) -- and its
 /// file's size so far.
@@ -1013,6 +1010,9 @@ fn stats_tooltip(s: &Strings, frames: u64, elapsed: std::time::Duration, fps: u3
     }
 }
 
+/// Frames per second the recording has achieved so far, averaged over its
+/// recorded (pause-excluded) time. `None` for the first second, when a
+/// handful of frames over a fraction of a second says little.
 fn achieved_fps(frames: u64, elapsed: std::time::Duration) -> Option<f64> {
     let secs = elapsed.as_secs_f64();
     (secs >= 1.0).then(|| frames as f64 / secs)
