@@ -170,12 +170,19 @@ pub struct FpsSupport {
     pub display_hz: Option<u32>,
     /// The size frames would be encoded at.
     pub output: (u32, u32),
-    /// Rates above 60 the encoder accepts at `output`, out of the presets and
-    /// the display's own rate.
+    /// Rates above 60 the encoder accepts at `output`, out of the presets.
     encodable: Vec<u32>,
 }
 
 impl FpsSupport {
+    pub(crate) fn new(display_hz: Option<u32>, output: (u32, u32), encodable: Vec<u32>) -> Self {
+        Self {
+            display_hz,
+            output,
+            encodable,
+        }
+    }
+
     /// Whether the encoder takes `fps` at `output`.
     pub fn encoder_accepts(&self, fps: u32) -> bool {
         highest_encodable_fps(fps, |fps| self.encodable.contains(&fps)) == fps
@@ -197,18 +204,11 @@ pub fn probe_fps_support(source: &CaptureSource, encode: &EncodeSettings) -> Fps
     let target = CaptureTarget::from_raw(source.kind, source.hwnd);
     let (_, output) = resolve_sizes(source, target, encode);
     let display_hz = display_refresh_hz(target);
-    let mut candidates: Vec<u32> = FPS_PRESETS.into_iter().chain(display_hz).collect();
-    candidates.sort_unstable();
-    candidates.dedup();
-    let encodable = candidates
+    let encodable = FPS_PRESETS
         .into_iter()
         .filter(|&fps| fps > 60 && encoder_accepts(encode, output, fps))
         .collect();
-    FpsSupport {
-        display_hz,
-        output,
-        encodable,
-    }
+    FpsSupport::new(display_hz, output, encodable)
 }
 
 /// About how many bytes a second a recording of `source` with `encode` and
@@ -693,11 +693,7 @@ mod tests {
     }
 
     fn fps_support(display_hz: Option<u32>, encodable: &[u32]) -> FpsSupport {
-        FpsSupport {
-            display_hz,
-            output: (2560, 1440),
-            encodable: encodable.to_vec(),
-        }
+        FpsSupport::new(display_hz, (2560, 1440), encodable.to_vec())
     }
 
     #[test]
@@ -718,10 +714,11 @@ mod tests {
             fps_support(Some(60), &[120, 144, 240]).recorded_fps(144),
             60
         );
-        // A 165 Hz display whose own rate the encoder takes.
+        // A 165 Hz display records the highest preset it delivers, even with
+        // an encoder that would take 165.
         assert_eq!(
-            fps_support(Some(165), &[120, 144, 165]).recorded_fps(240),
-            165
+            fps_support(Some(165), &[120, 144, 165, 240]).recorded_fps(240),
+            144
         );
         assert_eq!(fps_support(None, &[]).recorded_fps(60), 60);
     }

@@ -5,7 +5,7 @@ use super::util::{open_url, take_if_finished};
 use super::widgets::{
     accent_button, caption, choice_row, popup_window, primary_button, section_header,
 };
-use crate::capture::frame_rate::{FPS_PRESETS, fps_fits_display};
+use crate::capture::frame_rate::{FPS_PRESETS, effective_fps, fps_fits_display};
 use crate::config::{BitrateKind, Codec, EncoderMode, ResolutionKind};
 use crate::i18n::Strings;
 use crate::session::FpsSupport;
@@ -386,7 +386,12 @@ impl App {
 fn fps_preset_blocked(support: &FpsSupport, fps: u32, codec: Codec, s: &Strings) -> Option<String> {
     if !fps_fits_display(fps, support.display_hz) {
         let hz = support.display_hz?.to_string();
-        return Some(s.fps_above_display_template.replace("{hz}", &hz));
+        let recorded = effective_fps(fps, support.display_hz).to_string();
+        return Some(
+            s.fps_above_display_template
+                .replace("{hz}", &hz)
+                .replace("{fps}", &recorded),
+        );
     }
     let (width, height) = support.output;
     (!support.encoder_accepts(fps)).then(|| {
@@ -396,4 +401,21 @@ fn fps_preset_blocked(support: &FpsSupport, fps: u32, codec: Codec, s: &Strings)
             .replace("{w}", &width.to_string())
             .replace("{h}", &height.to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{EN, JA};
+
+    #[test]
+    fn a_preset_above_the_display_says_which_preset_it_records_at() {
+        let support = FpsSupport::new(Some(165), (2560, 1440), vec![120, 144, 240]);
+        for s in [&EN, &JA] {
+            let reason = fps_preset_blocked(&support, 240, Codec::H265, s).unwrap();
+            assert!(reason.contains("165 Hz"), "{reason}");
+            assert!(reason.contains("144 fps"), "{reason}");
+            assert!(!reason.contains("165 fps"), "{reason}");
+        }
+    }
 }

@@ -252,7 +252,7 @@ impl Kind {
 /// every frame lasts exactly 1000 units -- the unit `FrameGrid`'s slot
 /// times convert to exactly, and Media Foundation's own MP4 sink's. Without
 /// one, 90 kHz. 90 kHz was the unit at any fps once, which 30, 60, 120, 144
-/// and 240 fps divide but a display's own rate may not: at 59 fps frames
+/// and 240 fps divide but other rates may not: at 59 fps frames
 /// took turns lasting 1525 and 1526 units.
 fn video_timescale(fps: Option<u32>) -> u32 {
     fps.and_then(|fps| fps.checked_mul(1000))
