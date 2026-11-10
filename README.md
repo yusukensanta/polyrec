@@ -8,6 +8,8 @@
 
 Multi-track screen recorder for Windows.
 
+English | [日本語](README.ja.md)
+
 <br clear="left" />
 
 ## Why PolyRec

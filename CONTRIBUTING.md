@@ -1,3 +1,5 @@
+English | [日本語](CONTRIBUTING.ja.md)
+
 # Contributing to PolyRec
 
 Thank you for your interest in contributing to PolyRec! This guide will help you get started.
@@ -41,6 +43,7 @@ cargo clippy --all-targets
    - Write code
    - Add tests where the change is testable (pure logic, config parsing, etc. — not everything here is; see Testing below)
    - Update `CHANGELOG.md` under `[Unreleased]`
+   - Every doc has a Japanese twin (`README.ja.md`, `docs/USER_GUIDE.ja.md`, `CHANGELOG.ja.md`, ...): make the same change in both
 
 3. **Verify**
    ```powershell
@@ -190,13 +193,14 @@ Make sure `cargo build --release`, `cargo clippy --all-targets`, and `cargo test
 - [ ] `cargo clippy --all-targets` is clean
 - [ ] Commit messages follow Conventional Commits
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` (if user-facing)
+- [ ] Changes to docs and `CHANGELOG.md` made in their `.ja.md` twins too
 - [ ] PR description explains what and why
 
 ## Release Process
 
 (For maintainers only)
 
-1. Update `CHANGELOG.md` — move `[Unreleased]` entries under a new version heading.
+1. Update `CHANGELOG.md` and `CHANGELOG.ja.md` — move `[Unreleased]` entries under a new version heading.
 2. Bump `Cargo.toml`'s `version` field to match.
 3. Commit, push, then tag and push the tag:
    ```powershell
