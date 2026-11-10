@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.164] - 2026-11-10
+
 ### Changed
 
 - When the display refreshes slower than the frame-rate setting, a recording now runs at the highest of 30, 50, 60, 120, 144 and 240 fps the display can deliver -- 144 fps on a 165 Hz display, 60 on a 75 Hz one, 50 on a 50 Hz one -- instead of at the display's own rate, which video editors and upload sites don't expect. A 59.94 Hz display still records 60. The Quality popup's hover text on a rate the display can't reach says which one it records at.
