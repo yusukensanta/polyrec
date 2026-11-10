@@ -1,3 +1,5 @@
+English | [日本語](README.ja.md)
+
 # Bundled fonts
 
 PolyRec's UI typeface. Both files are compiled into `polyrec.exe` (`include_bytes!` in

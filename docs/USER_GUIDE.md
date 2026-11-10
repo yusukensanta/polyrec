@@ -1,3 +1,5 @@
+English | [日本語](USER_GUIDE.ja.md)
+
 # PolyRec User Guide
 
 Everything you need to install, verify, and use PolyRec. For build-from-source
@@ -8,7 +10,7 @@ and contributing, see [CONTRIBUTING.md](../CONTRIBUTING.md) instead.
 Grab the latest release from the [Releases page](https://github.com/yusukensanta/polyrec/releases/latest) — two options are published for every version:
 
 - **`polyrec-vX.Y.Z-windows-x64-setup.exe`** — a normal installer. Double-click, click through the wizard, get a Start Menu shortcut and an Add/Remove Programs entry. Recommended if you just want to install it like any other app.
-- **`polyrec-vX.Y.Z-windows-x64.zip`** — portable, no installer: unzip and run `polyrec.exe` directly. Nothing is written outside the folder you unzip it to.
+- **`polyrec-vX.Y.Z-windows-x64.zip`** — portable, no installer: unzip and run `polyrec.exe` directly. Nothing is installed: the app stays in that folder, and only its settings and logs go to `%APPDATA%\PolyRec`.
 
 Either way, the app checks for newer releases on launch and shows a banner if one's available. Clicking it opens an "Update Now" / "Not Now" confirmation (with a separate link to view release notes without updating) — choosing **Update Now** downloads the release, checks its published `SHA256SUMS.txt` is signed with the maintainer's release key, verifies the download's SHA256 against it and its build provenance, then either swaps the running exe in place (portable) or silently re-launches the installer (installed, triggering the usual UAC prompt). Nothing downloads or installs without that confirmation.
 
