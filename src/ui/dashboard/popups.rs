@@ -409,13 +409,21 @@ mod tests {
     use crate::i18n::{EN, JA};
 
     #[test]
-    fn a_preset_above_the_display_says_which_preset_it_records_at() {
+    fn a_preset_above_the_display_says_which_rate_it_records_at() {
         let support = FpsSupport::new(Some(165), (2560, 1440), vec![120, 144, 240]);
+        let slow = FpsSupport::new(Some(50), (2560, 1440), vec![]);
         for s in [&EN, &JA] {
             let reason = fps_preset_blocked(&support, 240, Codec::H265, s).unwrap();
             assert!(reason.contains("165 Hz"), "{reason}");
             assert!(reason.contains("144 fps"), "{reason}");
             assert!(!reason.contains("165 fps"), "{reason}");
+            let reason = fps_preset_blocked(&slow, 60, Codec::H265, s).unwrap();
+            assert!(reason.contains("50 Hz"), "{reason}");
+            assert!(reason.contains("50 fps"), "{reason}");
+            assert!(
+                !reason.contains("of these") && !reason.contains("この中で"),
+                "50 isn't a preset: {reason}"
+            );
         }
     }
 }

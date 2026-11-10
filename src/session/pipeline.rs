@@ -720,6 +720,8 @@ mod tests {
             fps_support(Some(165), &[120, 144, 165, 240]).recorded_fps(240),
             144
         );
+        // A 50 Hz display records 50, which isn't a preset, not 30.
+        assert_eq!(fps_support(Some(50), &[]).recorded_fps(60), 50);
         assert_eq!(fps_support(None, &[]).recorded_fps(60), 60);
     }
 

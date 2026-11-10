@@ -93,19 +93,26 @@ impl FrameGrid {
     }
 }
 
+/// A standard rate a recording falls back to besides the presets, though
+/// it isn't one: what a 50 Hz display delivers. Video sites take 50 fps as
+/// they do 60, where 30 would drop 20 of its frames a second.
+const FALLBACK_ONLY_FPS: u32 = 50;
+
 /// The fps a recording actually runs at: `requested`, unless the display
-/// can't refresh that fast, in which case the highest preset it can: 144 fps
-/// from a 165 Hz display, 60 from a 75 Hz one. Recording 144 fps from a
-/// 60 Hz display would only repeat frames (and trip the fps-shortfall
-/// warning), and a video at the display's own rate (165 or 75 fps) is one
-/// editors and upload sites don't expect. A display slower than every
-/// preset records at its own rate.
+/// can't refresh that fast, in which case the highest standard rate (a
+/// preset, or `FALLBACK_ONLY_FPS`) it can: 144 fps from a 165 Hz display, 60
+/// from a 75 Hz one, 50 from a 50 Hz one. Recording 144 fps from a 60 Hz
+/// display would only repeat frames (and trip the fps-shortfall warning),
+/// and a video at the display's own rate (165 or 75 fps) is one editors and
+/// upload sites don't expect. A display slower than every standard rate
+/// records at its own rate.
 pub(crate) fn effective_fps(requested: u32, display_hz: Option<u32>) -> u32 {
     match display_hz {
         Some(hz) if !fps_fits_display(requested, display_hz) => FPS_PRESETS
             .into_iter()
-            .rev()
-            .find(|&fps| fps_fits_display(fps, display_hz))
+            .chain([FALLBACK_ONLY_FPS])
+            .filter(|&fps| fps_fits_display(fps, display_hz))
+            .max()
             .unwrap_or(hz),
         _ => requested,
     }
@@ -348,20 +355,25 @@ mod tests {
     }
 
     #[test]
-    fn effective_fps_drops_only_when_it_must_and_then_to_a_preset() {
+    fn effective_fps_drops_only_when_it_must_and_then_to_a_standard_rate() {
         assert_eq!(effective_fps(60, Some(239)), 60);
         assert_eq!(effective_fps(240, Some(239)), 240);
         assert_eq!(effective_fps(60, Some(59)), 60);
         assert_eq!(effective_fps(144, None), 144);
-        // A display slower than asked: the highest preset it delivers, not
-        // its own rate, which editors and upload sites don't expect.
+        // A display slower than asked: the highest standard rate it
+        // delivers, not its own rate, which editors and upload sites don't
+        // expect.
         assert_eq!(effective_fps(144, Some(60)), 60);
         assert_eq!(effective_fps(120, Some(75)), 60);
         assert_eq!(effective_fps(240, Some(165)), 144);
         assert_eq!(effective_fps(144, Some(119)), 120);
         assert_eq!(effective_fps(240, Some(143)), 144);
-        assert_eq!(effective_fps(60, Some(50)), 30);
-        // Slower than every preset: all it has is its own rate.
+        // 50, which isn't a preset, rather than 30.
+        assert_eq!(effective_fps(60, Some(50)), 50);
+        assert_eq!(effective_fps(60, Some(49)), 50);
+        assert_eq!(effective_fps(60, Some(56)), 50);
+        assert_eq!(effective_fps(60, Some(48)), 30);
+        // Slower than every standard rate: all it has is its own rate.
         assert_eq!(effective_fps(30, Some(24)), 24);
     }
 
