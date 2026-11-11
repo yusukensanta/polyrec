@@ -200,6 +200,8 @@ Make sure `cargo build --release`, `cargo clippy --all-targets`, and `cargo test
 
 (For maintainers only)
 
+**Every release is signed by hand.** For each release, the maintainer runs the signing script in step 5, in a terminal of their own. Nothing else signs or publishes a release: no workflow, scheduled job, bot or AI agent. The release key and its password never go to GitHub or CI. Signing added later, such as an Authenticode signature on the exe, doesn't replace this step.
+
 1. Update `CHANGELOG.md` and `CHANGELOG.ja.md` — move `[Unreleased]` entries under a new version heading.
 2. Bump `Cargo.toml`'s `version` field to match.
 3. Commit, push, then tag and push the tag:
