@@ -9,6 +9,10 @@ name: Release
 # publishes the release. PolyRec only installs an update whose checksums
 # carry it (self_update::verify_signed_sums).
 #
+# Every release is signed that way, by the maintainer running the script
+# by hand (CONTRIBUTING.md, Release Process). Don't add a step, workflow
+# or bot that signs SHA256SUMS.txt or publishes the release.
+#
 # There's deliberately no `release: published` trigger: publishing the
 # signed draft would set this off again, and a rebuild uploading different
 # bytes over the signed ones would break the signature (immutable releases
