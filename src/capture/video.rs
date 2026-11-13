@@ -1,5 +1,6 @@
 use crate::capture::CaptureControl;
 use crate::capture::device::D3dDevice;
+use crate::capture::first_seconds::FirstSeconds;
 use crate::capture::frame_pool::{FrameBuf, FramePool};
 use crate::capture::frame_rate::{FrameRateLimiter, LiveFps};
 use crate::capture::pacer::{FramePacer, Step};
@@ -245,6 +246,10 @@ struct CaptureResources {
     /// Whether Windows took `show_border` -- it can't leave the border out
     /// before Windows 11 24H2.
     border_as_asked: bool,
+    /// Readbacks that found the GPU still copying and had to wait for it
+    /// (see `read_back`): each holds up the GPU's queue, which the game
+    /// shares.
+    gpu_waits: std::sync::atomic::AtomicU64,
 }
 
 /// Asks WGC itself to deliver frames no closer than `interval` apart, so on
@@ -415,11 +420,17 @@ impl CaptureResources {
             width: capture_width,
             height: capture_height,
             border_as_asked,
+            gpu_waits: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
     fn item_closed(&self) -> bool {
         self.item_closed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Readbacks so far that waited on the GPU -- see `gpu_waits`.
+    fn gpu_waits(&self) -> u64 {
+        self.gpu_waits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// GPU-copies a captured frame's texture into staging slot `slot`.
@@ -502,11 +513,14 @@ impl CaptureResources {
         pool: &Arc<FramePool>,
     ) -> Result<FrameBuf, AppError> {
         unsafe {
-            if nonblocking_first
-                && let Some(pixel_data) =
+            if nonblocking_first {
+                if let Some(pixel_data) =
                     self.map_staging(slot, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, pool)?
-            {
-                return Ok(pixel_data);
+                {
+                    return Ok(pixel_data);
+                }
+                self.gpu_waits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             self.map_staging(slot, 0, pool)?
                 .ok_or_else(|| AppError::Capture("a blocking Map came back empty".into()))
@@ -629,6 +643,7 @@ pub async fn run_video_capture(
     // after capture has started (see `LiveFps`), and WGC would otherwise go
     // on composing frames at the first rate, only for the pacer to drop them.
     let mut asked_fps = fps.get();
+    let opening = std::time::Instant::now();
     let res = CaptureResources::open(
         target,
         capture_size,
@@ -636,7 +651,25 @@ pub async fn run_video_capture(
         update_interval_for(asked_fps),
         gpu.as_ref(),
     )?;
-    let mut pacer = FramePacer::new(fps.get(), ctrl.clock.elapsed());
+    let opened = ctrl.clock.elapsed();
+    tracing::info!(
+        "video capture opened in {:?}, {opened:?} into the recording: {}x{} at up to {asked_fps} fps, frames {}, Windows' capture border {}",
+        opening.elapsed(),
+        capture_size.0,
+        capture_size.1,
+        if gpu.is_some() {
+            "kept on the GPU"
+        } else {
+            "read back into memory"
+        },
+        if show_border || !res.border_as_asked {
+            "shown"
+        } else {
+            "hidden"
+        },
+    );
+    let mut pacer = FramePacer::new(fps.get(), opened);
+    let mut first_seconds = FirstSeconds::new(opened);
     let sizes = (capture_size, output_size);
     let mut output = match gpu {
         Some(frames) => FrameOutput::Gpu {
@@ -660,6 +693,11 @@ pub async fn run_video_capture(
     loop {
         if ctrl.is_stopped() {
             break;
+        }
+        if let Some(summary) =
+            first_seconds.note(ctrl.clock.elapsed(), &pacer.stats(), res.gpu_waits())
+        {
+            tracing::info!("{summary}");
         }
         if gone.is_none() && res.item_closed() {
             tracing::warn!(
@@ -713,13 +751,16 @@ pub async fn run_video_capture(
 
     let stats = pacer.stats();
     tracing::info!(
-        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats; {} turns of the loop more than a slot after the one before (longest {:?})",
+        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats; the picture stood still for more than a slot {} times (longest gap {:?}); {} turns of the loop more than a slot after the one before (longest {:?}); {} readbacks waited on the GPU",
         stats.delivered,
         stats.recorded,
         stats.replaced,
         stats.repeats,
+        stats.long_gaps,
+        stats.longest_gap,
         stats.late_turns,
-        stats.longest_turn
+        stats.longest_turn,
+        res.gpu_waits(),
     );
     if gone != Some(SourceGone::Failed) {
         output.flush(&res, &tx, sizes).await?;

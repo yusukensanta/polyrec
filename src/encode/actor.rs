@@ -158,10 +158,18 @@ pub fn spawn_recording_actor(
     let handle = tokio::task::spawn_blocking(move || {
         // Creating the writer creates its file, so one that didn't start
         // leaves an empty file behind otherwise.
+        let starting = Instant::now();
         let (writer, settled_fps) =
             RecordingWriter::start(&temp_path, &params).inspect_err(|_| {
                 let _ = std::fs::remove_file(&temp_path);
             })?;
+        tracing::info!(
+            "encoder started in {:?}: {:?} {}x{} at {settled_fps} fps",
+            starting.elapsed(),
+            params.codec,
+            params.width,
+            params.height,
+        );
         fps.set(settled_fps);
 
         let mut disk_guard = DiskSpaceGuard::new(output_dir.clone());

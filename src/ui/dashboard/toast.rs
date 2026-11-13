@@ -11,6 +11,7 @@ use crate::i18n::Strings;
 use crate::types::SessionState;
 use eframe::egui;
 use std::time::{Duration, Instant};
+use windows::Win32::Foundation::RECT;
 
 /// The toast window's title, which also finds it again.
 const TOAST_TITLE: &str = "PolyRec Toast";
@@ -29,16 +30,38 @@ pub(super) struct Toast {
     /// when they pressed the hotkey -- or another, or nowhere (`None`), when
     /// that's a game in exclusive full-screen (see `hud_place`).
     monitor: Option<HudMonitor>,
+    /// Where it went, for the log -- see `toast_place`.
+    place: &'static str,
+    /// Whether the log has said so yet: it does once the toast first comes
+    /// up, or would but has nowhere to go.
+    logged: bool,
 }
 
 impl Toast {
     /// A toast for `text`, on the monitor of whatever window is in front.
     pub(super) fn new(text: String) -> Self {
+        let (monitor, place) = foreground_monitor();
         Self {
             text,
             until: Instant::now() + TOAST_DURATION,
-            monitor: foreground_monitor(),
+            monitor,
+            place,
+            logged: false,
         }
+    }
+}
+
+/// Where a toast went, for the log: a window over a game in exclusive
+/// full-screen disturbs it, so `hud_place` moves it to another monitor.
+/// `shown_on` is the monitor it went on, `front` the one of the window in
+/// front.
+fn toast_place(shown_on: Option<&RECT>, front: Option<&RECT>) -> &'static str {
+    match shown_on {
+        None => {
+            "not shown: a game in exclusive full-screen is in front, with no other monitor to go to"
+        }
+        Some(rect) if Some(rect) == front => "shown on the monitor in front",
+        Some(_) => "shown on another monitor: a game in exclusive full-screen is in front",
     }
 }
 
@@ -77,12 +100,15 @@ pub(super) fn hotkey_toast(
 
 /// The monitor the foreground window is on (the primary display if that
 /// can't be told) -- or the one `hud_place` moves the toast to; `None` when
-/// it shouldn't be shown.
-fn foreground_monitor() -> Option<HudMonitor> {
+/// it shouldn't be shown. With where that is, for the log (`toast_place`).
+fn foreground_monitor() -> (Option<HudMonitor>, &'static str) {
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow};
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-    let monitor = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY) };
-    super::hud_place::hud_monitor_for(monitor)
+    let front = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY) };
+    let monitor = super::hud_place::hud_monitor_for(front);
+    let front_rect = crate::capture::video::monitor_rect(front).ok();
+    let place = toast_place(monitor.as_ref().map(|m| &m.rect), front_rect.as_ref());
+    (monitor, place)
 }
 
 impl App {
@@ -90,7 +116,7 @@ impl App {
     /// always-on-top window -- but only while the dashboard isn't focused:
     /// with it in front, its own controls already show the change.
     pub(super) fn render_toast_viewport(&mut self, ctx: &egui::Context) {
-        let Some(toast) = &self.toast else {
+        let Some(toast) = &mut self.toast else {
             return;
         };
         let now = Instant::now();
@@ -101,6 +127,10 @@ impl App {
         ctx.request_repaint_after(toast.until - now);
         if ctx.input(|i| i.viewport().focused) == Some(true) {
             return;
+        }
+        if !toast.logged {
+            toast.logged = true;
+            tracing::info!("toast {:?} {}", toast.text, toast.place);
         }
 
         let font = egui::FontId::proportional(TEXT_BODY);
@@ -149,6 +179,31 @@ mod tests {
 
     fn toast(event: HotkeyEvent, before: SessionState, after: SessionState) -> Option<String> {
         hotkey_toast(event, &before, &after, false, false, Lang::En.strings())
+    }
+
+    #[test]
+    fn the_log_says_whether_a_toast_went_over_the_window_in_front() {
+        let left = RECT {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        let right = RECT {
+            left: 2560,
+            top: 0,
+            right: 4480,
+            bottom: 1080,
+        };
+        assert_eq!(
+            toast_place(Some(&left), Some(&left)),
+            "shown on the monitor in front"
+        );
+        assert_eq!(
+            toast_place(Some(&right), Some(&left)),
+            "shown on another monitor: a game in exclusive full-screen is in front"
+        );
+        assert!(toast_place(None, Some(&left)).starts_with("not shown"));
     }
 
     #[test]
