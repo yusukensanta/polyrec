@@ -43,6 +43,8 @@ pub(crate) struct FramePacer<F> {
     idle_since: Duration,
     /// When the capture loop last took a turn (`on_frame` or `on_idle`).
     last_turn: Option<Duration>,
+    /// When Windows last handed out a frame.
+    last_frame: Option<Duration>,
     stats: PacerStats,
 }
 
@@ -65,6 +67,12 @@ pub(crate) struct PacerStats {
     pub late_turns: u64,
     /// The longest time between two turns.
     pub longest_turn: Duration,
+    /// Frames from Windows that came more than a slot after the one before:
+    /// the picture stood still that long -- in a game, a hitch -- however
+    /// promptly the loop turned.
+    pub long_gaps: u64,
+    /// The longest time between two frames from Windows.
+    pub longest_gap: Duration,
 }
 
 impl<F> FramePacer<F> {
@@ -79,6 +87,7 @@ impl<F> FramePacer<F> {
             held: None,
             idle_since: started,
             last_turn: None,
+            last_frame: None,
             stats: PacerStats::default(),
         }
     }
@@ -106,10 +115,22 @@ impl<F> FramePacer<F> {
         }
     }
 
+    /// Notes a frame from Windows at `now` -- see `PacerStats`.
+    fn delivered(&mut self, now: Duration) {
+        self.stats.delivered += 1;
+        if let Some(last) = self.last_frame.replace(now) {
+            let gap = now.saturating_sub(last);
+            if gap > self.limiter.interval() {
+                self.stats.long_gaps += 1;
+            }
+            self.stats.longest_gap = self.stats.longest_gap.max(gap);
+        }
+    }
+
     /// A new frame was captured at `now`.
     pub(crate) fn on_frame(&mut self, frame: F, now: Duration, paused: bool) -> Step<F> {
         self.turn(now);
-        self.stats.delivered += 1;
+        self.delivered(now);
         if paused || !self.limiter.admit(now) {
             if self.held.replace(frame).is_some() {
                 self.stats.replaced += 1;
@@ -278,6 +299,8 @@ mod tests {
                 repeats: 1,
                 late_turns: 1,
                 longest_turn: ms(250),
+                long_gaps: 0,
+                longest_gap: ms(3),
             }
         );
     }
@@ -295,6 +318,26 @@ mod tests {
         let stats = pacer.stats();
         assert_eq!(stats.late_turns, 1);
         assert_eq!(stats.longest_turn, ms(29));
+    }
+
+    /// More than a slot between two frames from Windows means the picture
+    /// stood still that long -- in a game, a hitch -- however promptly the
+    /// capture loop turned.
+    #[test]
+    fn stats_count_frames_more_than_a_slot_apart() {
+        let mut pacer = FramePacer::new(60, ms(0));
+        pacer.on_frame("a", ms(0), false);
+        pacer.on_idle(ms(10), false);
+        pacer.on_frame("b", ms(16), false); // 16 ms on: within a slot (16.7 ms)
+        for idle in [26, 36, 46, 56] {
+            pacer.on_idle(ms(idle), false);
+        }
+        pacer.on_frame("c", ms(61), false); // 45 ms on
+        pacer.on_frame("d", ms(70), false); // 9 ms on
+        let stats = pacer.stats();
+        assert_eq!(stats.long_gaps, 1);
+        assert_eq!(stats.longest_gap, ms(45));
+        assert_eq!(stats.late_turns, 0);
     }
 
     #[test]

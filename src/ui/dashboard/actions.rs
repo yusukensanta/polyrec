@@ -351,8 +351,16 @@ impl App {
             return;
         }
         match hotkey_start(foreground(), self.rec_blocked_reason(s)) {
-            HotkeyStart::Record(source) => self.start_recording_with_source(source),
-            HotkeyStart::RecordSelected => self.handle_rec_button(),
+            HotkeyStart::Record(source) => {
+                tracing::info!("start/stop hotkey: recording the window in front");
+                self.start_recording_with_source(source);
+            }
+            HotkeyStart::RecordSelected => {
+                tracing::info!(
+                    "start/stop hotkey: recording what the dashboard in front has selected"
+                );
+                self.handle_rec_button();
+            }
             HotkeyStart::Explain(why) => self.notices.push(why),
             HotkeyStart::Nothing => {
                 tracing::warn!("start/stop hotkey pressed with no window in front");
@@ -598,6 +606,8 @@ impl App {
             inputs.app_sources.iter().map(|(src, _)| src),
         );
         let naming = self.resolve_recording_naming();
+        let kind = source.kind;
+        let starting = std::time::Instant::now();
         match self.session.start_capture(
             source,
             inputs,
@@ -608,7 +618,9 @@ impl App {
         ) {
             Ok(path) => {
                 tracing::info!(
-                    "recording started: app={app_name:?} audio_tracks={track_count} output={}",
+                    "recording started in {:?}: app={app_name:?} source={kind:?} border={} audio_tracks={track_count} output={}",
+                    starting.elapsed(),
+                    self.config.show_recording_border,
                     path.display()
                 );
                 self.fps_shortfall_warned = false;

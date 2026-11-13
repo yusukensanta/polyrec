@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod device;
+pub mod first_seconds;
 pub mod frame_pool;
 pub mod frame_rate;
 pub mod pacer;
