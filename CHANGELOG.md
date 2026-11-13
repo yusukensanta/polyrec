@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.165] - 2026-11-14
+
 ### Changed
 
 - `polyrec.log` now says how each recording's start went, to find what makes a game stutter just as a recording starts: how long the encoder and the capture took to start, whether the start/stop hotkey started it, window or display capture and whether Windows' capture border is shown, and where the hotkey's "● Recording" toast went (over the game, on another monitor, or nowhere). For the first 5 seconds it gives how many new pictures came each second, how often and how long the picture stood still, and how often the capture had to wait for the graphics card. The last two also go in the line written after each recording, for the whole recording, to compare.
