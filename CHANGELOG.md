@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.168] - 2026-11-14
+
 ### Fixed
 
 - A recording whose encoder stopped working part-way is saved right away, with everything recorded up to then. It was reported as failed and stayed hidden under a temporary name until PolyRec was next started, which then recovered it.
