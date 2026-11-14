@@ -247,9 +247,36 @@ struct CaptureResources {
     /// before Windows 11 24H2.
     border_as_asked: bool,
     /// Readbacks that found the GPU still copying and had to wait for it
-    /// (see `read_back`): each holds up the GPU's queue, which the game
-    /// shares.
-    gpu_waits: std::sync::atomic::AtomicU64,
+    /// (see `read_back`).
+    gpu_waits: std::sync::Mutex<GpuWaits>,
+}
+
+/// Readbacks that found the GPU still copying and waited for it, each
+/// holding up the capture loop meanwhile.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct GpuWaits {
+    pub(crate) count: u64,
+    /// How long they waited in all.
+    pub(crate) total: std::time::Duration,
+    pub(crate) longest: std::time::Duration,
+}
+
+impl GpuWaits {
+    fn add(&mut self, waited: std::time::Duration) {
+        self.count += 1;
+        self.total += waited;
+        self.longest = self.longest.max(waited);
+    }
+}
+
+impl std::fmt::Display for GpuWaits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} readbacks waited on the GPU ({:?} in all, longest {:?})",
+            self.count, self.total, self.longest
+        )
+    }
 }
 
 /// Asks WGC itself to deliver frames no closer than `interval` apart, so on
@@ -420,7 +447,7 @@ impl CaptureResources {
             width: capture_width,
             height: capture_height,
             border_as_asked,
-            gpu_waits: std::sync::atomic::AtomicU64::new(0),
+            gpu_waits: std::sync::Mutex::default(),
         })
     }
 
@@ -429,8 +456,8 @@ impl CaptureResources {
     }
 
     /// Readbacks so far that waited on the GPU -- see `gpu_waits`.
-    fn gpu_waits(&self) -> u64 {
-        self.gpu_waits.load(std::sync::atomic::Ordering::Relaxed)
+    fn gpu_waits(&self) -> GpuWaits {
+        *self.gpu_waits.lock().unwrap()
     }
 
     /// GPU-copies a captured frame's texture into staging slot `slot`.
@@ -444,9 +471,7 @@ impl CaptureResources {
             let src_res: ID3D11Resource = texture
                 .cast()
                 .capture_ctx("cast texture to ID3D11Resource")?;
-            self.device
-                .d3d_context
-                .CopyResource(&self.staging[slot], &src_res);
+            copy_for_readback(&self.device, &self.staging[slot], &src_res);
         }
         Ok(())
     }
@@ -519,17 +544,41 @@ impl CaptureResources {
                 {
                     return Ok(pixel_data);
                 }
-                self.gpu_waits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let waiting = std::time::Instant::now();
+                let pixel_data = self.map_staging(slot, 0, pool);
+                self.gpu_waits.lock().unwrap().add(waiting.elapsed());
+                return pixel_data?.ok_or_else(came_back_empty);
             }
-            self.map_staging(slot, 0, pool)?
-                .ok_or_else(|| AppError::Capture("a blocking Map came back empty".into()))
+            self.map_staging(slot, 0, pool)?.ok_or_else(came_back_empty)
         }
     }
 
     fn close(self) {
         let _ = self.session.Close();
         let _ = self.frame_pool.Close();
+    }
+}
+
+fn came_back_empty() -> AppError {
+    AppError::Capture("a blocking Map came back empty".into())
+}
+
+/// Has the GPU copy `src` into the staging texture `staging`, starting now.
+///
+/// The `Flush` is what starts it. Direct3D only queues a command until its
+/// queue fills or something needs the result, and a capture's device issues
+/// one copy a frame and never presents: without the flush the copy sat
+/// queued until the readback asked for it a frame later, and the readback
+/// then waited for all of it -- a millisecond or two on an idle GPU, and
+/// behind everything a game had queued on a busy one.
+///
+/// # Safety
+/// `staging` and `src` must be resources of `device`, of the same size and
+/// format.
+unsafe fn copy_for_readback(device: &D3dDevice, staging: &ID3D11Resource, src: &ID3D11Resource) {
+    unsafe {
+        device.d3d_context.CopyResource(staging, src);
+        device.d3d_context.Flush();
     }
 }
 
@@ -751,7 +800,7 @@ pub async fn run_video_capture(
 
     let stats = pacer.stats();
     tracing::info!(
-        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats; the picture stood still for more than a slot {} times (longest gap {:?}); {} turns of the loop more than a slot after the one before (longest {:?}); {} readbacks waited on the GPU",
+        "video capture: {} frames from Windows, {} recorded, {} replaced by a newer one in their slot, {} still-picture repeats; the picture stood still for more than a slot {} times (longest gap {:?}); {} turns of the loop more than a slot after the one before (longest {:?}); {}",
         stats.delivered,
         stats.recorded,
         stats.replaced,
@@ -1657,6 +1706,75 @@ mod tests {
         assert!(
             cpu_ms_per_sec[1] < cpu_ms_per_sec[0],
             "GPU frames took more CPU: {cpu_ms_per_sec:?} ms/s"
+        );
+    }
+
+    #[test]
+    fn a_copy_for_readback_is_done_by_the_time_its_frame_is_read() {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_SHADER_RESOURCE, D3D11_USAGE_DEFAULT,
+        };
+
+        let device = D3dDevice::new().unwrap();
+        let texture = |usage, bind: u32, cpu: u32| -> ID3D11Resource {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: 1920,
+                Height: 1080,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: usage,
+                BindFlags: bind,
+                CPUAccessFlags: cpu,
+                MiscFlags: 0,
+            };
+            let mut made: Option<ID3D11Texture2D> = None;
+            unsafe {
+                device
+                    .d3d_device
+                    .CreateTexture2D(&desc, None, Some(&mut made))
+                    .unwrap();
+            }
+            made.unwrap().cast().unwrap()
+        };
+        let frame = texture(D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0);
+        let staging = texture(D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32);
+
+        unsafe { copy_for_readback(&device, &staging, &frame) };
+        // A readback comes one frame after its copy.
+        std::thread::sleep(std::time::Duration::from_millis(16));
+
+        // Asks without waiting until the frame is there. A copy that was
+        // started is there at once or after one ask (a driver may want to be
+        // asked before it hands over what it has); one that only starts with
+        // the first ask takes hundreds of them.
+        let mut misses = 0;
+        loop {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            let asked = unsafe {
+                device.d3d_context.Map(
+                    &staging,
+                    0,
+                    D3D11_MAP_READ,
+                    D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
+                    Some(&mut mapped),
+                )
+            };
+            match asked {
+                Ok(()) => break,
+                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => misses += 1,
+                Err(e) => panic!("Map: {e}"),
+            }
+            assert!(misses < 10_000, "the copy never finished");
+        }
+        unsafe { device.d3d_context.Unmap(&staging, 0) };
+        assert!(
+            misses <= 20,
+            "the copy only started when asked for: {misses} misses"
         );
     }
 }
