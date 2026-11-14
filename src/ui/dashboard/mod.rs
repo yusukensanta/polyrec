@@ -131,6 +131,8 @@ pub struct App {
     /// The overlay HUD's and the toast's windows -- see `overlay::HudWindow`.
     overlay_window: overlay::HudWindow,
     toast_window: overlay::HudWindow,
+    /// Keeps the overlay HUD above a game between passes.
+    overlay_on_top: overlay::OnTop,
     /// The notification-area icon; `None` if Windows wouldn't take one
     /// (logged), which leaves everything else working as before.
     tray: Option<tray::Tray>,
@@ -310,6 +312,7 @@ impl App {
             toast: None,
             overlay_window: Default::default(),
             toast_window: Default::default(),
+            overlay_on_top: Default::default(),
             tray,
             text_scale: theme::TextScaleWatch::start(&cc.egui_ctx),
             min_width: min_width::MinWidth::default(),
@@ -412,6 +415,7 @@ impl eframe::App for App {
         self.theme_watch.apply(ctx);
         self.run_recording_checks(s);
         self.update_preview(ctx);
+        self.keep_overlay_on_top();
         self.request_repaints(ctx);
         self.request_ui_for_new_windows_while_minimized(ctx);
     }
@@ -456,9 +460,7 @@ impl eframe::App for App {
 
         // The overlay HUD and the toast are windows of their own, drawn from
         // this pass however the dashboard is. Hidden in the tray, the
-        // dashboard itself has nothing to draw -- while recording with the
-        // overlay on, this pass still runs at the overlay's full rate (see
-        // `recording_needs_fast_repaint`).
+        // dashboard itself has nothing to draw.
         self.render_overlay_viewport(ctx, s);
         self.render_toast_viewport(ctx);
         if self.dashboard_hidden {
