@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.170] - 2026-11-15
+
 ### Changed
 
 - `polyrec.exe` is 3.4 MB smaller (30.3 MB to 26.9 MB), and the download with it: the release is now built with whole-program optimization, which leaves out code nothing uses.
