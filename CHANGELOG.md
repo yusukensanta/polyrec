@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.172] - 2026-11-15
+
 ### Changed
 
 - A recording that an older PolyRec (before 0.5.162) left unfinished is no longer finished by this one: it stays where it is, under its temporary name, and still plays as it is in players that read fragmented MP4. PolyRec 0.5.162 to 0.5.171 finish such a file at their next start.
