@@ -97,7 +97,7 @@ impl App {
         self.meter_levels.resize(peaks.len(), 0.0);
         ui.add_space(SPACE_TIGHT);
         // Time since the last frame: about 33 ms while the dashboard has
-        // focus, a second while a game does (see `request_repaints`).
+        // focus, up to a second while a game does (see `request_repaints`).
         let dt = ui.input(|i| i.unstable_dt);
         for (i, peak) in peaks.into_iter().enumerate() {
             let fill = if is_paused { 0.0 } else { meter_fill(peak) };

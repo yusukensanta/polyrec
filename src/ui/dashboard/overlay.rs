@@ -12,6 +12,14 @@ pub(super) fn overlay_viewport_id() -> egui::ViewportId {
 const OVERLAY_TITLE: &str = "PolyRec Overlay";
 
 impl App {
+    /// Starts and stops the thread that keeps the overlay HUD above a game
+    /// (see `OnTop`), with the HUD. From `logic`, which runs however the
+    /// dashboard is shown.
+    pub(super) fn keep_overlay_on_top(&mut self) {
+        self.overlay_on_top
+            .keep(OVERLAY_TITLE, self.overlay_visible());
+    }
+
     /// Whether the overlay HUD is up: recording or paused, with Overlay
     /// turned on. It used to vanish while paused, which looked the same as
     /// the recording having stopped.
@@ -108,15 +116,85 @@ impl App {
             },
         );
 
-        // `with_always_on_top()` only sets WS_EX_TOPMOST once, at window
-        // creation. Fullscreen games commonly re-assert their own topmost
-        // z-order on every frame or focus change (so their own overlays/UI
-        // stay above everything), which silently demotes ours behind them --
-        // matching the "takes several tries" symptom (it only shows when a
-        // repaint happens to land right after the game's own re-assertion).
-        // Re-asserting HWND_TOPMOST every frame the overlay is visible fights
-        // that back instead of relying on a one-time flag.
+        // In place and out of captures, each pass. What keeps it above a
+        // game between passes -- a second apart while the game has focus --
+        // is `OnTop`.
         keep_on_top_and_out_of_captures(OVERLAY_TITLE, monitor.top_right(size, 10.0));
+    }
+}
+
+/// Keeps a window above the others, from a thread of its own, for as long
+/// as it's wanted.
+///
+/// `with_always_on_top()` only sets WS_EX_TOPMOST once, at window creation.
+/// Fullscreen games commonly re-assert their own topmost z-order on every
+/// frame or focus change (so their own overlays/UI stay above everything),
+/// which silently demotes ours behind them. Putting it back on top
+/// `OnTop::TIMES_A_SECOND` fights that back.
+///
+/// That used to ride on the dashboard's passes, so with the overlay on the
+/// whole dashboard was laid out and drawn 30 times a second for as long as
+/// the recording ran -- on the graphics card the game is using -- to show a
+/// clock that changes once a second. The thread asks Windows the same thing
+/// as often and draws nothing.
+#[derive(Default)]
+pub(super) struct OnTop {
+    /// Dropped to end the thread.
+    running: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl OnTop {
+    const TIMES_A_SECOND: u32 = 30;
+
+    /// Starts keeping the window titled `title` on top, or stops.
+    pub(super) fn keep(&mut self, title: &'static str, wanted: bool) {
+        if !wanted {
+            self.running = None;
+            return;
+        }
+        if self.running.is_some() {
+            return;
+        }
+        let (running, stop) = std::sync::mpsc::channel::<()>();
+        let every = std::time::Duration::from_secs(1) / Self::TIMES_A_SECOND;
+        let spawned = std::thread::Builder::new()
+            .name("hud-on-top".into())
+            .spawn(move || {
+                use std::sync::mpsc::RecvTimeoutError::Timeout;
+                while stop.recv_timeout(every) == Err(Timeout) {
+                    put_on_top(title);
+                }
+            });
+        match spawned {
+            Ok(_) => self.running = Some(running),
+            // Asked again on the next pass.
+            Err(e) => tracing::warn!("the overlay isn't kept above a game: {e}"),
+        }
+    }
+}
+
+/// Puts the window titled `title` above the others where it is, if there is
+/// one. `SWP_ASYNCWINDOWPOS`: from another thread than the window's, the
+/// request is posted to it either way; the flag also keeps this thread from
+/// waiting on a busy UI thread.
+fn put_on_top(title: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SetWindowPos,
+    };
+    unsafe {
+        let Ok(hwnd) = FindWindowW(None, &windows::core::HSTRING::from(title)) else {
+            return;
+        };
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        );
     }
 }
 
@@ -235,8 +313,8 @@ pub(super) fn show_viewport_immediate(
 ///   contain the HUD. Windows 10 2004+; it fails harmlessly before that.
 /// - **On top.** It re-asserts the window as topmost via a direct
 ///   `SetWindowPos`, on top of egui/winit's one-time `with_always_on_top()`
-///   hint; see the call site in `render_overlay_viewport` for why that's
-///   needed every frame rather than once.
+///   hint; see `OnTop` for why once isn't enough, and for what does it
+///   between frames for the overlay.
 /// - **In place.** At `at`, the top-left corner in physical pixels (see
 ///   `hud_place::HudMonitor`). egui takes a window's position in points,
 ///   and turns them into pixels with the scale of whichever monitor the
@@ -285,6 +363,85 @@ mod tests {
         let window = hud_window(OVERLAY_TITLE);
         assert_eq!(window.active, Some(false));
         assert_eq!(window.mouse_passthrough, Some(true));
+    }
+
+    /// A window of the test's own, made topmost as the overlay is, that
+    /// something then took out of the topmost band is back in it soon
+    /// after, with no dashboard pass run; and left alone once not wanted.
+    ///
+    /// (A game covers the overlay by going topmost above it rather than by
+    /// taking it out of the band, which a test can't see without looking at
+    /// the screen; the request that undoes either is the same one.)
+    #[test]
+    fn a_window_is_put_back_on_top_between_passes() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GetWindowLongW,
+            HWND_NOTOPMOST, MSG, PM_REMOVE, PeekMessageW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SetWindowPos, WS_EX_TOPMOST, WS_POPUP,
+        };
+        const TITLE: &str = "PolyRec test: kept on top";
+        // Never shown: a window's place in the z-order doesn't need it.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                windows::core::w!("STATIC"),
+                &windows::core::HSTRING::from(TITLE),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("a test window");
+        let topmost =
+            |hwnd: HWND| unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
+        // The requests are posted to this thread, the window's: it has to
+        // take them, as the dashboard's event loop does.
+        let pump_until = |want: bool, for_ms: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(for_ms);
+            while std::time::Instant::now() < until && topmost(hwnd) != want {
+                let mut msg = MSG::default();
+                while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+                    unsafe { DispatchMessageW(&msg) };
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            topmost(hwnd)
+        };
+        let demote = || unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .unwrap();
+        };
+        assert!(topmost(hwnd));
+
+        let mut on_top = OnTop::default();
+        on_top.keep(TITLE, true);
+        for round in 0..2 {
+            demote();
+            assert!(!topmost(hwnd));
+            assert!(pump_until(true, 5_000), "put back on top (round {round})");
+        }
+
+        on_top.keep(TITLE, false);
+        // Whatever the thread had already asked for is taken first.
+        pump_until(false, 200);
+        demote();
+        assert!(!pump_until(true, 300), "left alone once not wanted");
+        unsafe { DestroyWindow(hwnd).unwrap() };
     }
 
     /// Runs one dashboard pass per entry of `passes` against a stand-in for

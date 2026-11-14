@@ -169,11 +169,14 @@ impl App {
         // never repaint to pick up its result.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
         let (focused, minimized) = ctx.input(|i| (i.viewport().focused, i.viewport().minimized));
-        if self.session.is_recording()
-            && recording_needs_fast_repaint(focused, minimized, self.overlay_visible())
-        {
-            // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        if self.session.is_recording() {
+            if recording_needs_fast_repaint(focused, minimized) {
+                // 33 ms ≈ 30 fps; needed for smooth pulsing dot animation
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
+            if let Some(active) = self.session.active() {
+                ctx.request_repaint_after(until_the_clock_changes(active.elapsed()));
+            }
         }
         if matches!(self.export.state, ExportState::Running) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -262,20 +265,28 @@ impl App {
     }
 }
 
+/// How long until a recording's clock -- the dashboard's and the overlay
+/// HUD's, in whole seconds -- next shows something new, `elapsed` into the
+/// recording. A repaint a fixed second after the last one drifts against
+/// the clock, which then skips a second now and then or sits on one for
+/// two. A little past the second, so that the repaint finds it changed.
+fn until_the_clock_changes(elapsed: std::time::Duration) -> std::time::Duration {
+    const PAST: std::time::Duration = std::time::Duration::from_millis(5);
+    std::time::Duration::from_secs(1)
+        - std::time::Duration::from_nanos(elapsed.subsec_nanos().into())
+        + PAST
+}
+
 /// Whether a recording's ~30 fps repaint (the pulsing dot) is worth it. Not
 /// while the dashboard is minimized or another window has focus (typically
-/// the game being recorded): nobody's watching the dot, the 1 s repaint still
-/// ticks the timer, and 30 fps of UI rendering only competes with the game
-/// for the GPU. The overlay HUD is the exception: it renders with the
-/// dashboard, and its every-frame topmost re-assertion is what keeps a
-/// fullscreen game from covering it, so it keeps the full rate. `None` (not
-/// reported yet) counts as focused and not minimized.
-fn recording_needs_fast_repaint(
-    focused: Option<bool>,
-    minimized: Option<bool>,
-    overlay_visible: bool,
-) -> bool {
-    overlay_visible || (focused != Some(false) && minimized != Some(true))
+/// the game being recorded): nobody's watching the dot, the clock is
+/// repainted as it changes (`until_the_clock_changes`), and 30 fps of UI
+/// rendering only competes with the game for the GPU. The overlay HUD used
+/// to be the exception, since it's drawn with the dashboard and was put
+/// back above the game on each pass; `overlay::OnTop` does that now.
+/// `None` (not reported yet) counts as focused and not minimized.
+fn recording_needs_fast_repaint(focused: Option<bool>, minimized: Option<bool>) -> bool {
+    focused != Some(false) && minimized != Some(true)
 }
 
 /// Whether a minimized dashboard needs a `ui` pass to put up a window of its
@@ -398,18 +409,23 @@ mod tests {
     #[test]
     fn fast_repaint_only_while_someone_can_see_the_animation() {
         // Focused (or not reported yet): full rate.
-        assert!(recording_needs_fast_repaint(Some(true), Some(false), false));
-        assert!(recording_needs_fast_repaint(None, None, false));
-        // In the background or minimized: the 1 s tick is enough...
-        assert!(!recording_needs_fast_repaint(
-            Some(false),
-            Some(false),
-            false
-        ));
-        assert!(!recording_needs_fast_repaint(Some(true), Some(true), false));
-        // ...unless the overlay HUD is up.
-        assert!(recording_needs_fast_repaint(Some(false), Some(false), true));
-        assert!(recording_needs_fast_repaint(Some(false), Some(true), true));
+        assert!(recording_needs_fast_repaint(Some(true), Some(false)));
+        assert!(recording_needs_fast_repaint(None, None));
+        // In the background or minimized: the clock's tick is enough, with
+        // the overlay HUD up too.
+        assert!(!recording_needs_fast_repaint(Some(false), Some(false)));
+        assert!(!recording_needs_fast_repaint(Some(true), Some(true)));
+    }
+
+    #[test]
+    fn the_clock_is_repainted_just_after_each_whole_second() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert_eq!(until_the_clock_changes(Duration::ZERO), ms(1005));
+        assert_eq!(until_the_clock_changes(ms(7_250)), ms(755));
+        assert_eq!(until_the_clock_changes(ms(3_599_999)), ms(6));
+        // The repaint that asked for lands past the second: a whole one on.
+        assert_eq!(until_the_clock_changes(ms(3_600_005)), ms(1000));
     }
 
     #[test]
