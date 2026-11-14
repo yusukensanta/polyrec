@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `polyrec.exe` is 3.4 MB smaller (30.3 MB to 26.9 MB), and the download with it: the release is now built with whole-program optimization, which leaves out code nothing uses.
 - PolyRec's hotkey check does less for each key pressed in a game: a key that no hotkey uses is passed on at once, without first asking Windows which of Ctrl, Alt and Shift are held.
 
 ## [v0.5.169] - 2026-11-15

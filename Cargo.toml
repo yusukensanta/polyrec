@@ -107,11 +107,18 @@ tempfile = "3"
 winresource = "0.1"
 
 [profile.release]
-# Default is 16. This app is GPU/DirectX/Media-Foundation-bound (screen
-# capture, hardware video encode), not CPU-tight-loop-bound, so the extra
-# cross-crate inlining/optimization opt at the default codegen-units count
-# buys little here -- but it measurably slows every release build (~7-8 min
-# for "Build release binary" alone in CI, dependencies fully cached). Higher
-# codegen-units trades a small amount of that optimization for meaningfully
-# more parallel codegen. opt-level is untouched (still fully optimized).
-codegen-units = 256
+# For the size of the download, not for speed: this app is
+# GPU/DirectX/Media-Foundation-bound (screen capture, hardware video
+# encode), not CPU-tight-loop-bound. Whole-program LTO in one unit drops
+# what nothing calls. Measured on CI's runner, cold builds (PR #280):
+#
+#   no LTO, 256 units (what this was)   30.25 MB   4.1 min
+#   thin LTO, 16 units                  29.25 MB   8.1 min
+#   fat LTO, 1 unit                     26.90 MB   7.1 min
+#
+# The 3 minutes are paid by each release build and each `prime-release-cache`
+# run on main (ci.yml), not by PRs, which build and test the dev profile.
+# (`panic = "abort"` would save more, and isn't possible: a recording is
+# saved when PolyRec panics.)
+lto = "fat"
+codegen-units = 1
