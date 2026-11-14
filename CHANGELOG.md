@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- PolyRec's hotkey check does less for each key pressed in a game: a key that no hotkey uses is passed on at once, without first asking Windows which of Ctrl, Alt and Shift are held.
+
 ## [v0.5.169] - 2026-11-15
 
 ### Changed
