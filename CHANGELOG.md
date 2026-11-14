@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.166] - 2026-11-14
+
 ### Fixed
 
 - A recording takes less from the game it records. Every frame PolyRec read back from the graphics card waited for the card to copy it first, because the copy was never started ahead of time -- a millisecond or two of the capture standing still per frame on an idle graphics card, and longer behind a game that keeps the card busy. The copy now starts as soon as the frame arrives, and PolyRec asks Windows to run it ahead of other programs' work. `polyrec.log` now also says how long readbacks waited, in all and at the longest.
