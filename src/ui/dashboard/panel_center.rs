@@ -34,6 +34,7 @@ impl App {
     /// now, if it can't -- see `why_rec_is_blocked`.
     pub(super) fn rec_blocked_reason(&self, s: &'static Strings) -> Option<&'static str> {
         why_rec_is_blocked(
+            self.updating(),
             self.finalizing.handle.is_some(),
             self.selected_source.is_some(),
             self.output_dir_problem,
@@ -842,19 +843,23 @@ fn typed_output_dir(typed: &str, current: &Path) -> Option<PathBuf> {
     (!typed.is_empty() && dir != current).then_some(dir)
 }
 
-/// Why REC can't start a recording, if it can't: the last recording is
-/// still being saved, no source is selected, or the output folder can't be
-/// used. REC used to do nothing at all when clicked without a source, and
+/// Why REC can't start a recording, if it can't: PolyRec is updating itself
+/// (it closes when that's done, which would cut the recording off), the last
+/// recording is still being saved, no source is selected, or the output
+/// folder can't be used. REC used to do nothing at all when clicked without a source, and
 /// only failed on start with an unusable output folder; now it says what's
 /// missing instead. Starting while a save is running used to drop that
 /// save's result, and with it any notice about it (see `Finalizing`).
 fn why_rec_is_blocked(
+    updating: bool,
     saving: bool,
     has_source: bool,
     output_dir_problem: Option<OutputDirProblem>,
     s: &'static Strings,
 ) -> Option<&'static str> {
-    if saving {
+    if updating {
+        Some(s.rec_wait_for_update_tooltip)
+    } else if saving {
         Some(s.rec_wait_for_save_tooltip)
     } else if !has_source {
         Some(s.rec_needs_source_tooltip)
@@ -1096,12 +1101,21 @@ mod rec_blocked_tests {
     fn rec_waits_for_the_last_save_before_anything_else() {
         let s = Lang::En.strings();
         assert_eq!(
-            why_rec_is_blocked(true, false, Some(OutputDirProblem::Unavailable), s),
+            why_rec_is_blocked(false, true, false, Some(OutputDirProblem::Unavailable), s),
             Some(s.rec_wait_for_save_tooltip)
         );
         assert_eq!(
-            why_rec_is_blocked(true, true, None, s),
+            why_rec_is_blocked(false, true, true, None, s),
             Some(s.rec_wait_for_save_tooltip)
+        );
+    }
+
+    #[test]
+    fn rec_waits_for_an_update_before_anything_else() {
+        let s = Lang::En.strings();
+        assert_eq!(
+            why_rec_is_blocked(true, true, true, None, s),
+            Some(s.rec_wait_for_update_tooltip)
         );
     }
 
@@ -1109,14 +1123,14 @@ mod rec_blocked_tests {
     fn rec_needs_a_source_then_a_usable_folder() {
         let s = Lang::En.strings();
         assert_eq!(
-            why_rec_is_blocked(false, false, None, s),
+            why_rec_is_blocked(false, false, false, None, s),
             Some(s.rec_needs_source_tooltip)
         );
         assert_eq!(
-            why_rec_is_blocked(false, true, Some(OutputDirProblem::NotAFolder), s),
+            why_rec_is_blocked(false, false, true, Some(OutputDirProblem::NotAFolder), s),
             Some(s.output_dir_not_a_folder)
         );
-        assert_eq!(why_rec_is_blocked(false, true, None, s), None);
+        assert_eq!(why_rec_is_blocked(false, false, true, None, s), None);
     }
 
     /// The fill and outline of every rectangle painted by a pass that adds

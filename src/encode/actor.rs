@@ -210,11 +210,10 @@ pub fn spawn_recording_actor(
         // Media Foundation won't finish a file with nothing written to it (a
         // recording stopped as soon as it started); nothing is lost with it.
         // One that holds something stays, under its temporary name.
-        let finished_temp_path = writer.finalize().inspect_err(|_| {
-            if !wrote_any {
+        let finished_temp_path = what_to_save(writer.finalize(), wrote_any, &temp_path)
+            .inspect_err(|_| {
                 let _ = std::fs::remove_file(&temp_path);
-            }
-        })?;
+            })?;
         // Finished in place by now (see `fmp4::sink`): moved to a name
         // reserved only now. On failure the recording stays where it is,
         // under its temporary name.
@@ -230,6 +229,30 @@ pub fn spawn_recording_actor(
     });
 
     (tx, handle)
+}
+
+/// The file to finish and save once the writer has `finalized`: its own, or
+/// -- when finalizing failed but something was written (`wrote_any`) --
+/// `temp_path` all the same. An encoder that has died (the reason a
+/// recording gives up) fails to finalize too, and the file by then holds
+/// whole fragments up to that moment: returning the error left it hidden
+/// under its temporary name, called "failed", until the next start
+/// recovered it.
+fn what_to_save(
+    finalized: Result<PathBuf, AppError>,
+    wrote_any: bool,
+    temp_path: &std::path::Path,
+) -> Result<PathBuf, AppError> {
+    finalized.or_else(|e| {
+        if !wrote_any {
+            return Err(e);
+        }
+        tracing::warn!(
+            "the encoder didn't finish ({e}); saving what {} holds",
+            temp_path.display()
+        );
+        Ok(temp_path.to_path_buf())
+    })
 }
 
 /// Spawns a pump task forwarding video frames to the recording actor.
@@ -331,6 +354,23 @@ mod tests {
 
     fn failed() -> Result<(), AppError> {
         Err(AppError::Encode("ProcessSample: device removed".into()))
+    }
+
+    #[test]
+    fn a_recording_whose_encoder_didnt_finish_is_saved_with_what_it_holds() {
+        let temp = std::path::Path::new("rec.tmp.mp4");
+        let finalize_failed = || Err(AppError::Encode("Finalize: device removed".into()));
+        assert_eq!(
+            what_to_save(finalize_failed(), true, temp).unwrap(),
+            temp.to_path_buf()
+        );
+        // Nothing was written: there is nothing to save.
+        assert!(what_to_save(finalize_failed(), false, temp).is_err());
+        // The usual case: the writer's own file.
+        assert_eq!(
+            what_to_save(Ok(PathBuf::from("done.tmp.mp4")), true, temp).unwrap(),
+            PathBuf::from("done.tmp.mp4")
+        );
     }
 
     /// An encoder or GPU that gives out fails every write from then on. The

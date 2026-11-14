@@ -1,6 +1,6 @@
 use super::App;
 use super::icons::Icon;
-use super::state::{HighlightRetry, HighlightSaveState};
+use super::state::{HighlightRetry, HighlightSaveState, SelfUpdateState};
 use crate::capture::audio::{enumerate_app_audio_sessions, enumerate_audio_devices};
 use crate::config::Config;
 use crate::i18n::Strings;
@@ -327,6 +327,20 @@ impl App {
         self.session.is_recording() || self.session.is_paused()
     }
 
+    /// Whether closing PolyRec now would lose footage: a manual recording
+    /// runs, or a recording or a highlight is still being saved.
+    pub(super) fn has_footage_to_lose(&self) -> bool {
+        self.has_recording()
+            || self.finalizing.handle.is_some()
+            || matches!(self.highlight_save.state, HighlightSaveState::Saving)
+    }
+
+    /// Whether PolyRec is downloading and installing an update, which ends
+    /// with it closing: nothing that would be cut off starts meanwhile.
+    pub(super) fn updating(&self) -> bool {
+        matches!(self.self_update.state, SelfUpdateState::Working)
+    }
+
     pub(super) fn handle_rec_button(&mut self) {
         if self.has_recording() {
             self.stop_recording();
@@ -598,6 +612,11 @@ impl App {
             tracing::warn!("not starting a recording while the last one is still being saved");
             return;
         }
+        // PolyRec closes once the update is in: that would cut it off.
+        if self.updating() {
+            tracing::warn!("not starting a recording while PolyRec updates itself");
+            return;
+        }
         let app_name = crate::session::app_name_from_exe(&source.exe_name);
         let inputs = self.resolve_capture_inputs();
         let track_count = inputs.devices.len() + inputs.app_sources.len();
@@ -669,7 +688,10 @@ impl App {
         // Just the handle, and only with Highlight on: the window's details
         // (its icon read from its exe among them) used to be fetched on every
         // pass, to compare handles.
-        let front = match self.config.highlight.enabled.then(front_window) {
+        // Set aside while PolyRec updates itself (it closes when that's
+        // done), back on if the update fails -- the setting itself stays.
+        let enabled = self.config.highlight.enabled && !self.updating();
+        let front = match enabled.then(front_window) {
             Some(Foreground::Window(hwnd)) => Some(hwnd.0 as usize),
             _ => None,
         };
@@ -683,7 +705,7 @@ impl App {
             .is_none_or(|f| f >= crate::disk_space::MIN_FREE_BYTES);
         let now = Instant::now();
         let view = HighlightView {
-            enabled: self.config.highlight.enabled,
+            enabled,
             recording: self.has_recording(),
             saving,
             following: self.session.highlight_hwnd(),

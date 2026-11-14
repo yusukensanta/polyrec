@@ -83,12 +83,6 @@ pub struct Strings {
     pub update_working_message: &'static str,
     pub update_failed_prefix: &'static str,
     pub update_blocked_while_recording: &'static str,
-    /// Shown (via the same error-banner mechanism) right before the update
-    /// confirm popup, when clicking Update while Highlight buffering (but no
-    /// manual recording) was active -- buffering is stopped and
-    /// `Config::highlight.enabled` cleared to let the update proceed, since
-    /// unlike a manual recording there's no in-progress footage to lose.
-    pub update_highlight_disabled_notice: &'static str,
 
     // Left panel — source list / audio
     pub capture_source_header: &'static str,
@@ -238,6 +232,7 @@ pub struct Strings {
     pub rec_needs_source_tooltip: &'static str,
     /// Hover text on REC while the last recording is still being saved.
     pub rec_wait_for_save_tooltip: &'static str,
+    pub rec_wait_for_update_tooltip: &'static str,
     // Hotkey toasts (see `ui::dashboard::toast`)
     pub toast_recording: &'static str,
     pub toast_stopped: &'static str,
@@ -433,8 +428,7 @@ pub static EN: Strings = Strings {
     update_view_release_notes: "View release notes",
     update_working_message: "Updating… PolyRec will restart shortly.",
     update_failed_prefix: "Update failed: ",
-    update_blocked_while_recording: "Can't update while a recording is in progress — stop it first.",
-    update_highlight_disabled_notice: "Highlight buffering was stopped and disabled to let the update proceed.",
+    update_blocked_while_recording: "Can't update while a recording is in progress or being saved — wait until it's saved first.",
 
     capture_source_header: "CAPTURE SOURCE",
     no_windows_found: "No visible windows found.",
@@ -508,6 +502,7 @@ pub static EN: Strings = Strings {
     hotkey_hint_resume: "{key} resume",
     rec_needs_source_tooltip: "Select a window or display on the left first.",
     rec_wait_for_save_tooltip: "Wait until the last recording has been saved.",
+    rec_wait_for_update_tooltip: "PolyRec is updating and will restart — wait until it has.",
     toast_recording: "● Recording",
     toast_stopped: "⏹ Stopped, saving",
     toast_paused: "⏸ Paused",
@@ -637,8 +632,7 @@ pub static JA: Strings = Strings {
     update_view_release_notes: "リリースノートを見る",
     update_working_message: "更新中…まもなくPolyRecが再起動します。",
     update_failed_prefix: "更新に失敗しました: ",
-    update_blocked_while_recording: "録画中は更新できません。先に停止してください。",
-    update_highlight_disabled_notice: "更新のため、ハイライトバッファを停止して無効にしました。",
+    update_blocked_while_recording: "録画中、または保存中は更新できません。保存が終わってからにしてください。",
 
     capture_source_header: "キャプチャ ソース",
     no_windows_found: "表示中のウィンドウが見つかりません。",
@@ -712,6 +706,7 @@ pub static JA: Strings = Strings {
     hotkey_hint_resume: "{key} 再開",
     rec_needs_source_tooltip: "まず左のリストからウィンドウかディスプレイを選んでください。",
     rec_wait_for_save_tooltip: "前の録画の保存が終わるまでお待ちください。",
+    rec_wait_for_update_tooltip: "PolyRec を更新中です。再起動するまでお待ちください。",
     toast_recording: "● 録画中",
     toast_stopped: "⏹ 停止、保存中",
     toast_paused: "⏸ 一時停止",
