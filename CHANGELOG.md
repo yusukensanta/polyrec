@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.169] - 2026-11-15
+
 ### Changed
 
 - With the overlay on, PolyRec takes less of the graphics card away from the game. To keep the overlay above a fullscreen game, the whole PolyRec window was redrawn 30 times a second for as long as the recording ran. It is now redrawn when the overlay's clock changes, once a second, and the overlay is kept above the game without drawing anything.
