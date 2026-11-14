@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Starting a recording takes less memory and graphics-card work at the moment it starts. While the video encoder was still being created -- a tenth of a second to half a second -- PolyRec already read every captured frame back into memory and queued it, up to 64 frames of 15 MB each at 1440p. It now holds the newest frame until the encoder is ready and records from there; the recording's first instant shows that frame.
+
 ## [v0.5.166] - 2026-11-14
 
 ### Fixed
