@@ -74,7 +74,7 @@ jobs:
 
       # A download of a prebuilt binary: seconds. Without a limit, a stuck
       # one would hold the job until its own 30 minutes ran out.
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         timeout-minutes: 5
         with:
           tool: cargo-audit
