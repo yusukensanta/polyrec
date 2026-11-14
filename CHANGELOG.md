@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.171] - 2026-11-15
+
 ### Added
 
 - **Startup: ON/OFF** in the menu bar: PolyRec starts when you sign in to Windows, hidden in the notification area (tray), so the hotkeys and Highlight are ready without opening it. Uninstalling turns it off.
