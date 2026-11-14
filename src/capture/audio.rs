@@ -489,7 +489,7 @@ pub async fn run_process_loopback_capture(
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK,
-                1_000_000i64,
+                WASAPI_BUFFER_HNS,
                 0i64,
                 &wave_format,
                 None,
@@ -719,12 +719,12 @@ impl DefaultEndpoint {
                 0u32
             };
 
-            // 100 ms buffer; hnsperiodicity = 0 for shared mode
+            // hnsperiodicity = 0 for shared mode
             audio_client
                 .Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
                     stream_flags,
-                    1_000_000i64,
+                    WASAPI_BUFFER_HNS,
                     0i64,
                     mix_format.0,
                     None,
@@ -927,6 +927,43 @@ async fn reopen<S>(
 /// keeps it going as silence.
 const GET_BUFFER_FAILING_FOR: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How much sound Windows keeps for a capture stream to read, as
+/// `IAudioClient::Initialize` takes it (100 ns units): half a second. It is
+/// room, not delay -- packets are read as they come either way -- and what a
+/// capture thread held up for longer than this loses (see `LostSound`). It
+/// was 100 ms, less than the stalls a busy game's machine shows.
+const WASAPI_BUFFER_HNS: i64 = 5_000_000;
+
+/// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` -- WASAPI's "sound was lost
+/// before this packet" flag.
+const AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY: u32 = 1;
+
+/// Counts the times Windows says a stream lost sound: its buffer ran full
+/// because the capture thread didn't read it in time, and what didn't fit is
+/// gone -- the track runs short by that much from there on. Nothing showed
+/// it before; a long recording had a track lose a quarter of a second in
+/// steps this way.
+#[derive(Debug, Default, PartialEq)]
+struct LostSound {
+    packets: u64,
+    times: u64,
+}
+
+impl LostSound {
+    /// Notes a packet's `flags`: whether this is the first time the stream
+    /// lost sound, for the log to say so once as it happens. A stream's
+    /// first packet carries the flag as a matter of course, with nothing
+    /// before it to lose.
+    fn note(&mut self, flags: u32) -> bool {
+        self.packets += 1;
+        if self.packets == 1 || flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY == 0 {
+            return false;
+        }
+        self.times += 1;
+        self.times == 1
+    }
+}
+
 /// `AUDCLNT_BUFFERFLAGS_SILENT` -- WASAPI's "this packet is silence" flag.
 const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 2;
 
@@ -1071,6 +1108,7 @@ async unsafe fn run_capture_loop(
         let bytes_per_sample = bytes_per_frame / channels.max(1) as usize;
 
         let mut diagnostics = PacketDiagnostics::new();
+        let mut lost_sound = LostSound::default();
         // Since when `GetBuffer` has been failing, if it is -- see
         // `GET_BUFFER_FAILING_FOR`.
         let mut failing_since: Option<std::time::Instant> = None;
@@ -1135,6 +1173,11 @@ async unsafe fn run_capture_loop(
                     // is telling "flagged silent" apart from "zeros"); the
                     // recording gets what the flag says it is.
                     diagnostics.record_packet(track_id, flags, &samples);
+                    if lost_sound.note(flags) {
+                        tracing::warn!(
+                            "AudioCapture[{track_id:?}]: Windows says sound was lost before this packet (the capture fell behind); the track runs short by it from here"
+                        );
+                    }
                     apply_silent_flag(&mut samples, flags);
 
                     // Always release buffer first (above), then discard if paused.
@@ -1216,6 +1259,13 @@ async unsafe fn run_capture_loop(
             }
         };
 
+        if lost_sound.times > 0 {
+            tracing::warn!(
+                "AudioCapture[{track_id:?}]: lost sound {} times in {} packets",
+                lost_sound.times,
+                lost_sound.packets
+            );
+        }
         let _ = audio_client.Stop();
         Ok(end)
     }
@@ -2025,6 +2075,24 @@ mod tests {
         let packet = vec![1u8; 12];
         assert_eq!(decode_packet(&packet, 4, 3), None); // 24-bit
         assert_eq!(decode_packet(&packet, 4, 0), None); // degenerate format
+    }
+
+    #[test]
+    fn lost_sound_is_counted_and_said_once_but_not_for_a_streams_first_packet() {
+        let mut lost = LostSound::default();
+        // The first packet carries the flag with nothing lost.
+        assert!(!lost.note(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY));
+        assert!(!lost.note(0));
+        assert!(!lost.note(AUDCLNT_BUFFERFLAGS_SILENT));
+        assert!(lost.note(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY));
+        assert!(!lost.note(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY | AUDCLNT_BUFFERFLAGS_SILENT));
+        assert_eq!(
+            lost,
+            LostSound {
+                packets: 5,
+                times: 2
+            }
+        );
     }
 
     #[test]

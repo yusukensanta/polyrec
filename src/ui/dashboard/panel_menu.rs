@@ -107,21 +107,11 @@ impl App {
                             // other blocked-action paths. Highlight buffering
                             // is different: it's just a rotating background
                             // buffer the user never explicitly started, with
-                            // nothing in-progress to lose, so it's stopped and
-                            // disabled automatically instead of blocking the
-                            // update outright (see
-                            // `update_highlight_disabled_notice`'s doc comment
-                            // for why `config.highlight.enabled` also gets
-                            // cleared, not just the running session).
-                            if self.has_recording() {
+                            // nothing in-progress to lose, so it's set aside
+                            // for the update itself (see `App::updating`).
+                            if self.has_footage_to_lose() {
                                 self.notices.push(s.update_blocked_while_recording);
                             } else {
-                                if self.session.is_highlighting() {
-                                    self.session.stop_highlight_buffering(true);
-                                    self.config.highlight.enabled = false;
-                                    self.save_config_or_report(s);
-                                    self.notices.push(s.update_highlight_disabled_notice);
-                                }
                                 self.self_update.state = SelfUpdateState::Confirming(update);
                             }
                         }

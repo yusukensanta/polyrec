@@ -52,6 +52,7 @@ pub fn create(path: &Path) -> std::result::Result<IMFMediaSink, AppError> {
             file: Some(file),
             held: Vec::new(),
             writing: None,
+            write_failure_logged: false,
             shut_down: false,
         })),
     }
@@ -71,6 +72,8 @@ struct Shared {
     /// Samples that came before the file's header could be written.
     held: Vec<(usize, Sample)>,
     writing: Option<Writing>,
+    /// Whether a failed write has been logged -- see `push`.
+    write_failure_logged: bool,
     shut_down: bool,
 }
 
@@ -114,7 +117,15 @@ impl Shared {
             sample.data =
                 nal::to_length_prefixed(writing.codec, &sample.data, &writing.parameter_sets);
         }
-        writing.muxer.push(index, sample).map_err(failed)
+        writing.muxer.push(index, sample).map_err(|e| {
+            // Media Foundation hands the sink writer's caller its own error
+            // for this, not the reason: without this line a full or
+            // unplugged drive looked like an encoder failure in the log.
+            if !std::mem::replace(&mut self.write_failure_logged, true) {
+                tracing::error!("writing {} failed: {e}", self.path.display());
+            }
+            failed(e)
+        })
     }
 
     /// Writes the file's header, once the video's configuration is known:

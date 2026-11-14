@@ -279,9 +279,8 @@ impl App {
     pub(super) fn render_self_update_popup(&mut self, ctx: &egui::Context, s: &'static Strings) {
         // Both this and the error modal are CENTER_CENTER-anchored windows --
         // showing both at once would draw them stacked on top of each other,
-        // so this waits until an error is dismissed. Notices (e.g.
-        // `update_highlight_disabled_notice`) don't block it: they show in
-        // the Status panel's strip alongside this popup.
+        // so this waits until an error is dismissed. Notices don't block
+        // it: they show in the Status panel's strip alongside this popup.
         if self.error_message.is_some() {
             return;
         }
@@ -322,6 +321,12 @@ impl App {
                     }
                 });
                 match action {
+                    // A recording may have started (the hotkey) or stopped
+                    // (now being saved) since the button was clicked.
+                    Some(Choice::Now) if self.has_footage_to_lose() => {
+                        self.notices.push(s.update_blocked_while_recording);
+                        self.self_update.state = SelfUpdateState::Idle;
+                    }
                     Some(Choice::Now) => {
                         let version = update.version;
                         self.self_update.handle = Some(tokio::spawn(

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A recording whose encoder stopped working part-way is saved right away, with everything recorded up to then. It was reported as failed and stayed hidden under a temporary name until PolyRec was next started, which then recovered it.
+- Checking for an update no longer turns Highlight off. Clicking the update button switched Highlight off in the settings before asking whether to update, so it stayed off after **Not Now**, after a failed update, and after the update itself. Highlight now only stops while the update is being installed, and the setting is left alone.
+- An update can no longer cut a recording off. Whether one is running was only checked when the update button was clicked: a recording started with the hotkey after that was lost when PolyRec closed to update. PolyRec now checks again at **Update Now** -- also for a recording or highlight still being saved -- and starts no recording while it updates.
+- A sound source is less likely to lose sound when the PC is busy: Windows now keeps half a second of it for PolyRec to pick up, up from a tenth. If sound is lost all the same, `polyrec.log` says so, and how many times.
+- `polyrec.log` says why writing a recording failed (a full or unplugged drive, for example). It showed only an error code that reads like an encoder failure.
+
 ## [v0.5.167] - 2026-11-14
 
 ### Changed
