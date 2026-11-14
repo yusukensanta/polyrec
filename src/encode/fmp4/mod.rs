@@ -773,9 +773,10 @@ pub(crate) mod tests {
             bytes.len()
         );
         // No slower than the remux -- or else too quick to notice: on a slow
-        // virtual disk (CI's) a flush alone can take tens of milliseconds.
+        // virtual disk (CI's) the two flushes alone took 106 ms once, where
+        // the remux, which flushes nothing, took 11 ms.
         assert!(
-            in_place <= remux.max(Duration::from_millis(50)),
+            in_place <= remux.max(Duration::from_millis(500)),
             "in place {in_place:?}, remux {remux:?}"
         );
     }
