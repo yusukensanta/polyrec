@@ -7,6 +7,9 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::Interface;
 
+/// The highest priority `IDXGIDevice::SetGPUThreadPriority` takes.
+const HIGHEST_GPU_PRIORITY: i32 = 7;
+
 pub struct D3dDevice {
     pub d3d_device: ID3D11Device,
     pub d3d_context: ID3D11DeviceContext,
@@ -30,10 +33,27 @@ impl D3dDevice {
             )
             .capture_ctx("D3D11CreateDevice failed")?;
         }
-        Ok(Self {
+        let device = Self {
             d3d_device: d3d_device.unwrap(),
             d3d_context: d3d_context.unwrap(),
-        })
+        };
+        if let Err(e) = device.put_ahead_on_the_gpu() {
+            tracing::warn!("the capture's GPU work keeps the usual priority: {e}");
+        }
+        Ok(device)
+    }
+
+    /// Asks the GPU to run this device's work ahead of other programs'. A
+    /// capture's work is one small copy a frame, but behind a game that
+    /// keeps the GPU full it otherwise waits its turn -- for as long as the
+    /// game's own frame takes, and a readback waits with it (see
+    /// `capture::video`'s `read_back`).
+    fn put_ahead_on_the_gpu(&self) -> Result<(), AppError> {
+        unsafe {
+            self.dxgi_device()?
+                .SetGPUThreadPriority(HIGHEST_GPU_PRIORITY)
+                .capture_ctx("SetGPUThreadPriority")
+        }
     }
 
     pub fn dxgi_device(&self) -> Result<IDXGIDevice, AppError> {
@@ -51,5 +71,12 @@ mod tests {
     fn d3d_device_creates_successfully() {
         let dev = D3dDevice::new();
         assert!(dev.is_ok(), "D3D11 device creation failed: {:?}", dev.err());
+    }
+
+    #[test]
+    fn a_new_device_is_put_ahead_on_the_gpu() {
+        let dev = D3dDevice::new().unwrap();
+        let priority = unsafe { dev.dxgi_device().unwrap().GetGPUThreadPriority() }.unwrap();
+        assert_eq!(priority, HIGHEST_GPU_PRIORITY);
     }
 }
