@@ -122,7 +122,7 @@ polyrec/
 │   │   └── device.rs            # D3D11 device creation
 │   ├── encode/
 │   │   ├── mf.rs                # MfSession: RAII MFStartup/MFShutdown
-│   │   ├── writer.rs            # IMFSinkWriter setup (EncoderParams), media types
+│   │   ├── writer.rs            # IMFSinkWriter setup (EncoderParams); writer/ holds its media types, frame buffers and encoder probe
 │   │   ├── actor.rs             # Recording actor + capture->encoder pump tasks
 │   │   ├── remux.rs             # Post-recording track-selective / mixing export
 │   │   └── highlight_export.rs  # Concatenate + trim Highlight segments into one file
@@ -159,7 +159,9 @@ polyrec/
 
 ### Adding UI Text
 
-All static UI strings live in `src/i18n.rs`'s `Strings` struct — add the field there (both the `EN` and `JA` instances; a missing field on either is a compile error) rather than hardcoding a string literal under `src/ui/dashboard/`.
+All static UI strings live in `src/i18n.rs`'s `strings!` table — add an entry there (its name, then the English and the Japanese text; leaving one out is a compile error) rather than hardcoding a string literal under `src/ui/dashboard/`. The same `{placeholder}`s must appear in both languages; a test checks it.
+
+A large file's unit tests live beside it in `<file>/tests.rs` (`src/config.rs` → `src/config/tests.rs`), declared with `#[cfg(test)] mod tests;`.
 
 ### Debugging
 

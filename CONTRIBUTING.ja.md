@@ -122,7 +122,7 @@ polyrec/
 │   │   └── device.rs            # D3D11 デバイスの作成
 │   ├── encode/
 │   │   ├── mf.rs                # MfSession: RAII による MFStartup/MFShutdown
-│   │   ├── writer.rs            # IMFSinkWriter のセットアップ（EncoderParams）、メディアタイプ
+│   │   ├── writer.rs            # IMFSinkWriter のセットアップ（EncoderParams）。writer/ にメディアタイプ、フレームバッファー、エンコーダーの確認
 │   │   ├── actor.rs             # 録画アクター + キャプチャ->エンコーダーのポンプタスク
 │   │   ├── remux.rs             # 録画後のトラック選択 / ミックスによるエクスポート
 │   │   └── highlight_export.rs  # ハイライトのセグメントを連結 + トリムして1つのファイルにする
@@ -159,7 +159,9 @@ polyrec/
 
 ### UI テキストを追加する
 
-静的な UI 文字列はすべて `src/i18n.rs` の `Strings` 構造体にあります。`src/ui/dashboard/` 以下に文字列リテラルをハードコードするのではなく、そこにフィールドを追加してください（`EN` と `JA` の両方のインスタンスに追加します。どちらかでフィールドが欠けているとコンパイルエラーになります）。
+静的な UI 文字列はすべて `src/i18n.rs` の `strings!` テーブルにあります。`src/ui/dashboard/` 以下に文字列リテラルをハードコードするのではなく、そこに項目を追加してください（名前、英語、日本語の順に書きます。どれかが欠けているとコンパイルエラーになります）。`{placeholder}` は両方の言語で同じものを使ってください。テストで確認しています。
+
+大きなファイルの単体テストは、その隣の `<file>/tests.rs` にあります（`src/config.rs` → `src/config/tests.rs`）。`#[cfg(test)] mod tests;` で宣言します。
 
 ### デバッグ
 
