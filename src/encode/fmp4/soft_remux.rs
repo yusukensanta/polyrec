@@ -1459,8 +1459,14 @@ pub(crate) mod tests {
     /// tracks, 2.4 million samples -- in 1-byte samples, finished in place
     /// in seconds whichever way the index comes: from the muxer at Stop, or
     /// walked from the file at the next start. (The remux took 376 s.)
+    ///
+    /// The limit is wide on purpose: most of the time is the flushes to
+    /// disk, and a CI runner's disk took 2.1 s where this machine takes a
+    /// fraction of a second. What it has to catch is work that grows with
+    /// the recording faster than its length, which takes minutes.
     #[test]
     fn three_hours_finish_in_seconds() {
+        const LIMIT: Duration = Duration::from_secs(20);
         use std::io::BufWriter;
         use std::time::{Duration, Instant};
         const FRAMES: u64 = 712_800;
@@ -1528,11 +1534,8 @@ pub(crate) mod tests {
         );
         assert_eq!(audio, 556_875, "3.3 h of AAC frames");
         assert_eq!(muxed.index.sample_count() as u64, FRAMES + 3 * audio);
-        assert!(at_stop < Duration::from_secs(2), "at Stop: {at_stop:?}");
-        assert!(
-            at_start < Duration::from_secs(2),
-            "at the next start: {at_start:?}"
-        );
+        assert!(at_stop < LIMIT, "at Stop: {at_stop:?}");
+        assert!(at_start < LIMIT, "at the next start: {at_start:?}");
         assert!(
             finished == std::fs::read(&copy).unwrap(),
             "the same file either way"
