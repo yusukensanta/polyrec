@@ -13,9 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Recovers the recordings in `polyrec_dir` cut off before `before` -- this
 /// start: one begun since is being written. The files they're saved as.
-/// A leftover that can't be read (one from before recordings were written
-/// fragmented, cut off with nothing readable) stays as it is, as does one
-/// still open: another copy of PolyRec recording into it.
+/// A leftover that isn't one of today's recordings (written by a PolyRec
+/// before 0.5.162, or cut off with nothing readable) stays as it is, as
+/// does one still open: another copy of PolyRec recording into it.
 pub fn recover_cut_off_recordings(polyrec_dir: &Path, before: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(polyrec_dir) else {
         return Vec::new();
@@ -152,13 +152,9 @@ fn cut_off_recording(name: &OsStr) -> Option<(String, u128)> {
 
 fn recover(path: &Path, app: &str, started: u128, dir: &Path) -> Result<PathBuf, AppError> {
     let started = UNIX_EPOCH + Duration::from_millis(started as u64);
-    crate::encode::fmp4::finish(
-        path,
-        || Ok(reserve_recovered_recording_path(app, started.into(), dir)?),
-        // Asked only of a file written before recordings were finished in
-        // place: whether it reads at all, and how many audio tracks it has.
-        || crate::encode::remux::count_audio_tracks(path),
-    )
+    crate::encode::fmp4::finish(path, || {
+        Ok(reserve_recovered_recording_path(app, started.into(), dir)?)
+    })
 }
 
 #[cfg(test)]

@@ -133,6 +133,22 @@ pub fn fragment(sequence: u32, runs: &[TrackRun]) -> Fragment {
     }
 }
 
+/// A `tfhd`'s flags: default-base-is-moof, so a run's data offset counts
+/// from its `moof`'s first byte. `read` takes no other.
+pub(super) const TFHD_FLAGS: u32 = 0x02_0000;
+
+/// A `trun`'s flags: a data offset, and each sample's duration, size and
+/// flags. `read` takes no other.
+pub(super) const TRUN_FLAGS: u32 = 0x0001 | 0x0100 | 0x0200 | 0x0400;
+
+/// In a sample's flags: `sample_is_non_sync_sample` -- not a keyframe.
+pub(super) const SAMPLE_IS_NON_SYNC: u32 = 0x0001_0000;
+
+/// A sample's flags: `sample_depends_on` 2 (nothing) for a keyframe, or 1
+/// with `SAMPLE_IS_NON_SYNC`.
+const KEYFRAME_SAMPLE: u32 = 0x0200_0000;
+const DEPENDENT_SAMPLE: u32 = 0x0100_0000 | SAMPLE_IS_NON_SYNC;
+
 /// `moof` whose runs' data starts `data_offsets` bytes from its first byte.
 fn moof(sequence: u32, runs: &[TrackRun], data_offsets: &[u32]) -> Vec<u8> {
     boxed(b"moof", |o| {
@@ -141,24 +157,19 @@ fn moof(sequence: u32, runs: &[TrackRun], data_offsets: &[u32]) -> Vec<u8> {
         }));
         for (run, &data_offset) in runs.iter().zip(data_offsets) {
             o.bytes(&boxed(b"traf", |o| {
-                const DEFAULT_BASE_IS_MOOF: u32 = 0x02_0000;
-                o.bytes(&full_box(b"tfhd", 0, DEFAULT_BASE_IS_MOOF, |o| {
+                o.bytes(&full_box(b"tfhd", 0, TFHD_FLAGS, |o| {
                     o.u32(run.track_id);
                 }));
                 o.bytes(&full_box(b"tfdt", 1, 0, |o| {
                     o.u64(run.base_decode_time);
                 }));
-                // data offset, and each sample's duration, size and flags
-                const TRUN_FLAGS: u32 = 0x0001 | 0x0100 | 0x0200 | 0x0400;
                 o.bytes(&full_box(b"trun", 0, TRUN_FLAGS, |o| {
                     o.u32(run.samples.len() as u32).u32(data_offset);
                     for sample in &run.samples {
-                        // sample_depends_on 2 (nothing), or 1 plus
-                        // sample_is_non_sync_sample.
                         let flags = if sample.keyframe {
-                            0x0200_0000
+                            KEYFRAME_SAMPLE
                         } else {
-                            0x0101_0000
+                            DEPENDENT_SAMPLE
                         };
                         o.u32(sample.duration).u32(sample.size).u32(flags);
                     }

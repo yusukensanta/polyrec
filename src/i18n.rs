@@ -50,317 +50,684 @@ impl Lang {
     }
 }
 
-pub struct Strings {
+/// Every string of the UI, once: its name, then the English and the
+/// Japanese text. Gives `Strings` (a field per name), `EN` and `JA`. A
+/// string used to be written in three places -- the field, and its text in
+/// each language two hundred lines apart -- which is how a translation
+/// drifts from its original.
+macro_rules! strings {
+    ($( $(#[$doc:meta])* $name:ident: $en:literal, $ja:literal; )*) => {
+        pub struct Strings {
+            $( $(#[$doc])* pub $name: &'static str, )*
+        }
+
+        pub static EN: Strings = Strings {
+            $( $name: $en, )*
+        };
+
+        pub static JA: Strings = Strings {
+            $( $name: $ja, )*
+        };
+
+        /// Every string as (name, English, Japanese), for the tests that
+        /// look at all of them.
+        #[cfg(test)]
+        const ALL: &[(&str, &str, &str)] = &[
+            $( (stringify!($name), $en, $ja), )*
+        ];
+    };
+}
+
+strings! {
     // Menu bar
-    pub overlay_on: &'static str,
-    pub overlay_off: &'static str,
-    pub overlay_toggle_tooltip: &'static str,
-    pub border_on: &'static str,
-    pub border_off: &'static str,
-    pub border_toggle_tooltip: &'static str,
+    overlay_on:
+        "Overlay: ON",
+        "オーバーレイ: オン";
+    overlay_off:
+        "Overlay: OFF",
+        "オーバーレイ: オフ";
+    overlay_toggle_tooltip:
+        "Show/hide the recording HUD overlay",
+        "録画中のHUDオーバーレイの表示/非表示を切り替え";
+    border_on:
+        "Border: ON",
+        "枠線: オン";
+    border_off:
+        "Border: OFF",
+        "枠線: オフ";
+    border_toggle_tooltip:
+        "Show/hide Windows' colored capture border around the recorded window/monitor",
+        "録画中のウィンドウ/モニターに表示されるWindowsのキャプチャ枠線の表示/非表示を切り替え";
     /// Menu-bar toggle for `Config::close_to_tray`.
-    pub close_quits: &'static str,
-    pub close_hides: &'static str,
-    pub close_toggle_tooltip: &'static str,
+    close_quits:
+        "Close: Quit",
+        "閉じる: 終了";
+    close_hides:
+        "Close: To tray",
+        "閉じる: トレイへ";
+    close_toggle_tooltip:
+        "What the window's close button does: quit PolyRec, or hide it in the notification area (tray) so the hotkeys keep working. \"Quit PolyRec\" in the tray menu quits either way.",
+        "ウィンドウの閉じるボタンの動作: PolyRec を終了するか、通知領域（トレイ）に隠してホットキーを使えるままにします。トレイメニューの「PolyRec を終了」ではどちらの場合も終了します。";
     /// Menu-bar toggle for starting with Windows (`crate::autostart`).
-    pub startup_on: &'static str,
-    pub startup_off: &'static str,
-    pub startup_toggle_tooltip: &'static str,
-    pub startup_failed_prefix: &'static str,
+    startup_on:
+        "Startup: ON",
+        "自動起動: オン";
+    startup_off:
+        "Startup: OFF",
+        "自動起動: オフ";
+    startup_toggle_tooltip:
+        "Start PolyRec when you sign in to Windows, hidden in the notification area (tray), so the hotkeys and Highlight are ready without opening it.",
+        "Windows にサインインしたときに PolyRec を通知領域（トレイ）に隠した状態で起動します。開かなくてもホットキーとハイライトが使えます。";
+    startup_failed_prefix:
+        "Couldn't change whether PolyRec starts with Windows: ",
+        "Windows と同時に起動する設定を変更できませんでした: ";
     /// Quality popup checkbox for `Config::record_cursor`.
-    pub record_cursor_label: &'static str,
-    pub record_cursor_tooltip: &'static str,
+    record_cursor_label:
+        "Record the mouse pointer",
+        "マウスポインターを録画する";
+    record_cursor_tooltip:
+        "Whether the mouse pointer is in recordings and highlights. Takes effect from the next recording.",
+        "録画とハイライトにマウスポインターを入れるかどうか。次の録画から反映されます。";
     /// Toast when the close button has hidden PolyRec in the tray.
-    pub toast_still_in_tray: &'static str,
-    pub language_toggle_tooltip: &'static str,
-    pub update_available_suffix: &'static str, // used as "{version} {suffix}", after the update icon
-    pub update_tooltip: &'static str,
+    toast_still_in_tray:
+        "PolyRec is still running in the tray",
+        "PolyRec はトレイで動作しています";
+    language_toggle_tooltip:
+        "Switch display language",
+        "表示言語を切り替え";
+    // used as "{version} {suffix}", after the update icon
+    update_available_suffix:
+        "available",
+        "が利用可能";
+    update_tooltip:
+        "Click to update now",
+        "クリックして今すぐ更新";
     /// "{prefix}{error}" -- shown in the error banner alongside the existing
     /// tracing::error! log whenever Config::save() fails.
-    pub config_save_failed_prefix: &'static str,
+    config_save_failed_prefix:
+        "Failed to save settings: ",
+        "設定の保存に失敗しました: ";
 
     // Self-update confirm/progress popup
-    pub update_confirm_title: &'static str,
+    update_confirm_title:
+        "Update PolyRec",
+        "PolyRecを更新";
     /// "{prefix}{version}{suffix}" -- the version is inserted between these.
-    pub update_confirm_prefix: &'static str,
-    pub update_confirm_suffix: &'static str,
-    pub update_confirm_uac_note: &'static str,
-    pub update_now_button: &'static str,
-    pub update_not_now_button: &'static str,
-    pub update_view_release_notes: &'static str,
-    pub update_working_message: &'static str,
-    pub update_failed_prefix: &'static str,
-    pub update_blocked_while_recording: &'static str,
+    update_confirm_prefix:
+        "Update to ",
+        "";
+    update_confirm_suffix:
+        " now? PolyRec will close and restart.",
+        " に今すぐ更新しますか？PolyRecは一度終了して再起動します。";
+    update_confirm_uac_note:
+        "Windows may show a permission prompt during the update.",
+        "更新中にWindowsの権限確認ダイアログが表示される場合があります。";
+    update_now_button:
+        "Update Now",
+        "今すぐ更新";
+    update_not_now_button:
+        "Not Now",
+        "後で";
+    update_view_release_notes:
+        "View release notes",
+        "リリースノートを見る";
+    update_working_message:
+        "Updating… PolyRec will restart shortly.",
+        "更新中…まもなくPolyRecが再起動します。";
+    update_failed_prefix:
+        "Update failed: ",
+        "更新に失敗しました: ";
+    update_blocked_while_recording:
+        "Can't update while a recording is in progress or being saved — wait until it's saved first.",
+        "録画中、または保存中は更新できません。保存が終わってからにしてください。";
 
     // Left panel — source list / audio
-    pub capture_source_header: &'static str,
-    pub no_windows_found: &'static str,
-    pub source_filter_placeholder: &'static str,
+    capture_source_header:
+        "CAPTURE SOURCE",
+        "キャプチャ ソース";
+    no_windows_found:
+        "No visible windows found.",
+        "表示中のウィンドウが見つかりません。";
+    source_filter_placeholder:
+        "Search windows or apps...",
+        "ウィンドウやアプリを検索...";
     /// Shown when the search box's filter matches nothing, distinct from
     /// `no_windows_found` (no capturable windows exist at all).
-    pub no_matching_windows: &'static str,
+    no_matching_windows:
+        "No windows match your search.",
+        "検索に一致するウィンドウがありません。";
     /// Header for the physical-device list (Speakers/Microphone) inside the
     /// Audio popup, alongside `applications_header`.
-    pub system_audio_header: &'static str,
-    pub no_audio_devices: &'static str,
+    system_audio_header:
+        "SYSTEM",
+        "システム";
+    no_audio_devices:
+        "No audio devices found.",
+        "オーディオデバイスが見つかりません。";
     /// Header for the per-app audio source list (Discord, Spotify, etc.)
     /// inside the Audio popup. See `types::AppAudioSource`.
-    pub applications_header: &'static str,
-    pub no_app_audio_sources: &'static str,
-    pub app_audio_only_label: &'static str,
-    pub tooltip_no_loopback_device: &'static str,
-    pub tooltip_check_loopback_first: &'static str,
-    pub tooltip_app_audio_only: &'static str,
+    applications_header:
+        "APPLICATIONS",
+        "アプリケーション";
+    no_app_audio_sources:
+        "No apps added yet — use + Add app below.",
+        "アプリはまだ追加されていません。下の「+ アプリを追加」から追加してください。";
+    app_audio_only_label:
+        "App audio only (exclude other system sounds)",
+        "このアプリの音声のみ（他のシステム音を除外）";
+    tooltip_no_loopback_device:
+        "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present).",
+        "システム再生デバイスが見つかりません。ミュートは問題ありませんが、デバイス自体は存在している必要があります。";
+    tooltip_check_loopback_first:
+        "Check a system audio (speakers) box above first.",
+        "まず上のシステム音声（スピーカー）にチェックを入れてください。";
+    tooltip_app_audio_only:
+        "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working.",
+        "デスクトップ全体の音声ではなく、Windows の Process Loopback API を使って選択したウィンドウ自体の音声のみを録音します。有効な再生デバイスが必要です（ミュートしていても動作します）。";
     /// Shown instead of `tooltip_app_audio_only` when the selected capture
     /// source is a `CaptureKind::Monitor` entry (or none is selected) --
     /// there's no owning process to scope loopback to in that case.
-    pub tooltip_app_audio_only_needs_window: &'static str,
+    tooltip_app_audio_only_needs_window:
+        "Select a specific window (not a monitor) as the capture source to use this — an entire-screen recording has no single app to scope audio to.",
+        "この機能を使うには、モニターではなく特定のウィンドウをキャプチャソースとして選択してください。画面全体の録画には音声を絞り込む対象のアプリがありません。";
     /// "+ Add app" button under the Applications list -- the only way an
     /// app gets into that list at all (it doesn't auto-populate from
     /// what's currently making sound, see
     /// `actions::build_app_audio_sources`'s doc comment). Opens the in-app
     /// search picker below, not a file browser directly -- see
     /// `add_app_search_placeholder`.
-    pub add_app_button: &'static str,
+    add_app_button:
+        "+ Add app",
+        "+ アプリを追加";
     /// Hover text on a checked Applications checkbox, explaining that
     /// unchecking it un-registers (removes) the app -- the checkbox is the
     /// only pin/unpin control, there's no separate remove button.
-    pub remove_registered_app_tooltip: &'static str,
+    remove_registered_app_tooltip:
+        "Uncheck to remove this app — while it isn't running there's nothing to record yet, but it'll start automatically the moment it launches.",
+        "チェックを外すとこのアプリを削除します。実行されていない間は録音対象がありませんが、起動すると自動的に録音が始まります。";
     /// Placeholder text for the add-app picker's search box, which searches
     /// both currently open windows and installed-but-not-running apps
     /// (resolved from Start Menu shortcuts) -- an app doesn't need to be
     /// open, let alone making sound, to be found and pinned. Picking a
     /// result needs no file browsing. Same convention as
     /// `source_filter_placeholder`.
-    pub add_app_search_placeholder: &'static str,
+    add_app_search_placeholder:
+        "Search apps…",
+        "アプリを検索…";
     /// Shown when the add-app search box's filter matches neither an open
     /// window nor an installed app -- distinct from "nothing found at all"
     /// (handled by hiding the list instead).
-    pub add_app_no_matches: &'static str,
+    add_app_no_matches:
+        "No apps match.",
+        "一致するアプリがありません。";
     /// Shown instead of the search results when neither source has anything
     /// to search through at all (no windows open, no Start Menu shortcuts
     /// resolvable) -- a vanishingly rare edge case.
-    pub add_app_none_running: &'static str,
+    add_app_none_running:
+        "No apps found.",
+        "アプリが見つかりません。";
     /// Fallback button in the add-app picker for an app that isn't
     /// currently running (so it can't be found by searching live
     /// sessions) -- opens the native file browser instead, same as
     /// `add_app_button` used to directly.
-    pub add_app_browse_button: &'static str,
+    add_app_browse_button:
+        "Browse for .exe instead…",
+        "代わりに .exe を参照…";
     /// Shown in the add-app picker while `enumerate_installed_apps`'s
     /// background scan is still running -- open-window candidates already
     /// show above this, so it's specifically flagging that more
     /// (installed-only) results may still arrive, not that nothing's found
     /// yet.
-    pub add_app_scanning: &'static str,
+    add_app_scanning:
+        "Still searching installed apps…",
+        "インストール済みアプリを検索中…";
     /// Small tag next to a picker candidate that's currently running --
     /// distinguishes it from an installed-but-not-running one, which starts
     /// capturing only once launched.
-    pub add_app_running_tag: &'static str,
+    add_app_running_tag:
+        "● Running",
+        "● 実行中";
 
     // Center panel — status
-    pub status_header: &'static str,
-    pub state_paused: &'static str,
-    pub state_recording: &'static str,
-    pub tracks_word: &'static str, // used as "{n} {tracks_word}"
+    status_header:
+        "STATUS",
+        "ステータス";
+    state_paused:
+        "PAUSED",
+        "一時停止中";
+    state_recording:
+        "RECORDING",
+        "録画中";
+    // used as "{n} {tracks_word}"
+    tracks_word:
+        "tracks",
+        "トラック";
     /// Hover text on the recording stats line (tracks · fps · size).
-    pub recording_stats_tooltip: &'static str,
+    recording_stats_tooltip:
+        "Audio tracks, the video's frame rate, and the file size so far. The video always runs at exactly this frame rate: when no new picture comes in time for a frame, the one before is repeated.",
+        "音声トラック数、動画のフレームレート、ここまでのファイルサイズです。動画は常にこのフレームレートちょうどで記録されます。フレームに間に合う新しい画像がないときは、直前の画像を繰り返します。";
     /// Added to `recording_stats_tooltip` once a recording has run a second:
     /// `{new}` of the video's `{fps}` frames a second were new pictures.
-    pub recording_new_pictures_template: &'static str,
-    pub saving_recording: &'static str,
-    pub select_source_prompt: &'static str,
+    recording_new_pictures_template:
+        "So far, {new} of its {fps} frames a second were new pictures; the rest repeat the one before. A still screen, or a game running below {fps} fps, gives fewer.",
+        "ここまで、毎秒 {fps} フレームのうち {new} フレームが新しい画像で、残りは直前の画像の繰り返しです。静止した画面や、ゲームが {fps} fps を下回っているときは少なくなります。";
+    saving_recording:
+        "Saving recording…",
+        "録画を保存中…";
+    select_source_prompt:
+        "Select a source and press REC to start.",
+        "ソースを選択して「録画」を押すと開始します。";
     /// In the selected source's card when it has no picture to show.
-    pub preview_unavailable: &'static str,
+    preview_unavailable:
+        "No preview while it's minimized",
+        "最小化中はプレビューできません";
     // Only shown while Idle -- Recording/Paused already show their state via
     // the pulsing dot + colored label at the top of the center panel.
-    pub state_prefix: &'static str, // "State: " — followed by session_state_idle
-    pub session_state_idle: &'static str,
+    // "State: " — followed by session_state_idle
+    state_prefix:
+        "State: ",
+        "状態: ";
+    session_state_idle:
+        "Idle",
+        "待機中";
 
     // Center panel — output / buttons
-    pub output_header: &'static str,
-    pub quality_button: &'static str,
-    pub quality_tooltip: &'static str,
-    pub hotkeys_button: &'static str,
-    pub hotkeys_tooltip: &'static str,
-    pub audio_button: &'static str,
-    pub audio_tooltip: &'static str,
+    output_header:
+        "OUTPUT",
+        "出力";
+    quality_button:
+        "Quality",
+        "画質";
+    quality_tooltip:
+        "FPS, codec, resolution, and bitrate for the next recording",
+        "次回の録画の FPS・コーデック・解像度・ビットレート";
+    hotkeys_button:
+        "Hotkeys",
+        "ショートカット";
+    hotkeys_tooltip:
+        "Rebind the start/stop, pause, overlay-toggle, and Save Highlight shortcuts",
+        "開始/停止・一時停止・オーバーレイ切替・ハイライト保存のショートカットを再設定";
+    audio_button:
+        "Audio",
+        "オーディオ";
+    audio_tooltip:
+        "Which audio devices and apps to record, and whether to scope to just the selected window's own audio",
+        "録音するオーディオデバイスとアプリ、選択したウィンドウ自体の音声のみに絞るかどうか";
     /// Shown under the settings button row so the current audio selection
     /// is readable without opening the popup -- otherwise moving AUDIO out
     /// of the always-visible source panel would hide that state entirely.
-    pub no_audio_selected: &'static str,
+    no_audio_selected:
+        "No audio selected",
+        "オーディオ未選択";
     /// "{n} {audio_sources_word}" -- same pattern as `tracks_word`.
-    pub audio_sources_word: &'static str,
-    pub browse_button: &'static str,
-    pub open_output_dir_button: &'static str,
-    pub open_output_dir_tooltip: &'static str,
-    pub recent_header: &'static str,
-    pub recent_play_tooltip: &'static str,
-    pub recent_show_tooltip: &'static str,
+    audio_sources_word:
+        "selected",
+        "選択中";
+    browse_button:
+        "Browse…",
+        "参照…";
+    open_output_dir_button:
+        "Open",
+        "開く";
+    open_output_dir_tooltip:
+        "Open the folder recordings are saved in",
+        "録画の保存先フォルダーを開く";
+    recent_header:
+        "RECENT",
+        "最近の録画";
+    recent_play_tooltip:
+        "Play",
+        "再生";
+    recent_show_tooltip:
+        "Show in folder",
+        "フォルダーで表示";
     /// Under the output folder (and on a disabled REC) when its drive or
     /// network share isn't there.
-    pub output_dir_unavailable: &'static str,
+    output_dir_unavailable:
+        "This drive or network share isn't available, so recordings can't be saved here.",
+        "このドライブまたはネットワーク共有が見つからないため、ここには録画を保存できません。";
     /// Under the output folder (and on a disabled REC) when the path leads
     /// through a file.
-    pub output_dir_not_a_folder: &'static str,
+    output_dir_not_a_folder:
+        "Part of this path is a file, not a folder, so recordings can't be saved here.",
+        "このパスの途中がフォルダーではなくファイルのため、ここには録画を保存できません。";
     /// "{free_space_prefix}{formatted bytes}" -- see format_bytes in dashboard/widgets.rs.
-    pub free_space_prefix: &'static str,
+    free_space_prefix:
+        "Free: ",
+        "空き容量: ";
     /// How long the free space lasts at the current quality, after the free
     /// space: "{h}" hours and "{m}" minutes.
-    pub time_left_hours_template: &'static str,
-    pub time_left_hours_minutes_template: &'static str,
-    pub time_left_minutes_template: &'static str,
-    pub time_left_under_a_minute: &'static str,
+    time_left_hours_template:
+        "about {h} h of recording",
+        "録画 約{h}時間分";
+    time_left_hours_minutes_template:
+        "about {h} h {m} min of recording",
+        "録画 約{h}時間{m}分";
+    time_left_minutes_template:
+        "about {m} min of recording",
+        "録画 約{m}分";
+    time_left_under_a_minute:
+        "under a minute of recording",
+        "録画 1分未満";
     /// Toast while recording when the drive is nearly full; "{left}" is one
     /// of the time-left texts.
-    pub toast_low_space_template: &'static str,
+    toast_low_space_template:
+        "Recording drive almost full: {left} left",
+        "録画先の空き容量が残りわずかです（{left}）";
     /// Notice (and toast) when a microphone has given no sound at all 10 s
     /// into a recording; "{mics}" lists them.
-    pub notice_silent_microphones_template: &'static str,
-    pub resume_button: &'static str,
-    pub stop_button: &'static str,
-    pub rec_button: &'static str,
-    pub pause_tooltip: &'static str,
+    notice_silent_microphones_template:
+        "No sound from {mics} since recording started. Check it isn't muted.",
+        "{mics} から録画開始後まったく音が入っていません。ミュートになっていないか確認してください。";
+    resume_button:
+        "RESUME",
+        "再開";
+    stop_button:
+        "STOP",
+        "停止";
+    rec_button:
+        "REC",
+        "録画";
+    pause_tooltip:
+        "Pause",
+        "一時停止";
     /// Checkbox above the output-dir row -- checked (default) names each
     /// finished recording/Highlight save after the recorded process, same as
     /// before this setting existed; unchecked reveals a text field for
     /// `custom_recording_prefix` instead (see `recording_naming::RecordingNaming`).
-    pub use_process_name_label: &'static str,
-    pub use_process_name_tooltip: &'static str,
+    use_process_name_label:
+        "Use process name automatically",
+        "プロセス名を自動的に使用";
+    use_process_name_tooltip:
+        "Names each finished recording after the app being recorded (e.g. \"vivaldi_2026-09-19-14-30-00.mp4\"). Uncheck to use your own prefix instead.",
+        "録画対象のアプリ名でファイル名を付けます（例:「vivaldi_2026-09-19-14-30-00.mp4」）。チェックを外すと、独自の接頭辞を使用できます。";
     /// Hint text for the custom-prefix field, shown only while
     /// `use_process_name_label`'s checkbox is unchecked.
-    pub custom_recording_prefix_placeholder: &'static str,
+    custom_recording_prefix_placeholder:
+        "Recording prefix (e.g. MyStream) — saved as MyStream_001.mp4, MyStream_002.mp4, …",
+        "録画の接頭辞（例: MyStream）— MyStream_001.mp4, MyStream_002.mp4 … として保存されます";
 
     // Hotkey hints, under the action buttons and on the overlay HUD; "{key}"
     // is the bound key.
-    pub hotkey_hint_record_front: &'static str,
-    pub hotkey_hint_stop: &'static str,
-    pub hotkey_hint_pause: &'static str,
-    pub hotkey_hint_resume: &'static str,
+    hotkey_hint_record_front:
+        "{key}: record the window in front",
+        "{key}: 前面のウィンドウを録画";
+    hotkey_hint_stop:
+        "{key} stop",
+        "{key} 停止";
+    hotkey_hint_pause:
+        "{key} pause",
+        "{key} 一時停止";
+    hotkey_hint_resume:
+        "{key} resume",
+        "{key} 再開";
     /// Hover text on REC while no source is selected.
-    pub rec_needs_source_tooltip: &'static str,
+    rec_needs_source_tooltip:
+        "Select a window or display on the left first.",
+        "まず左のリストからウィンドウかディスプレイを選んでください。";
     /// Hover text on REC while the last recording is still being saved.
-    pub rec_wait_for_save_tooltip: &'static str,
-    pub rec_wait_for_update_tooltip: &'static str,
+    rec_wait_for_save_tooltip:
+        "Wait until the last recording has been saved.",
+        "前の録画の保存が終わるまでお待ちください。";
+    rec_wait_for_update_tooltip:
+        "PolyRec is updating and will restart — wait until it has.",
+        "PolyRec を更新中です。再起動するまでお待ちください。";
     // Hotkey toasts (see `ui::dashboard::toast`)
-    pub toast_recording: &'static str,
-    pub toast_stopped: &'static str,
-    pub toast_paused: &'static str,
-    pub toast_resumed: &'static str,
-    pub toast_highlight_off: &'static str,
+    toast_recording:
+        "● Recording",
+        "● 録画中";
+    toast_stopped:
+        "⏹ Stopped, saving",
+        "⏹ 停止、保存中";
+    toast_paused:
+        "⏸ Paused",
+        "⏸ 一時停止";
+    toast_resumed:
+        "▶ Resumed",
+        "▶ 再開";
+    toast_highlight_off:
+        "Highlight isn't on",
+        "ハイライトは無効です";
     /// The start/stop hotkey didn't start a recording (the dashboard says
     /// why).
-    pub toast_not_started: &'static str,
+    toast_not_started:
+        "⚠ Recording didn't start",
+        "⚠ 録画を開始できませんでした";
     /// Shown by a copy started in place of one that closed on its own (see
     /// `restart`): its graphics device was lost, or it panicked. `{path}`
     /// is crash.log's.
-    pub notice_restarted_graphics: &'static str,
-    pub notice_restarted_error: &'static str,
+    notice_restarted_graphics:
+        "PolyRec restarted itself after a problem with the graphics driver (for example a driver update or reset). A recording that was running was stopped and saved.",
+        "グラフィックドライバーの問題（ドライバーの更新やリセットなど）のため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。";
+    notice_restarted_error:
+        "PolyRec restarted itself after an unexpected error. A recording that was running was stopped and saved. What went wrong is in {path}.",
+        "予期しないエラーのため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。エラーの内容は {path} に記録されています。";
     /// Shown when config.toml couldn't be read and was moved aside (see
     /// `Config::load_or_set_aside`). `{path}` is where it went.
-    pub notice_config_set_aside: &'static str,
+    notice_config_set_aside:
+        "Your settings file couldn't be read, so PolyRec started with its default settings. The old file is kept as {path}.",
+        "設定ファイルを読み込めなかったため、既定の設定で起動しました。元のファイルは {path} に残してあります。";
     /// Shown when config.toml couldn't be read, or moved aside
     /// (`ConfigTrouble::LeftAlone`). `{path}` is where it is.
-    pub notice_config_left_alone: &'static str,
+    notice_config_left_alone:
+        "Your settings file couldn't be read, so PolyRec started with its default settings. It won't save over the file this time, so nothing in it is lost. Another program may have had it open: close PolyRec and start it again to read {path}.",
+        "設定ファイルを読み込めなかったため、既定の設定で起動しました。今回はこのファイルに上書き保存しないので、内容は失われません。他のプログラムが開いていた可能性があります。PolyRec を起動し直すと {path} を読み込みます。";
     /// `{files}`: what the recordings cut off last time are saved as.
-    pub notice_recovered_template: &'static str,
+    notice_recovered_template:
+        "PolyRec closed partway through a recording last time. What was recorded up to then is saved as {files}.",
+        "前回、録画の途中で PolyRec が終了しました。そこまでの録画を {files} として保存しました。";
     /// A message box, for a launch that finds PolyRec running but can't
     /// bring it up (`single_instance::NotClaimed::Unreachable`).
-    pub already_running_unreachable: &'static str,
+    already_running_unreachable:
+        "PolyRec is already running, but it can't be brought up from here. It may have been started as administrator. Open it from the notification area, or close it and start PolyRec again.",
+        "PolyRec はすでに起動していますが、ここから表示できません。管理者として起動されている可能性があります。通知領域から開くか、終了してから PolyRec を起動し直してください。";
     /// An export's failure when its destination is the recording itself.
-    pub export_over_itself: &'static str,
+    export_over_itself:
+        "That's the recording being exported. Choose another name to save the export as.",
+        "エクスポート元の録画と同じファイルです。別の名前を指定してください。";
     /// Shown once a recording that lost its video source or an audio
     /// track's device/app before it was stopped is saved -- see
     /// `capture::LostSources`. `{tracks}` names the audio tracks.
-    pub notice_video_source_lost: &'static str,
-    pub notice_audio_source_lost_template: &'static str,
+    notice_video_source_lost:
+        "The video stopped before you did: the recorded window closed, its display was disconnected, or capturing it failed. From there on, the video doesn't change.",
+        "停止する前に映像が止まりました（録画中のウィンドウが閉じられた、ディスプレイが切断された、またはキャプチャに失敗しました）。それ以降の映像は変化しません。";
+    notice_audio_source_lost_template:
+        "Audio from {tracks} stopped partway through (a device was unplugged, or an app closed). From there on, that audio is silent.",
+        "{tracks} の音声が途中で止まりました（デバイスが外されたか、アプリが終了しました）。それ以降の音声は無音です。";
     /// The same for tracks whose device came back (`LostSources::audio_interrupted`).
-    pub notice_audio_source_interrupted_template: &'static str,
+    notice_audio_source_interrupted_template:
+        "Audio from {tracks} went silent for a while partway through (its device was unplugged or turned off) and carried on once a device was back.",
+        "{tracks} の音声が途中でしばらく無音になりました（デバイスが外されたか、オフになりました）。デバイスが戻ってからは録音を続けています。";
 
     // Notification-area icon (see `ui::dashboard::tray`)
-    pub tray_show: &'static str,
-    pub tray_hide: &'static str,
+    tray_show:
+        "Show PolyRec",
+        "PolyRec を表示";
+    tray_hide:
+        "Hide PolyRec",
+        "PolyRec を隠す";
     /// Start item while nothing can be recorded yet (disabled).
-    pub tray_start: &'static str,
+    tray_start:
+        "Start recording",
+        "録画開始";
     /// Start item with a source selected; "{source}" is its title.
-    pub tray_start_source_template: &'static str,
-    pub tray_stop: &'static str,
-    pub tray_quit: &'static str,
+    tray_start_source_template:
+        "Start recording: {source}",
+        "録画開始: {source}";
+    tray_stop:
+        "Stop recording",
+        "録画停止";
+    tray_quit:
+        "Quit PolyRec",
+        "PolyRec を終了";
 
     // Audio popup
-    pub audio_title: &'static str,
+    audio_title:
+        "Audio Sources",
+        "オーディオソース";
 
     // Quality popup
-    pub quality_title: &'static str,
-    pub fps_header: &'static str,
+    quality_title:
+        "Quality Settings",
+        "画質設定";
+    fps_header:
+        "FPS",
+        "FPS";
     /// Caption under the fps presets: "{hz}" is the selected source's
     /// display refresh rate.
-    pub fps_display_caption_template: &'static str,
+    fps_display_caption_template:
+        "The selected source's display refreshes at {hz} Hz.",
+        "選択中のソースのディスプレイのリフレッシュレートは {hz} Hz です。";
     /// Hover text on an fps preset the selected source's display can't
     /// reach; "{hz}" is its refresh rate and "{fps}" the standard rate a
     /// recording from it runs at instead (not always a preset: 50 isn't).
-    pub fps_above_display_template: &'static str,
+    fps_above_display_template:
+        "Above this display's {hz} Hz refresh rate. It can't deliver more frames than it draws, so a recording from it runs at {fps} fps instead.",
+        "このディスプレイのリフレッシュレート（{hz} Hz）を超えています。描画される以上のフレームは取得できないため、このソースの録画は代わりに {fps} fps になります。";
     /// Hover text on an fps preset the encoder rejects at the source's
     /// output size; fills in "{codec}", "{fps}", "{w}" and "{h}".
-    pub fps_encoder_limit_template: &'static str,
+    fps_encoder_limit_template:
+        "This PC's {codec} encoder can't record {fps} fps at {w}×{h}. Try H265 or a lower resolution.",
+        "この PC の {codec} エンコーダーは {w}×{h} で {fps} fps を録画できません。H265 にするか解像度を下げてください。";
     /// Caption when the chosen fps can't be used for the selected source;
     /// "{fps}" is what a recording from it will run at instead.
-    pub fps_recorded_template: &'static str,
-    pub codec_header: &'static str,
-    pub encoder_mode_header: &'static str,
-    pub encoder_mode_hardware: &'static str,
-    pub encoder_mode_software: &'static str,
-    pub encoder_mode_hardware_tooltip: &'static str,
-    pub encoder_mode_software_tooltip: &'static str,
+    fps_recorded_template:
+        "This source will record at {fps} fps.",
+        "このソースは {fps} fps で録画されます。";
+    codec_header:
+        "CODEC",
+        "コーデック";
+    encoder_mode_header:
+        "ENCODER",
+        "エンコーダー";
+    encoder_mode_hardware:
+        "Hardware",
+        "ハードウェア";
+    encoder_mode_software:
+        "Software",
+        "ソフトウェア";
+    encoder_mode_hardware_tooltip:
+        "Use the GPU's encoder (NVENC/QuickSync/AMF) when available -- recommended",
+        "GPUのエンコーダー（NVENC/QuickSync/AMF）が使用可能な場合はそれを使用します（推奨）";
+    encoder_mode_software_tooltip:
+        "Encode on the CPU instead -- frees up GPU headroom (useful while a demanding game/app is running), at the cost of higher CPU usage",
+        "代わりにCPUでエンコードします -- GPUの負荷を空けられます（負荷の高いゲームやアプリの実行中に便利）が、CPU使用率は高くなります";
     /// Checkbox under the encoder choice -- see `EncodeConfig::gpu_frames`.
-    pub gpu_frames_label: &'static str,
-    pub gpu_frames_tooltip: &'static str,
+    gpu_frames_label:
+        "Keep frames on the GPU (experimental)",
+        "フレームをGPU上で処理（試験的）";
+    gpu_frames_tooltip:
+        "Hands each captured frame to the encoder without copying it through system memory -- far less CPU while recording. Falls back to the usual way if your GPU's encoder doesn't support it.",
+        "キャプチャした各フレームをシステムメモリにコピーせずにエンコーダーへ渡します。録画中のCPU使用率が大きく下がります。GPUのエンコーダーが対応していない場合は通常の方法で録画します。";
     /// Hover text on the checkbox while the software encoder is chosen.
-    pub gpu_frames_needs_hardware: &'static str,
-    pub resolution_header: &'static str,
-    pub resolution_native: &'static str,
-    pub resolution_display: &'static str,
-    pub resolution_custom: &'static str,
-    pub width_label: &'static str,
-    pub height_label: &'static str,
-    pub bitrate_header: &'static str,
-    pub bitrate_auto: &'static str,
-    pub bitrate_manual: &'static str,
-    pub mbps_label: &'static str,
-    pub close_button: &'static str,
+    gpu_frames_needs_hardware:
+        "Needs the hardware encoder.",
+        "ハードウェアエンコーダーが必要です。";
+    resolution_header:
+        "RESOLUTION",
+        "解像度";
+    resolution_native:
+        "Native (window)",
+        "ネイティブ（ウィンドウ）";
+    resolution_display:
+        "Match display",
+        "ディスプレイに合わせる";
+    resolution_custom:
+        "Custom",
+        "カスタム";
+    width_label:
+        "W:",
+        "幅:";
+    height_label:
+        "H:",
+        "高さ:";
+    bitrate_header:
+        "BITRATE",
+        "ビットレート";
+    bitrate_auto:
+        "Auto",
+        "自動";
+    bitrate_manual:
+        "Manual",
+        "手動";
+    mbps_label:
+        "Mbps:",
+        "Mbps:";
+    close_button:
+        "Close",
+        "閉じる";
 
     // Hotkeys popup
-    pub hotkeys_title: &'static str,
-    pub hotkey_start_stop_header: &'static str,
-    pub hotkey_pause_header: &'static str,
-    pub hotkey_overlay_header: &'static str,
-    pub hotkey_save_highlight_header: &'static str,
-    pub hotkey_collision_warning: &'static str,
-    pub hotkey_change_button: &'static str,
-    pub hotkey_change_tooltip: &'static str,
-    pub hotkey_press_any_key_prompt: &'static str,
-    pub hotkey_press_esc_to_cancel: &'static str,
+    hotkeys_title:
+        "Hotkeys",
+        "ショートカット";
+    hotkey_start_stop_header:
+        "START / STOP RECORDING",
+        "録画の開始/停止";
+    hotkey_pause_header:
+        "PAUSE / RESUME",
+        "一時停止/再開";
+    hotkey_overlay_header:
+        "TOGGLE OVERLAY",
+        "オーバーレイ切替";
+    hotkey_save_highlight_header:
+        "SAVE HIGHLIGHT",
+        "ハイライトを保存";
+    hotkey_collision_warning:
+        "⚠ Two actions share the same key — only one will respond.",
+        "⚠ 2つの操作が同じキーに割り当てられています。片方のみ動作します。";
+    hotkey_change_button:
+        "Change",
+        "変更";
+    hotkey_change_tooltip:
+        "Press a new key combination for this action",
+        "この操作の新しいキーの組み合わせを押してください";
+    hotkey_press_any_key_prompt:
+        "Press any key (Ctrl/Alt/Shift optional)…",
+        "何かキーを押してください（Ctrl/Alt/Shiftとの組み合わせも可）…";
+    hotkey_press_esc_to_cancel:
+        "(Esc to cancel)",
+        "(Escでキャンセル)";
     /// Prefix for "'<key>' is already in use or reserved by Windows — try a
     /// different key." — the key name itself is appended at the call site,
     /// same pattern as the other `_prefix` fields in this struct.
-    pub hotkey_unavailable_prefix: &'static str,
-    pub hotkey_unavailable_suffix: &'static str,
+    hotkey_unavailable_prefix:
+        "⚠ '",
+        "⚠「";
+    hotkey_unavailable_suffix:
+        "' is already in use or reserved by Windows — try a different key.",
+        "」はすでに使用されているか、Windowsに予約されています。別のキーをお試しください。";
 
     // Error popup
-    pub error_title: &'static str,
-    pub disk_full_mid_recording: &'static str,
+    error_title:
+        "Error",
+        "エラー";
+    disk_full_mid_recording:
+        "Recording stopped automatically — your disk ran low on free space (below 500 MB). The recording up to that point was saved.",
+        "空き容量が不足したため録画を自動停止しました（500MB未満）。その時点までの録画は保存されています。";
     /// A recording the recorder stopped because writing it kept failing.
     /// `{error}` is the last failure.
-    pub notice_recording_gave_up: &'static str,
-    pub recording_failed_prefix: &'static str,
-    pub recording_ended_unexpectedly_prefix: &'static str,
-    pub couldnt_start_recording_prefix: &'static str,
+    notice_recording_gave_up:
+        "Recording stopped automatically — PolyRec couldn't keep writing it ({error}). The recording up to that point was saved.",
+        "録画を書き込めなくなったため自動停止しました（{error}）。その時点までの録画は保存されています。";
+    recording_failed_prefix:
+        "Recording failed: ",
+        "録画に失敗しました: ";
+    recording_ended_unexpectedly_prefix:
+        "Recording ended unexpectedly: ",
+        "録画が予期せず終了しました: ";
+    couldnt_start_recording_prefix:
+        "Couldn't start recording: ",
+        "録画を開始できませんでした: ";
     /// Notice shown once per recording if the rate of new frames captured
     /// falls persistently short of the target; fills in "{achieved}" and
     /// "{target}". The file still runs at the target, repeating frames (see
     /// `encode::cfr`). It names both causes, because the app can't tell them
     /// apart: a still screen (Windows only delivers changed frames) or a PC
     /// struggling to keep up.
-    pub fps_shortfall_template: &'static str,
+    fps_shortfall_template:
+        "Only {achieved} of the {target} frames a second so far were new pictures; the rest repeat the one before. A still screen gives fewer new pictures; if the picture was moving, this PC may be struggling to keep up.",
+        "ここまで毎秒 {target} フレームのうち新しい画像は {achieved} フレームで、残りは直前の画像の繰り返しです。静止した画面では新しい画像が少なくなります。画面が動いていた場合は、この PC の処理が追いついていない可能性があります。";
     /// Shown when the finished file has fewer audio tracks than were
     /// selected before recording -- a source that never produced a single
     /// real buffer (muted mic, disconnected device, silent app) gets
@@ -368,468 +735,102 @@ pub struct Strings {
     /// as an empty track, so without this the user has no way to know one
     /// of their sources didn't make it in. `{actual}`/`{expected}` are
     /// replaced with the real counts at the call site.
-    pub audio_tracks_missing_template: &'static str,
+    audio_tracks_missing_template:
+        "Only {actual} of {expected} selected audio sources made it into this recording — the rest produced no sound (check for a muted mic or a disconnected/silent device) and were left out.",
+        "選択した音声ソースのうち {actual}/{expected} のみがこの録画に含まれました。残りは音声が検出されず（マイクのミュートやデバイスの切断・無音をご確認ください）除外されました。";
 
     // Export controls (inline in the status panel)
-    pub recording_saved_label: &'static str,
-    pub audio_tracks_header: &'static str,
+    recording_saved_label:
+        "Recording saved:",
+        "録画を保存しました:";
+    audio_tracks_header:
+        "AUDIO TRACKS",
+        "オーディオ トラック";
     /// Fallback per-track checkbox label when the recorded file has more
     /// tracks than `last_recording_audio_labels` has names for (e.g. a
     /// device disconnected mid-recording) -- used as "{track_label_fallback} {n}".
-    pub track_label_fallback: &'static str,
+    track_label_fallback:
+        "Track",
+        "トラック";
     /// Checkbox: decode the checked tracks above and sum them into a single
     /// output track instead of keeping each as its own stream -- useful for
     /// platforms (e.g. YouTube) that only ever play one audio track from an
     /// uploaded file. Unchecked by default.
-    pub export_mix_tracks_label: &'static str,
-    pub export_mix_tracks_tooltip: &'static str,
-    pub export_button: &'static str,
-    pub export_tooltip: &'static str,
+    export_mix_tracks_label:
+        "Mix into one track",
+        "1つのトラックに統合";
+    export_mix_tracks_tooltip:
+        "Combine the checked tracks above into a single audio track -- useful for sites like YouTube that only play one audio track from an uploaded file.",
+        "上でチェックしたトラックを1つの音声トラックに統合します -- アップロードしたファイルの音声トラックを1つしか再生しないYouTubeなどのサイト向けです。";
+    export_button:
+        "Export",
+        "エクスポート";
+    export_tooltip:
+        "Remux with only the checked audio tracks (no re-encoding)",
+        "チェックした音声トラックのみで再多重化します（再エンコードなし）";
     /// The file type an export is saved as, in its Save dialog.
-    pub mp4_file_type: &'static str,
+    mp4_file_type:
+        "MP4 video",
+        "MP4 動画";
     /// The file type Browse... picks an app by, in the Audio pop-up.
-    pub exe_file_type: &'static str,
-    pub open_folder_button: &'static str,
-    pub open_folder_tooltip: &'static str,
-    pub exporting_header: &'static str,
-    pub please_wait: &'static str,
-    pub export_complete_header: &'static str,
-    pub export_failed_header: &'static str,
+    exe_file_type:
+        "Program",
+        "プログラム";
+    open_folder_button:
+        "Open Folder",
+        "フォルダを開く";
+    open_folder_tooltip:
+        "Open the folder containing this recording",
+        "この録画が入っているフォルダを開く";
+    exporting_header:
+        "EXPORTING…",
+        "エクスポート中…";
+    please_wait:
+        "Please wait…",
+        "お待ちください…";
+    export_complete_header:
+        "EXPORT COMPLETE",
+        "エクスポート完了";
+    export_failed_header:
+        "EXPORT FAILED",
+        "エクスポート失敗";
 
     // Highlight buffer -- Quality popup settings section, status indicator
-    pub highlight_header: &'static str,
-    pub highlight_enabled_label: &'static str,
-    pub tooltip_highlight_enabled: &'static str,
-    pub highlight_buffer_seconds_label: &'static str,
-    pub highlight_status_active: &'static str,
-    pub highlight_save_not_active: &'static str,
-    pub highlight_saving_label: &'static str,
-    pub highlight_saved_prefix: &'static str,
-    pub highlight_save_failed_prefix: &'static str,
-    pub highlight_disk_full_message: &'static str,
+    highlight_header:
+        "HIGHLIGHT",
+        "ハイライト";
+    highlight_enabled_label:
+        "Enable Highlight buffer",
+        "ハイライトバッファを有効にする";
+    tooltip_highlight_enabled:
+        "Continuously captures the foreground app in the background. Press the Save Highlight hotkey any time to save the last few seconds/minutes to a file — no need to have pressed record beforehand.",
+        "フォアグラウンドのアプリをバックグラウンドで常時録画します。ハイライト保存のショートカットを押すと、事前に録画を開始していなくても直近の数秒〜数分をファイルに保存できます。";
+    highlight_buffer_seconds_label:
+        "Buffer length (seconds):",
+        "バッファ長（秒）:";
+    highlight_status_active:
+        "● Highlight buffering",
+        "● ハイライト録画中";
+    highlight_save_not_active:
+        "Highlight buffering isn't active — enable it in Quality settings first.",
+        "ハイライトバッファが有効になっていません。まず画質設定で有効にしてください。";
+    highlight_saving_label:
+        "Saving highlight…",
+        "ハイライトを保存中…";
+    highlight_saved_prefix:
+        "Highlight saved: ",
+        "ハイライトを保存しました: ";
+    highlight_save_failed_prefix:
+        "Highlight save failed: ",
+        "ハイライトの保存に失敗しました: ";
+    highlight_disk_full_message:
+        "Highlight buffering stopped automatically — your disk ran low on free space (below 500 MB).",
+        "空き容量が不足したため、ハイライトバッファを自動停止しました（500MB未満）。";
     /// `{why}`: the error.
-    pub highlight_failed_template: &'static str,
+    highlight_failed_template:
+        "Highlight buffering stopped: {why}. It will try again shortly.",
+        "ハイライトバッファが停止しました: {why}。しばらくしてから再開を試みます。";
 }
-
-pub static EN: Strings = Strings {
-    overlay_on: "Overlay: ON",
-    overlay_off: "Overlay: OFF",
-    overlay_toggle_tooltip: "Show/hide the recording HUD overlay",
-    border_on: "Border: ON",
-    border_off: "Border: OFF",
-    border_toggle_tooltip: "Show/hide Windows' colored capture border around the recorded window/monitor",
-    close_quits: "Close: Quit",
-    close_hides: "Close: To tray",
-    close_toggle_tooltip: "What the window's close button does: quit PolyRec, or hide it in the notification area (tray) so the hotkeys keep working. \"Quit PolyRec\" in the tray menu quits either way.",
-    startup_on: "Startup: ON",
-    startup_off: "Startup: OFF",
-    startup_toggle_tooltip: "Start PolyRec when you sign in to Windows, hidden in the notification area (tray), so the hotkeys and Highlight are ready without opening it.",
-    startup_failed_prefix: "Couldn't change whether PolyRec starts with Windows: ",
-    record_cursor_label: "Record the mouse pointer",
-    record_cursor_tooltip: "Whether the mouse pointer is in recordings and highlights. Takes effect from the next recording.",
-    toast_still_in_tray: "PolyRec is still running in the tray",
-    language_toggle_tooltip: "Switch display language",
-    update_available_suffix: "available",
-    update_tooltip: "Click to update now",
-    config_save_failed_prefix: "Failed to save settings: ",
-
-    update_confirm_title: "Update PolyRec",
-    update_confirm_prefix: "Update to ",
-    update_confirm_suffix: " now? PolyRec will close and restart.",
-    update_confirm_uac_note: "Windows may show a permission prompt during the update.",
-    update_now_button: "Update Now",
-    update_not_now_button: "Not Now",
-    update_view_release_notes: "View release notes",
-    update_working_message: "Updating… PolyRec will restart shortly.",
-    update_failed_prefix: "Update failed: ",
-    update_blocked_while_recording: "Can't update while a recording is in progress or being saved — wait until it's saved first.",
-
-    capture_source_header: "CAPTURE SOURCE",
-    no_windows_found: "No visible windows found.",
-    source_filter_placeholder: "Search windows or apps...",
-    no_matching_windows: "No windows match your search.",
-    system_audio_header: "SYSTEM",
-    no_audio_devices: "No audio devices found.",
-    applications_header: "APPLICATIONS",
-    no_app_audio_sources: "No apps added yet — use + Add app below.",
-    app_audio_only_label: "App audio only (exclude other system sounds)",
-    tooltip_no_loopback_device: "No system playback device found — this needs one to exist (being muted doesn't matter, but a device must be present).",
-    tooltip_check_loopback_first: "Check a system audio (speakers) box above first.",
-    tooltip_app_audio_only: "Records only the selected window's own audio via Windows' Process Loopback API, instead of the full desktop mix. Needs an active system playback device — muting it doesn't stop this from working.",
-    tooltip_app_audio_only_needs_window: "Select a specific window (not a monitor) as the capture source to use this — an entire-screen recording has no single app to scope audio to.",
-    add_app_button: "+ Add app",
-    remove_registered_app_tooltip: "Uncheck to remove this app — while it isn't running there's nothing to record yet, but it'll start automatically the moment it launches.",
-    add_app_search_placeholder: "Search apps…",
-    add_app_no_matches: "No apps match.",
-    add_app_none_running: "No apps found.",
-    add_app_browse_button: "Browse for .exe instead…",
-    add_app_scanning: "Still searching installed apps…",
-    add_app_running_tag: "● Running",
-
-    status_header: "STATUS",
-    state_paused: "PAUSED",
-    state_recording: "RECORDING",
-    tracks_word: "tracks",
-    recording_stats_tooltip: "Audio tracks, the video's frame rate, and the file size so far. The video always runs at exactly this frame rate: when no new picture comes in time for a frame, the one before is repeated.",
-    recording_new_pictures_template: "So far, {new} of its {fps} frames a second were new pictures; the rest repeat the one before. A still screen, or a game running below {fps} fps, gives fewer.",
-    saving_recording: "Saving recording…",
-    select_source_prompt: "Select a source and press REC to start.",
-    preview_unavailable: "No preview while it's minimized",
-    state_prefix: "State: ",
-    session_state_idle: "Idle",
-
-    output_header: "OUTPUT",
-    quality_button: "Quality",
-    quality_tooltip: "FPS, codec, resolution, and bitrate for the next recording",
-    hotkeys_button: "Hotkeys",
-    hotkeys_tooltip: "Rebind the start/stop, pause, overlay-toggle, and Save Highlight shortcuts",
-    audio_button: "Audio",
-    audio_tooltip: "Which audio devices and apps to record, and whether to scope to just the selected window's own audio",
-    no_audio_selected: "No audio selected",
-    audio_sources_word: "selected",
-    browse_button: "Browse…",
-    open_output_dir_button: "Open",
-    open_output_dir_tooltip: "Open the folder recordings are saved in",
-    recent_header: "RECENT",
-    recent_play_tooltip: "Play",
-    recent_show_tooltip: "Show in folder",
-    output_dir_unavailable: "This drive or network share isn't available, so recordings can't be saved here.",
-    output_dir_not_a_folder: "Part of this path is a file, not a folder, so recordings can't be saved here.",
-    free_space_prefix: "Free: ",
-    time_left_hours_template: "about {h} h of recording",
-    time_left_hours_minutes_template: "about {h} h {m} min of recording",
-    time_left_minutes_template: "about {m} min of recording",
-    time_left_under_a_minute: "under a minute of recording",
-    toast_low_space_template: "Recording drive almost full: {left} left",
-    notice_silent_microphones_template: "No sound from {mics} since recording started. Check it isn't muted.",
-    resume_button: "RESUME",
-    stop_button: "STOP",
-    rec_button: "REC",
-    pause_tooltip: "Pause",
-    use_process_name_label: "Use process name automatically",
-    use_process_name_tooltip: "Names each finished recording after the app being recorded (e.g. \"vivaldi_2026-09-19-14-30-00.mp4\"). Uncheck to use your own prefix instead.",
-    custom_recording_prefix_placeholder: "Recording prefix (e.g. MyStream) — saved as MyStream_001.mp4, MyStream_002.mp4, …",
-
-    hotkey_hint_record_front: "{key}: record the window in front",
-    hotkey_hint_stop: "{key} stop",
-    hotkey_hint_pause: "{key} pause",
-    hotkey_hint_resume: "{key} resume",
-    rec_needs_source_tooltip: "Select a window or display on the left first.",
-    rec_wait_for_save_tooltip: "Wait until the last recording has been saved.",
-    rec_wait_for_update_tooltip: "PolyRec is updating and will restart — wait until it has.",
-    toast_recording: "● Recording",
-    toast_stopped: "⏹ Stopped, saving",
-    toast_paused: "⏸ Paused",
-    toast_resumed: "▶ Resumed",
-    toast_highlight_off: "Highlight isn't on",
-    toast_not_started: "⚠ Recording didn't start",
-    notice_restarted_graphics: "PolyRec restarted itself after a problem with the graphics driver (for example a driver update or reset). A recording that was running was stopped and saved.",
-    notice_restarted_error: "PolyRec restarted itself after an unexpected error. A recording that was running was stopped and saved. What went wrong is in {path}.",
-    notice_config_set_aside: "Your settings file couldn't be read, so PolyRec started with its default settings. The old file is kept as {path}.",
-    already_running_unreachable: "PolyRec is already running, but it can't be brought up from here. It may have been started as administrator. Open it from the notification area, or close it and start PolyRec again.",
-    notice_config_left_alone: "Your settings file couldn't be read, so PolyRec started with its default settings. It won't save over the file this time, so nothing in it is lost. Another program may have had it open: close PolyRec and start it again to read {path}.",
-    notice_recovered_template: "PolyRec closed partway through a recording last time. What was recorded up to then is saved as {files}.",
-    export_over_itself: "That's the recording being exported. Choose another name to save the export as.",
-    notice_video_source_lost: "The video stopped before you did: the recorded window closed, its display was disconnected, or capturing it failed. From there on, the video doesn't change.",
-    notice_audio_source_lost_template: "Audio from {tracks} stopped partway through (a device was unplugged, or an app closed). From there on, that audio is silent.",
-    notice_audio_source_interrupted_template: "Audio from {tracks} went silent for a while partway through (its device was unplugged or turned off) and carried on once a device was back.",
-
-    tray_show: "Show PolyRec",
-    tray_hide: "Hide PolyRec",
-    tray_start: "Start recording",
-    tray_start_source_template: "Start recording: {source}",
-    tray_stop: "Stop recording",
-    tray_quit: "Quit PolyRec",
-
-    audio_title: "Audio Sources",
-
-    quality_title: "Quality Settings",
-    fps_header: "FPS",
-    fps_display_caption_template: "The selected source's display refreshes at {hz} Hz.",
-    fps_above_display_template: "Above this display's {hz} Hz refresh rate. It can't deliver more frames than it draws, so a recording from it runs at {fps} fps instead.",
-    fps_encoder_limit_template: "This PC's {codec} encoder can't record {fps} fps at {w}×{h}. Try H265 or a lower resolution.",
-    fps_recorded_template: "This source will record at {fps} fps.",
-    codec_header: "CODEC",
-    encoder_mode_header: "ENCODER",
-    encoder_mode_hardware: "Hardware",
-    encoder_mode_software: "Software",
-    encoder_mode_hardware_tooltip: "Use the GPU's encoder (NVENC/QuickSync/AMF) when available -- recommended",
-    encoder_mode_software_tooltip: "Encode on the CPU instead -- frees up GPU headroom (useful while a demanding game/app is running), at the cost of higher CPU usage",
-    gpu_frames_label: "Keep frames on the GPU (experimental)",
-    gpu_frames_tooltip: "Hands each captured frame to the encoder without copying it through system memory -- far less CPU while recording. Falls back to the usual way if your GPU's encoder doesn't support it.",
-    gpu_frames_needs_hardware: "Needs the hardware encoder.",
-    resolution_header: "RESOLUTION",
-    resolution_native: "Native (window)",
-    resolution_display: "Match display",
-    resolution_custom: "Custom",
-    width_label: "W:",
-    height_label: "H:",
-    bitrate_header: "BITRATE",
-    bitrate_auto: "Auto",
-    bitrate_manual: "Manual",
-    mbps_label: "Mbps:",
-    close_button: "Close",
-
-    hotkeys_title: "Hotkeys",
-    hotkey_start_stop_header: "START / STOP RECORDING",
-    hotkey_pause_header: "PAUSE / RESUME",
-    hotkey_overlay_header: "TOGGLE OVERLAY",
-    hotkey_save_highlight_header: "SAVE HIGHLIGHT",
-    hotkey_collision_warning: "⚠ Two actions share the same key — only one will respond.",
-    hotkey_change_button: "Change",
-    hotkey_change_tooltip: "Press a new key combination for this action",
-    hotkey_press_any_key_prompt: "Press any key (Ctrl/Alt/Shift optional)…",
-    hotkey_press_esc_to_cancel: "(Esc to cancel)",
-    hotkey_unavailable_prefix: "⚠ '",
-    hotkey_unavailable_suffix: "' is already in use or reserved by Windows — try a different key.",
-
-    error_title: "Error",
-    disk_full_mid_recording: "Recording stopped automatically — your disk ran low on free space (below 500 MB). The recording up to that point was saved.",
-    notice_recording_gave_up: "Recording stopped automatically — PolyRec couldn't keep writing it ({error}). The recording up to that point was saved.",
-    recording_failed_prefix: "Recording failed: ",
-    recording_ended_unexpectedly_prefix: "Recording ended unexpectedly: ",
-    couldnt_start_recording_prefix: "Couldn't start recording: ",
-    fps_shortfall_template: "Only {achieved} of the {target} frames a second so far were new pictures; the rest repeat the one before. A still screen gives fewer new pictures; if the picture was moving, this PC may be struggling to keep up.",
-    audio_tracks_missing_template: "Only {actual} of {expected} selected audio sources made it into this recording — the rest produced no sound (check for a muted mic or a disconnected/silent device) and were left out.",
-
-    recording_saved_label: "Recording saved:",
-    audio_tracks_header: "AUDIO TRACKS",
-    track_label_fallback: "Track",
-    export_mix_tracks_label: "Mix into one track",
-    export_mix_tracks_tooltip: "Combine the checked tracks above into a single audio track -- useful for sites like YouTube that only play one audio track from an uploaded file.",
-    export_button: "Export",
-    export_tooltip: "Remux with only the checked audio tracks (no re-encoding)",
-    mp4_file_type: "MP4 video",
-    exe_file_type: "Program",
-    open_folder_button: "Open Folder",
-    open_folder_tooltip: "Open the folder containing this recording",
-    exporting_header: "EXPORTING…",
-    please_wait: "Please wait…",
-    export_complete_header: "EXPORT COMPLETE",
-    export_failed_header: "EXPORT FAILED",
-
-    highlight_header: "HIGHLIGHT",
-    highlight_enabled_label: "Enable Highlight buffer",
-    tooltip_highlight_enabled: "Continuously captures the foreground app in the background. Press the Save Highlight hotkey any time to save the last few seconds/minutes to a file — no need to have pressed record beforehand.",
-    highlight_buffer_seconds_label: "Buffer length (seconds):",
-    highlight_status_active: "● Highlight buffering",
-    highlight_save_not_active: "Highlight buffering isn't active — enable it in Quality settings first.",
-    highlight_saving_label: "Saving highlight…",
-    highlight_saved_prefix: "Highlight saved: ",
-    highlight_save_failed_prefix: "Highlight save failed: ",
-    highlight_disk_full_message: "Highlight buffering stopped automatically — your disk ran low on free space (below 500 MB).",
-    highlight_failed_template: "Highlight buffering stopped: {why}. It will try again shortly.",
-};
-
-pub static JA: Strings = Strings {
-    overlay_on: "オーバーレイ: オン",
-    overlay_off: "オーバーレイ: オフ",
-    overlay_toggle_tooltip: "録画中のHUDオーバーレイの表示/非表示を切り替え",
-    border_on: "枠線: オン",
-    border_off: "枠線: オフ",
-    border_toggle_tooltip: "録画中のウィンドウ/モニターに表示されるWindowsのキャプチャ枠線の表示/非表示を切り替え",
-    close_quits: "閉じる: 終了",
-    close_hides: "閉じる: トレイへ",
-    close_toggle_tooltip: "ウィンドウの閉じるボタンの動作: PolyRec を終了するか、通知領域（トレイ）に隠してホットキーを使えるままにします。トレイメニューの「PolyRec を終了」ではどちらの場合も終了します。",
-    startup_on: "自動起動: オン",
-    startup_off: "自動起動: オフ",
-    startup_toggle_tooltip: "Windows にサインインしたときに PolyRec を通知領域（トレイ）に隠した状態で起動します。開かなくてもホットキーとハイライトが使えます。",
-    startup_failed_prefix: "Windows と同時に起動する設定を変更できませんでした: ",
-    record_cursor_label: "マウスポインターを録画する",
-    record_cursor_tooltip: "録画とハイライトにマウスポインターを入れるかどうか。次の録画から反映されます。",
-    toast_still_in_tray: "PolyRec はトレイで動作しています",
-    language_toggle_tooltip: "表示言語を切り替え",
-    update_available_suffix: "が利用可能",
-    update_tooltip: "クリックして今すぐ更新",
-    config_save_failed_prefix: "設定の保存に失敗しました: ",
-
-    update_confirm_title: "PolyRecを更新",
-    update_confirm_prefix: "",
-    update_confirm_suffix: " に今すぐ更新しますか？PolyRecは一度終了して再起動します。",
-    update_confirm_uac_note: "更新中にWindowsの権限確認ダイアログが表示される場合があります。",
-    update_now_button: "今すぐ更新",
-    update_not_now_button: "後で",
-    update_view_release_notes: "リリースノートを見る",
-    update_working_message: "更新中…まもなくPolyRecが再起動します。",
-    update_failed_prefix: "更新に失敗しました: ",
-    update_blocked_while_recording: "録画中、または保存中は更新できません。保存が終わってからにしてください。",
-
-    capture_source_header: "キャプチャ ソース",
-    no_windows_found: "表示中のウィンドウが見つかりません。",
-    source_filter_placeholder: "ウィンドウやアプリを検索...",
-    no_matching_windows: "検索に一致するウィンドウがありません。",
-    system_audio_header: "システム",
-    no_audio_devices: "オーディオデバイスが見つかりません。",
-    applications_header: "アプリケーション",
-    no_app_audio_sources: "アプリはまだ追加されていません。下の「+ アプリを追加」から追加してください。",
-    app_audio_only_label: "このアプリの音声のみ（他のシステム音を除外）",
-    tooltip_no_loopback_device: "システム再生デバイスが見つかりません。ミュートは問題ありませんが、デバイス自体は存在している必要があります。",
-    tooltip_check_loopback_first: "まず上のシステム音声（スピーカー）にチェックを入れてください。",
-    tooltip_app_audio_only: "デスクトップ全体の音声ではなく、Windows の Process Loopback API を使って選択したウィンドウ自体の音声のみを録音します。有効な再生デバイスが必要です（ミュートしていても動作します）。",
-    tooltip_app_audio_only_needs_window: "この機能を使うには、モニターではなく特定のウィンドウをキャプチャソースとして選択してください。画面全体の録画には音声を絞り込む対象のアプリがありません。",
-    add_app_button: "+ アプリを追加",
-    remove_registered_app_tooltip: "チェックを外すとこのアプリを削除します。実行されていない間は録音対象がありませんが、起動すると自動的に録音が始まります。",
-    add_app_search_placeholder: "アプリを検索…",
-    add_app_no_matches: "一致するアプリがありません。",
-    add_app_none_running: "アプリが見つかりません。",
-    add_app_browse_button: "代わりに .exe を参照…",
-    add_app_scanning: "インストール済みアプリを検索中…",
-    add_app_running_tag: "● 実行中",
-
-    status_header: "ステータス",
-    state_paused: "一時停止中",
-    state_recording: "録画中",
-    tracks_word: "トラック",
-    recording_stats_tooltip: "音声トラック数、動画のフレームレート、ここまでのファイルサイズです。動画は常にこのフレームレートちょうどで記録されます。フレームに間に合う新しい画像がないときは、直前の画像を繰り返します。",
-    recording_new_pictures_template: "ここまで、毎秒 {fps} フレームのうち {new} フレームが新しい画像で、残りは直前の画像の繰り返しです。静止した画面や、ゲームが {fps} fps を下回っているときは少なくなります。",
-    saving_recording: "録画を保存中…",
-    select_source_prompt: "ソースを選択して「録画」を押すと開始します。",
-    preview_unavailable: "最小化中はプレビューできません",
-    state_prefix: "状態: ",
-    session_state_idle: "待機中",
-
-    output_header: "出力",
-    quality_button: "画質",
-    quality_tooltip: "次回の録画の FPS・コーデック・解像度・ビットレート",
-    hotkeys_button: "ショートカット",
-    hotkeys_tooltip: "開始/停止・一時停止・オーバーレイ切替・ハイライト保存のショートカットを再設定",
-    audio_button: "オーディオ",
-    audio_tooltip: "録音するオーディオデバイスとアプリ、選択したウィンドウ自体の音声のみに絞るかどうか",
-    no_audio_selected: "オーディオ未選択",
-    audio_sources_word: "選択中",
-    browse_button: "参照…",
-    open_output_dir_button: "開く",
-    open_output_dir_tooltip: "録画の保存先フォルダーを開く",
-    recent_header: "最近の録画",
-    recent_play_tooltip: "再生",
-    recent_show_tooltip: "フォルダーで表示",
-    output_dir_unavailable: "このドライブまたはネットワーク共有が見つからないため、ここには録画を保存できません。",
-    output_dir_not_a_folder: "このパスの途中がフォルダーではなくファイルのため、ここには録画を保存できません。",
-    free_space_prefix: "空き容量: ",
-    time_left_hours_template: "録画 約{h}時間分",
-    time_left_hours_minutes_template: "録画 約{h}時間{m}分",
-    time_left_minutes_template: "録画 約{m}分",
-    time_left_under_a_minute: "録画 1分未満",
-    toast_low_space_template: "録画先の空き容量が残りわずかです（{left}）",
-    notice_silent_microphones_template: "{mics} から録画開始後まったく音が入っていません。ミュートになっていないか確認してください。",
-    resume_button: "再開",
-    stop_button: "停止",
-    rec_button: "録画",
-    pause_tooltip: "一時停止",
-    use_process_name_label: "プロセス名を自動的に使用",
-    use_process_name_tooltip: "録画対象のアプリ名でファイル名を付けます（例:「vivaldi_2026-09-19-14-30-00.mp4」）。チェックを外すと、独自の接頭辞を使用できます。",
-    custom_recording_prefix_placeholder: "録画の接頭辞（例: MyStream）— MyStream_001.mp4, MyStream_002.mp4 … として保存されます",
-
-    hotkey_hint_record_front: "{key}: 前面のウィンドウを録画",
-    hotkey_hint_stop: "{key} 停止",
-    hotkey_hint_pause: "{key} 一時停止",
-    hotkey_hint_resume: "{key} 再開",
-    rec_needs_source_tooltip: "まず左のリストからウィンドウかディスプレイを選んでください。",
-    rec_wait_for_save_tooltip: "前の録画の保存が終わるまでお待ちください。",
-    rec_wait_for_update_tooltip: "PolyRec を更新中です。再起動するまでお待ちください。",
-    toast_recording: "● 録画中",
-    toast_stopped: "⏹ 停止、保存中",
-    toast_paused: "⏸ 一時停止",
-    toast_resumed: "▶ 再開",
-    toast_highlight_off: "ハイライトは無効です",
-    toast_not_started: "⚠ 録画を開始できませんでした",
-    notice_restarted_graphics: "グラフィックドライバーの問題（ドライバーの更新やリセットなど）のため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。",
-    notice_restarted_error: "予期しないエラーのため、PolyRec を自動で再起動しました。録画中だった録画は停止して保存しました。エラーの内容は {path} に記録されています。",
-    notice_config_set_aside: "設定ファイルを読み込めなかったため、既定の設定で起動しました。元のファイルは {path} に残してあります。",
-    already_running_unreachable: "PolyRec はすでに起動していますが、ここから表示できません。管理者として起動されている可能性があります。通知領域から開くか、終了してから PolyRec を起動し直してください。",
-    notice_config_left_alone: "設定ファイルを読み込めなかったため、既定の設定で起動しました。今回はこのファイルに上書き保存しないので、内容は失われません。他のプログラムが開いていた可能性があります。PolyRec を起動し直すと {path} を読み込みます。",
-    notice_recovered_template: "前回、録画の途中で PolyRec が終了しました。そこまでの録画を {files} として保存しました。",
-    export_over_itself: "エクスポート元の録画と同じファイルです。別の名前を指定してください。",
-    notice_video_source_lost: "停止する前に映像が止まりました（録画中のウィンドウが閉じられた、ディスプレイが切断された、またはキャプチャに失敗しました）。それ以降の映像は変化しません。",
-    notice_audio_source_lost_template: "{tracks} の音声が途中で止まりました（デバイスが外されたか、アプリが終了しました）。それ以降の音声は無音です。",
-    notice_audio_source_interrupted_template: "{tracks} の音声が途中でしばらく無音になりました（デバイスが外されたか、オフになりました）。デバイスが戻ってからは録音を続けています。",
-
-    tray_show: "PolyRec を表示",
-    tray_hide: "PolyRec を隠す",
-    tray_start: "録画開始",
-    tray_start_source_template: "録画開始: {source}",
-    tray_stop: "録画停止",
-    tray_quit: "PolyRec を終了",
-
-    audio_title: "オーディオソース",
-
-    quality_title: "画質設定",
-    fps_header: "FPS",
-    fps_display_caption_template: "選択中のソースのディスプレイのリフレッシュレートは {hz} Hz です。",
-    fps_above_display_template: "このディスプレイのリフレッシュレート（{hz} Hz）を超えています。描画される以上のフレームは取得できないため、このソースの録画は代わりに {fps} fps になります。",
-    fps_encoder_limit_template: "この PC の {codec} エンコーダーは {w}×{h} で {fps} fps を録画できません。H265 にするか解像度を下げてください。",
-    fps_recorded_template: "このソースは {fps} fps で録画されます。",
-    codec_header: "コーデック",
-    encoder_mode_header: "エンコーダー",
-    encoder_mode_hardware: "ハードウェア",
-    encoder_mode_software: "ソフトウェア",
-    encoder_mode_hardware_tooltip: "GPUのエンコーダー（NVENC/QuickSync/AMF）が使用可能な場合はそれを使用します（推奨）",
-    encoder_mode_software_tooltip: "代わりにCPUでエンコードします -- GPUの負荷を空けられます（負荷の高いゲームやアプリの実行中に便利）が、CPU使用率は高くなります",
-    gpu_frames_label: "フレームをGPU上で処理（試験的）",
-    gpu_frames_tooltip: "キャプチャした各フレームをシステムメモリにコピーせずにエンコーダーへ渡します。録画中のCPU使用率が大きく下がります。GPUのエンコーダーが対応していない場合は通常の方法で録画します。",
-    gpu_frames_needs_hardware: "ハードウェアエンコーダーが必要です。",
-    resolution_header: "解像度",
-    resolution_native: "ネイティブ（ウィンドウ）",
-    resolution_display: "ディスプレイに合わせる",
-    resolution_custom: "カスタム",
-    width_label: "幅:",
-    height_label: "高さ:",
-    bitrate_header: "ビットレート",
-    bitrate_auto: "自動",
-    bitrate_manual: "手動",
-    mbps_label: "Mbps:",
-    close_button: "閉じる",
-
-    hotkeys_title: "ショートカット",
-    hotkey_start_stop_header: "録画の開始/停止",
-    hotkey_pause_header: "一時停止/再開",
-    hotkey_overlay_header: "オーバーレイ切替",
-    hotkey_save_highlight_header: "ハイライトを保存",
-    hotkey_collision_warning: "⚠ 2つの操作が同じキーに割り当てられています。片方のみ動作します。",
-    hotkey_change_button: "変更",
-    hotkey_change_tooltip: "この操作の新しいキーの組み合わせを押してください",
-    hotkey_press_any_key_prompt: "何かキーを押してください（Ctrl/Alt/Shiftとの組み合わせも可）…",
-    hotkey_press_esc_to_cancel: "(Escでキャンセル)",
-    hotkey_unavailable_prefix: "⚠「",
-    hotkey_unavailable_suffix: "」はすでに使用されているか、Windowsに予約されています。別のキーをお試しください。",
-
-    error_title: "エラー",
-    disk_full_mid_recording: "空き容量が不足したため録画を自動停止しました（500MB未満）。その時点までの録画は保存されています。",
-    notice_recording_gave_up: "録画を書き込めなくなったため自動停止しました（{error}）。その時点までの録画は保存されています。",
-    recording_failed_prefix: "録画に失敗しました: ",
-    recording_ended_unexpectedly_prefix: "録画が予期せず終了しました: ",
-    couldnt_start_recording_prefix: "録画を開始できませんでした: ",
-    fps_shortfall_template: "ここまで毎秒 {target} フレームのうち新しい画像は {achieved} フレームで、残りは直前の画像の繰り返しです。静止した画面では新しい画像が少なくなります。画面が動いていた場合は、この PC の処理が追いついていない可能性があります。",
-    audio_tracks_missing_template: "選択した音声ソースのうち {actual}/{expected} のみがこの録画に含まれました。残りは音声が検出されず（マイクのミュートやデバイスの切断・無音をご確認ください）除外されました。",
-
-    recording_saved_label: "録画を保存しました:",
-    audio_tracks_header: "オーディオ トラック",
-    track_label_fallback: "トラック",
-    export_mix_tracks_label: "1つのトラックに統合",
-    export_mix_tracks_tooltip: "上でチェックしたトラックを1つの音声トラックに統合します -- アップロードしたファイルの音声トラックを1つしか再生しないYouTubeなどのサイト向けです。",
-    export_button: "エクスポート",
-    export_tooltip: "チェックした音声トラックのみで再多重化します（再エンコードなし）",
-    mp4_file_type: "MP4 動画",
-    exe_file_type: "プログラム",
-    open_folder_button: "フォルダを開く",
-    open_folder_tooltip: "この録画が入っているフォルダを開く",
-    exporting_header: "エクスポート中…",
-    please_wait: "お待ちください…",
-    export_complete_header: "エクスポート完了",
-    export_failed_header: "エクスポート失敗",
-
-    highlight_header: "ハイライト",
-    highlight_enabled_label: "ハイライトバッファを有効にする",
-    tooltip_highlight_enabled: "フォアグラウンドのアプリをバックグラウンドで常時録画します。ハイライト保存のショートカットを押すと、事前に録画を開始していなくても直近の数秒〜数分をファイルに保存できます。",
-    highlight_buffer_seconds_label: "バッファ長（秒）:",
-    highlight_status_active: "● ハイライト録画中",
-    highlight_save_not_active: "ハイライトバッファが有効になっていません。まず画質設定で有効にしてください。",
-    highlight_saving_label: "ハイライトを保存中…",
-    highlight_saved_prefix: "ハイライトを保存しました: ",
-    highlight_save_failed_prefix: "ハイライトの保存に失敗しました: ",
-    highlight_disk_full_message: "空き容量が不足したため、ハイライトバッファを自動停止しました（500MB未満）。",
-    highlight_failed_template: "ハイライトバッファが停止しました: {why}。しばらくしてから再開を試みます。",
-};
 
 #[cfg(test)]
 mod tests {
@@ -868,24 +869,37 @@ mod tests {
         assert_eq!(Lang::Ja.toggle_button_label(), "English");
     }
 
+    /// A blank string would silently render as invisible UI text. The one
+    /// meant to be blank: Japanese puts all of the update question after
+    /// the version, so its half before it is empty.
     #[test]
-    fn no_string_field_is_empty_in_either_language() {
-        // A blank field would silently render as invisible UI text -- catches
-        // a copy-paste-and-forgot-to-fill-in mistake at test time instead.
-        for strings in [&EN, &JA] {
-            assert!(!strings.quality_title.is_empty());
-            assert!(!strings.close_button.is_empty());
-            assert!(!strings.hotkey_collision_warning.is_empty());
-            assert!(!strings.export_failed_header.is_empty());
-            assert!(!strings.highlight_header.is_empty());
-            assert!(!strings.highlight_enabled_label.is_empty());
-            assert!(!strings.update_confirm_title.is_empty());
-            assert!(!strings.update_now_button.is_empty());
-            assert!(!strings.update_working_message.is_empty());
-            assert!(!strings.update_blocked_while_recording.is_empty());
-            assert!(!strings.hotkey_save_highlight_header.is_empty());
-            assert!(!strings.use_process_name_label.is_empty());
-            assert!(!strings.custom_recording_prefix_placeholder.is_empty());
+    fn no_string_is_empty_in_either_language() {
+        for (name, en, ja) in ALL {
+            assert!(!en.is_empty(), "{name} (English)");
+            assert!(
+                !ja.is_empty() || *name == "update_confirm_prefix",
+                "{name} (Japanese)"
+            );
+        }
+    }
+
+    /// The `{placeholder}`s a string is filled in through are part of its
+    /// contract with the code: one missing from a translation leaves the
+    /// value out, one misspelt shows up in the UI as it stands.
+    #[test]
+    fn both_languages_take_the_same_placeholders() {
+        fn placeholders(text: &str) -> Vec<&str> {
+            let mut found: Vec<&str> = text
+                .split('{')
+                .skip(1)
+                .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+                .collect();
+            found.sort_unstable();
+            found.dedup();
+            found
+        }
+        for (name, en, ja) in ALL {
+            assert_eq!(placeholders(en), placeholders(ja), "{name}");
         }
     }
 }
