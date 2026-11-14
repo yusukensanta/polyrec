@@ -1,6 +1,6 @@
 use super::App;
 use super::overlay::overlay_viewport_id;
-use super::state::{ExportState, HighlightSaveState};
+use super::state::{ExportState, HighlightSaveState, SelfUpdateState};
 use super::toast::{Toast, hotkey_toast, toast_viewport_id};
 use super::util::take_if_finished;
 use crate::hotkeys::HotkeyEvent;
@@ -14,13 +14,24 @@ impl App {
         self.refresh_sources_and_audio_if_due(ctx);
         self.poll_self_update_result(ctx);
 
-        // Poll update-check result (one-shot; None result also clears the receiver
-        // so we stop polling a channel whose sender has already sent its one message)
+        // Poll update-check result (one message per check; taking it also
+        // clears the receiver). A check that found nothing -- or couldn't
+        // reach GitHub -- leaves an update already offered where it is.
         if let Some(rx) = &self.update_check_rx
             && let Ok(result) = rx.try_recv()
         {
-            self.update_available = result;
+            if result.is_some() {
+                self.update_available = result;
+            }
             self.update_check_rx = None;
+        }
+        if update_check_is_due(
+            self.update_checked_at.elapsed(),
+            self.update_check_rx.is_some(),
+            matches!(self.self_update.state, SelfUpdateState::Idle),
+        ) {
+            self.update_checked_at = std::time::Instant::now();
+            self.update_check_rx = Some(start_update_check());
         }
 
         // Recordings cut off last time, finished off the dashboard's thread
@@ -265,6 +276,31 @@ impl App {
     }
 }
 
+/// How often PolyRec looks for a newer release while it runs. It only
+/// looked as it started, so a copy left in the tray for days -- the way to
+/// use Highlight -- never offered one.
+const UPDATE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Whether to look for a newer release again, `since_last` after the last
+/// look started: not while that one is still `waiting` for its answer, and
+/// not while an update is being confirmed or installed (`idle` false),
+/// which a new answer would change under the user's hands.
+fn update_check_is_due(since_last: std::time::Duration, waiting: bool, idle: bool) -> bool {
+    !waiting && idle && since_last >= UPDATE_CHECK_EVERY
+}
+
+/// Looks for a newer release off the dashboard's thread; the answer comes
+/// on the channel.
+pub(super) fn start_update_check()
+-> std::sync::mpsc::Receiver<Option<crate::update_check::AvailableUpdate>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tokio::spawn(async move {
+        let result = crate::update_check::check_for_update(env!("CARGO_PKG_VERSION")).await;
+        let _ = tx.send(result);
+    });
+    rx
+}
+
 /// How long until a recording's clock -- the dashboard's and the overlay
 /// HUD's, in whole seconds -- next shows something new, `elapsed` into the
 /// recording. A repaint a fixed second after the last one drifts against
@@ -415,6 +451,22 @@ mod tests {
         // the overlay HUD up too.
         assert!(!recording_needs_fast_repaint(Some(false), Some(false)));
         assert!(!recording_needs_fast_repaint(Some(true), Some(true)));
+    }
+
+    #[test]
+    fn an_update_is_looked_for_again_a_day_after_the_last_look() {
+        use std::time::Duration;
+        let day = Duration::from_secs(24 * 60 * 60);
+        assert!(!update_check_is_due(
+            day - Duration::from_secs(1),
+            false,
+            true
+        ));
+        assert!(update_check_is_due(day, false, true));
+        // Not on top of a look still under way, nor while the user is
+        // confirming or installing the update on offer.
+        assert!(!update_check_is_due(day * 3, true, true));
+        assert!(!update_check_is_due(day * 3, false, false));
     }
 
     #[test]

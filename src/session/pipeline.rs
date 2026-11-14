@@ -57,6 +57,9 @@ pub struct CaptureInputs {
     /// Scope loopback devices to the video source's own process tree
     /// instead of the whole desktop mix -- see `CapturePipeline::spawn`.
     pub app_audio_only: bool,
+    /// Leave the mouse pointer out of the picture -- the opposite of
+    /// `Config::record_cursor`, so that the default is Windows' own.
+    pub hide_cursor: bool,
     pub encode: EncodeSettings,
 }
 
@@ -385,7 +388,14 @@ impl CapturePipeline {
             pump_handles: Vec::new(),
             audio_levels: Vec::new(),
         };
-        pipeline.spawn_video_track(source, dims, dest_tx, frame_count, show_border, log_prefix);
+        pipeline.spawn_video_track(
+            source,
+            dims,
+            dest_tx,
+            frame_count,
+            (show_border, inputs.hide_cursor),
+            log_prefix,
+        );
 
         // A `Monitor` source has no owning process to scope loopback to
         // (`source.process_id` is 0 for one -- see `CaptureSource::process_id`'s
@@ -410,7 +420,7 @@ impl CapturePipeline {
         dims: CaptureDimensions,
         dest_tx: &mpsc::Sender<RecordingCommand>,
         frame_count: Arc<AtomicU64>,
-        show_border: bool,
+        (show_border, hide_cursor): (bool, bool),
         log_prefix: &'static str,
     ) {
         let (video_tx, video_rx) = mpsc::channel(VIDEO_CHANNEL_CAPACITY);
@@ -430,6 +440,7 @@ impl CapturePipeline {
                 ctrl,
                 video_tx,
                 show_border,
+                hide_cursor,
                 dims.gpu,
             )
         });

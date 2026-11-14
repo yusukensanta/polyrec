@@ -1,11 +1,21 @@
 use super::App;
-use super::theme::{HUD_BACKDROP, TEXT_BODY};
+use super::theme::{HUD_BACKDROP, TEXT_BODY, text_px};
 use crate::i18n::Strings;
 use crate::types::CaptureKind;
 use eframe::egui;
 
 pub(super) fn overlay_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("polyrec_overlay")
+}
+
+/// The space around the overlay HUD's text, in points.
+const HUD_MARGIN: i8 = 6;
+
+/// The overlay HUD's window for a line of text `text` in size: the text and
+/// its margins, in whole points (a window's size is in whole pixels; a
+/// fraction less cut the last letter off).
+fn hud_size(text: egui::Vec2) -> egui::Vec2 {
+    (text + egui::Vec2::splat(2.0 * f32::from(HUD_MARGIN))).ceil()
 }
 
 /// The overlay HUD window's title, which also finds it again.
@@ -82,9 +92,21 @@ impl App {
             format!("  |  {}", hint_template.replace("{key}", key))
         };
 
-        // Widened from 310 to fit longer modifier combos (e.g.
-        // "CTRL+ALT+SHIFT+F9") without clipping the stop-key hint.
-        let size = egui::vec2(400.0, 32.0);
+        // As wide as its text, at Windows' text size: it was a fixed 400
+        // points of 14-point text, which a long hint (Japanese, a hotkey
+        // with three modifiers) or a larger text size ran out of.
+        let text = format!(
+            "{mark} {:02}:{:02}:{:02}  |  {track_count} {tracks_word}{key_hint}",
+            elapsed_secs / 3600,
+            (elapsed_secs % 3600) / 60,
+            elapsed_secs % 60,
+        );
+        let font = egui::FontId::proportional(text_px(TEXT_BODY));
+        let text_size = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(text.clone(), font.clone(), egui::Color32::WHITE)
+                .size()
+        });
+        let size = hud_size(text_size);
         self.overlay_window.show(
             ctx,
             overlay_viewport_id(),
@@ -99,18 +121,13 @@ impl App {
                     .frame(
                         egui::Frame::NONE
                             .fill(HUD_BACKDROP)
-                            .inner_margin(6i8),
+                            .inner_margin(HUD_MARGIN),
                     )
                     .show(ctx, |ui| {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "{mark} {:02}:{:02}:{:02}  |  {track_count} {tracks_word}{key_hint}",
-                                elapsed_secs / 3600,
-                                (elapsed_secs % 3600) / 60,
-                                elapsed_secs % 60,
-                            ))
-                            .color(egui::Color32::WHITE)
-                            .size(TEXT_BODY),
+                            egui::RichText::new(&text)
+                                .font(font.clone())
+                                .color(egui::Color32::WHITE),
                         );
                     });
             },
@@ -442,6 +459,11 @@ mod tests {
         demote();
         assert!(!pump_until(true, 300), "left alone once not wanted");
         unsafe { DestroyWindow(hwnd).unwrap() };
+    }
+
+    #[test]
+    fn the_hud_is_as_big_as_its_text_and_margins_in_whole_points() {
+        assert_eq!(hud_size(egui::vec2(301.2, 17.5)), egui::vec2(314.0, 30.0));
     }
 
     /// Runs one dashboard pass per entry of `passes` against a stand-in for

@@ -49,6 +49,8 @@ impl App {
         if gpu_frames.changed() && self.config.encode.gpu_frames {
             crate::encode::gpu::GpuFrames::warm_up();
         }
+        ui.checkbox(&mut self.config.record_cursor, s.record_cursor_label)
+            .on_hover_text(s.record_cursor_tooltip);
 
         section_header(ui, s.resolution_header);
         choice_row(ui, |ui| {

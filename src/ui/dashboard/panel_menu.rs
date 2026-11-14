@@ -72,6 +72,27 @@ impl App {
                         self.config.close_to_tray = !self.config.close_to_tray;
                         self.save_config_or_report(s);
                     }
+                    // Only with a tray icon: started with Windows, PolyRec
+                    // comes up hidden in it.
+                    if self.tray.is_some() {
+                        let startup_label = if self.starts_with_windows {
+                            s.startup_on
+                        } else {
+                            s.startup_off
+                        };
+                        if ui
+                            .add(accent_button(startup_label, pal().link))
+                            .on_hover_text(s.startup_toggle_tooltip)
+                            .clicked()
+                        {
+                            if let Err(e) = crate::autostart::set(!self.starts_with_windows) {
+                                tracing::error!("start with Windows not changed: {e}");
+                                self.error_message =
+                                    Some(format!("{}{e}", s.startup_failed_prefix));
+                            }
+                            self.starts_with_windows = crate::autostart::is_on();
+                        }
+                    }
                     let lang = self.config.lang();
                     if ui
                         .add(accent_button(lang.toggle_button_label(), pal().link))

@@ -133,7 +133,7 @@ impl App {
             tracing::info!("toast {:?} {}", toast.text, toast.place);
         }
 
-        let font = egui::FontId::proportional(TEXT_BODY);
+        let font = egui::FontId::proportional(super::theme::text_px(TEXT_BODY));
         let text_size = ctx.fonts_mut(|f| {
             f.layout_no_wrap(toast.text.clone(), font.clone(), egui::Color32::WHITE)
                 .size()
