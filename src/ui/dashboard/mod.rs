@@ -110,6 +110,11 @@ pub struct App {
     hotkey_listener: Option<HotkeyListener>,
     update_available: Option<crate::update_check::AvailableUpdate>,
     update_check_rx: Option<mpsc::Receiver<Option<crate::update_check::AvailableUpdate>>>,
+    /// When the last check for an update was started.
+    update_checked_at: std::time::Instant,
+    /// Whether Windows starts this copy of PolyRec at sign-in -- read from
+    /// the registry at start and after each change (`autostart`).
+    starts_with_windows: bool,
     /// The recordings cut off last time, once saved -- see `start_recovery`.
     recovery_rx: Option<mpsc::Receiver<Vec<std::path::PathBuf>>>,
     /// A real error, shown as a modal (a recording that couldn't start or
@@ -158,6 +163,9 @@ pub struct App {
     /// Whether the dashboard was hidden through the tray -- see
     /// `App::dashboard_shown`.
     dashboard_hidden: bool,
+    /// How many more passes hide the window of a copy started in the tray
+    /// -- see `hide_window_started_in_tray`.
+    hide_at_start: u8,
     /// Set when PolyRec was launched again while running -- see
     /// `single_instance`.
     show_requested: Arc<AtomicBool>,
@@ -202,6 +210,7 @@ impl App {
         closed_for_lost_graphics: Arc<AtomicBool>,
         restarted: Option<crate::restart::Reason>,
         config_trouble: Option<crate::config::ConfigTrouble>,
+        in_tray: bool,
     ) -> Self {
         setup_theme(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
@@ -267,14 +276,19 @@ impl App {
                 .ok()
         });
 
-        // Fire-and-forget: checked once at startup, polled in `update()`. Any failure
-        // (offline, GitHub unreachable, no releases yet) just means no banner shows —
+        // Started with Windows, the window was created hidden (see `main`).
+        // Without a tray icon there'd be no way to it: show it after all.
+        let dashboard_hidden = in_tray && tray.is_some();
+        if in_tray && !dashboard_hidden {
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+
+        // Fire-and-forget: checked at startup and once a day after (see
+        // `update_check_is_due`), polled in `logic`. Any failure (offline,
+        // GitHub unreachable, no releases yet) just means no banner shows --
         // see update_check::check_for_update's doc comment.
-        let (update_tx, update_check_rx) = mpsc::channel();
-        tokio::spawn(async move {
-            let result = crate::update_check::check_for_update(env!("CARGO_PKG_VERSION")).await;
-            let _ = update_tx.send(result);
-        });
+        let update_check_rx = background::start_update_check();
 
         let recovery_rx = start_recovery(&config.output_dir);
 
@@ -306,6 +320,8 @@ impl App {
             hotkey_listener: Some(hotkey_listener),
             update_available: None,
             update_check_rx: Some(update_check_rx),
+            update_checked_at: std::time::Instant::now(),
+            starts_with_windows: crate::autostart::is_on(),
             recovery_rx,
             error_message: None,
             notices,
@@ -322,7 +338,8 @@ impl App {
             preview: preview::SourcePreview::default(),
             keyboard_navigating: false,
             taskbar_badge,
-            dashboard_hidden: false,
+            dashboard_hidden,
+            hide_at_start: if dashboard_hidden { 3 } else { 0 },
             show_requested,
             graphics,
             closed_for_lost_graphics,
@@ -342,6 +359,22 @@ impl App {
 }
 
 impl App {
+    /// Hides the window of a copy started in the tray (`autostart`), on its
+    /// first few passes. Creating it hidden (`main`) isn't enough: eframe
+    /// shows every window once its first frame is painted, whatever it was
+    /// created as, and a hide asked for on that same pass can come before
+    /// that.
+    fn hide_window_started_in_tray(&mut self, ctx: &egui::Context) {
+        if self.hide_at_start == 0 {
+            return;
+        }
+        self.hide_at_start -= 1;
+        if self.dashboard_hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.request_repaint();
+        }
+    }
+
     /// Closes the window to quit PolyRec -- the tray's "Quit PolyRec", a
     /// finished self-update, a lost graphics device -- which
     /// `Config::close_to_tray` must not turn into hiding.
@@ -408,6 +441,7 @@ impl eframe::App for App {
         if self.show_requested.swap(false, Ordering::Relaxed) {
             self.set_dashboard_shown(ctx, true);
         }
+        self.hide_window_started_in_tray(ctx);
         self.poll_tray(ctx, s);
         if let Some(text_scale) = &self.text_scale {
             text_scale.apply(ctx);

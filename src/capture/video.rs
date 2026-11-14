@@ -308,6 +308,7 @@ impl CaptureResources {
         target: CaptureTarget,
         (capture_width, capture_height): (u32, u32),
         show_border: bool,
+        hide_cursor: bool,
         min_update_interval: std::time::Duration,
         gpu: Option<&GpuFrames>,
     ) -> Result<Self, AppError> {
@@ -371,6 +372,14 @@ impl CaptureResources {
         // fails harmlessly on older Windows, which just keeps the OS default
         // (border shown) since there's no way to suppress it there.
         let border_as_asked = session.SetIsBorderRequired(show_border).is_ok();
+
+        // Windows draws the mouse pointer into the frames unless told not
+        // to (`Config::record_cursor`). Only said when it's to be left out:
+        // the call exists from Windows 10 2004 on, and where it doesn't the
+        // pointer stays in, as it always has.
+        if hide_cursor && let Err(e) = session.SetIsCursorCaptureEnabled(false) {
+            tracing::warn!("the mouse pointer stays in the recording: {e}");
+        }
 
         limit_updates(&session, min_update_interval);
 
@@ -605,7 +614,7 @@ pub fn capture_still(
 ) -> Result<Still, AppError> {
     let (width, height) = query_capture_size(target)?;
     let size = (width.max(2) & !1, height.max(2) & !1);
-    let res = CaptureResources::open(target, size, false, std::time::Duration::ZERO, None)?;
+    let res = CaptureResources::open(target, size, false, false, std::time::Duration::ZERO, None)?;
     let deadline = std::time::Instant::now() + timeout;
     let frame = loop {
         if let Ok(frame) = res.frame_pool.TryGetNextFrame() {
@@ -684,6 +693,7 @@ pub async fn run_video_capture(
     ctrl: CaptureControl,
     tx: mpsc::Sender<VideoFrame>,
     show_border: bool,
+    hide_cursor: bool,
     gpu: Option<GpuFrames>,
 ) -> Result<(), AppError> {
     crate::com::join_mta();
@@ -697,6 +707,7 @@ pub async fn run_video_capture(
         target,
         capture_size,
         show_border,
+        hide_cursor,
         update_interval_for(asked_fps),
         gpu.as_ref(),
     )?;
@@ -1356,6 +1367,7 @@ mod tests {
                     capture_ctrl,
                     tx,
                     false,
+                    false,
                     gpu,
                 ))
         });
@@ -1430,6 +1442,7 @@ mod tests {
                     LiveFps::new(30),
                     capture_ctrl,
                     tx,
+                    false,
                     false,
                     None,
                 ))
@@ -1512,6 +1525,7 @@ mod tests {
                         LiveFps::new(20),
                         capture_ctrl,
                         tx,
+                        false,
                         false,
                         None,
                     ))

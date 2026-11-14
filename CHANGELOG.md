@@ -9,11 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Startup: ON/OFF** in the menu bar: PolyRec starts when you sign in to Windows, hidden in the notification area (tray), so the hotkeys and Highlight are ready without opening it. Uninstalling turns it off.
+- **Record the mouse pointer** in Quality: untick it to leave the pointer out of recordings and highlights.
+- The Japanese README is in the zip and the installed folder, beside the English one.
+
+### Changed
+
+- PolyRec looks for a newer release once a day while it runs. It only looked when it started, so a copy left in the tray for days never offered one.
+- The overlay and the hotkey toast follow Windows' text size setting, and the overlay is as wide as its text: a long hint (Japanese, a hotkey with three modifiers) was cut off.
+
+### Fixed
+
+- Hotkeys come back by themselves, within half a minute, if Windows dropped PolyRec's keyboard hook (it does so without notice, for example after the PC wakes from sleep or was very busy). They stayed dead until PolyRec was restarted.
+
 ## [v0.5.170] - 2026-11-15
 
 ### Changed
 
-- `polyrec.exe` is 3.4 MB smaller (30.3 MB to 26.9 MB), and the download with it: the release is now built with whole-program optimization, which leaves out code nothing uses.
+- `polyrec.exe` is 3.4 MB smaller (30.3 MB to 26.9 MB); the zip download is 0.5 MB smaller and the installer is the same size: the release is now built with whole-program optimization, which leaves out code nothing uses.
 - PolyRec's hotkey check does less for each key pressed in a game: a key that no hotkey uses is passed on at once, without first asking Windows which of Ctrl, Alt and Shift are held.
 
 ## [v0.5.169] - 2026-11-15

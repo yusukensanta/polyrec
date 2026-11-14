@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod capture;
 mod com;
 mod config;
@@ -33,6 +34,7 @@ fn main() -> eframe::Result<()> {
     crash_log::install(ui::is_caught_on_purpose);
     let started = std::time::Instant::now();
     let restarted = restart::Reason::of_this_start(std::env::args());
+    let in_tray = std::env::args().any(|arg| arg == autostart::IN_TRAY_ARG);
 
     // Before anything registers a hotkey or a tray icon.
     let after_update = std::env::args().any(|arg| arg == single_instance::AFTER_UPDATE_ARG);
@@ -89,6 +91,10 @@ fn main() -> eframe::Result<()> {
         )
         .with_min_inner_size([config::MIN_WINDOW_SIZE.0, config::MIN_WINDOW_SIZE.1])
         .with_maximized(config.window_maximized)
+        // Started with Windows: no window until it's asked for -- see
+        // `autostart`. The dashboard shows it after all if there's no tray
+        // icon to ask from.
+        .with_visible(!in_tray)
         .with_icon(icon);
     // Reopen where the window was left (including across a self-update's
     // relaunch, since config.toml lives in %APPDATA%, untouched by the exe
@@ -129,6 +135,7 @@ fn main() -> eframe::Result<()> {
                     Arc::clone(&closed_for_lost_graphics),
                     restarted,
                     config_trouble,
+                    in_tray,
                 )))
             }),
         )

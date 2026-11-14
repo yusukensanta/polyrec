@@ -161,6 +161,7 @@ jobs:
           New-Item -ItemType Directory -Path $stagingDir | Out-Null
           Copy-Item target/release/polyrec.exe $stagingDir/
           Copy-Item README.md $stagingDir/
+          Copy-Item README.ja.md $stagingDir/
           Copy-Item LICENSE $stagingDir/
           Copy-Item assets/fonts/OFL.txt $stagingDir/LICENSE-IBM-Plex.txt
           Compress-Archive -Path $stagingDir/* -DestinationPath "$stagingDir.zip"

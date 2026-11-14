@@ -18,8 +18,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
+    PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_TIMER,
 };
 
 /// `MOD_NOREPEAT` (0x4000) — only relevant to [`try_register`]'s `RegisterHotKey`
@@ -405,6 +406,15 @@ fn on_key<'a>(
     }
 }
 
+/// How often the keyboard hook is put in anew -- see `run_hook_thread`'s
+/// note on it. Hotkeys lost to Windows dropping the hook are back within
+/// this long.
+const REINSTALL_HOOK_EVERY_MS: u32 = 30_000;
+
+fn install_hook() -> windows::core::Result<HHOOK> {
+    unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) }
+}
+
 /// `WH_KEYBOARD_LL` callback -- sees every keystroke system-wide before it
 /// reaches whatever window/app has focus (including exclusive-fullscreen
 /// games), unlike `RegisterHotKey`'s `WM_HOTKEY`, which some games'
@@ -502,15 +512,21 @@ fn run_hook_loop(
         });
     });
 
-    let hook: HHOOK =
-        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) } {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
-                HOOK_CTX.with(|ctx| *ctx.borrow_mut() = None);
-                return;
-            }
-        };
+    let mut hook: HHOOK = match install_hook() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
+            HOOK_CTX.with(|ctx| *ctx.borrow_mut() = None);
+            return;
+        }
+    };
+    // Windows takes a low-level hook out, without a word, when its thread
+    // was too slow to answer once -- the PC waking from sleep, the process
+    // held up -- and the hotkeys were dead from then until PolyRec was
+    // restarted. Nothing tells whether that has happened, so the hook is
+    // put in anew every `REINSTALL_HOOK_EVERY_MS`.
+    let reinstall_timer = unsafe { SetTimer(None, 0, REINSTALL_HOOK_EVERY_MS, None) };
+    let mut reinstall_failed = false;
 
     // GetMessageW blocks this thread (which owns no window) until either the
     // stop() signal (WM_QUIT via PostThreadMessageW) arrives, or Windows
@@ -522,6 +538,26 @@ fn run_hook_loop(
         let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if ret.0 <= 0 {
             break; // 0 = WM_QUIT, negative = error
+        }
+        if msg.message == WM_TIMER && msg.hwnd.is_invalid() && msg.wParam.0 == reinstall_timer {
+            // The new one first, so that no key goes by unseen in between.
+            // A key seen by both is acted on once: the newer hook is asked
+            // first, and passes on only what it didn't take.
+            match install_hook() {
+                Ok(new) => {
+                    unsafe {
+                        let _ = UnhookWindowsHookEx(hook);
+                    }
+                    hook = new;
+                    reinstall_failed = false;
+                }
+                Err(e) if !reinstall_failed => {
+                    reinstall_failed = true;
+                    tracing::warn!("the keyboard hook couldn't be put in anew: {e}");
+                }
+                Err(_) => {}
+            }
+            continue;
         }
         unsafe {
             let _ = TranslateMessage(&msg);

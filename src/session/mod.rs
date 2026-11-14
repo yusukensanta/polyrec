@@ -671,6 +671,7 @@ mod tests {
             devices: devices.into_iter().map(|d| (d, 1.0)).collect(),
             app_sources: app_sources.into_iter().map(|s| (s, 1.0)).collect(),
             app_audio_only,
+            hide_cursor: false,
             encode: EncodeSettings::default(),
         }
     }

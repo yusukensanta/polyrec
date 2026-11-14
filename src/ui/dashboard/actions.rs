@@ -580,6 +580,7 @@ impl App {
             devices,
             app_sources,
             app_audio_only: self.config.default_app_audio_only,
+            hide_cursor: !self.config.record_cursor,
             encode: self.encode_settings(),
         }
     }
