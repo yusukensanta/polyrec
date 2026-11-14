@@ -9,7 +9,7 @@
 //! GPU copy, which frames to keep.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 /// The fps a recording (or Highlight buffer) runs at, shared by its writer
@@ -17,20 +17,56 @@ use std::time::Duration;
 /// (clamped to the display), and the actor lowers it if the encoder turns that
 /// rate down (see `RecordingWriter::new_at_highest_fps`). The capture loop's
 /// cap follows within a frame. Clones share one value.
+///
+/// It also says whether the encoder has settled on a rate yet, which is when
+/// it is ready for frames -- see `awaiting_encoder`.
 #[derive(Debug, Clone)]
-pub struct LiveFps(Arc<AtomicU32>);
+pub struct LiveFps(Arc<Shared>);
+
+#[derive(Debug)]
+struct Shared {
+    fps: AtomicU32,
+    settled: AtomicBool,
+}
 
 impl LiveFps {
+    /// A rate that is already settled.
+    #[cfg(test)]
     pub fn new(fps: u32) -> Self {
-        Self(Arc::new(AtomicU32::new(fps)))
+        Self::starting(fps, true)
+    }
+
+    /// The rate an encoder still being created is asked for: unsettled until
+    /// its actor calls `set`. Creating a hardware encoder takes a tenth of a
+    /// second to half a second, and the capture loop holds its frames back
+    /// that long (see `is_settled`) rather than read each one back into
+    /// memory to queue for an encoder that can't take it yet -- up to 64 of
+    /// them, 15 MB apiece at 1440p, allocated just as the recording starts
+    /// and stamped for a rate the encoder may then turn down.
+    pub fn awaiting_encoder(fps: u32) -> Self {
+        Self::starting(fps, false)
+    }
+
+    fn starting(fps: u32, settled: bool) -> Self {
+        Self(Arc::new(Shared {
+            fps: AtomicU32::new(fps),
+            settled: AtomicBool::new(settled),
+        }))
     }
 
     pub fn get(&self) -> u32 {
-        self.0.load(Ordering::Relaxed)
+        self.0.fps.load(Ordering::Relaxed)
     }
 
+    /// Settles the rate: the encoder is up and runs at `fps`.
     pub fn set(&self, fps: u32) {
-        self.0.store(fps, Ordering::Relaxed);
+        self.0.fps.store(fps, Ordering::Relaxed);
+        self.0.settled.store(true, Ordering::Release);
+    }
+
+    /// Whether the encoder is up (see `awaiting_encoder`).
+    pub fn is_settled(&self) -> bool {
+        self.0.settled.load(Ordering::Acquire)
     }
 }
 
@@ -193,6 +229,23 @@ impl FrameRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_awaiting_its_encoder_settles_when_the_encoder_sets_it() {
+        let fps = LiveFps::awaiting_encoder(240);
+        let capture_side = fps.clone();
+        assert!(!capture_side.is_settled());
+        assert_eq!(capture_side.get(), 240);
+        // The encoder turned 240 down.
+        fps.set(120);
+        assert!(capture_side.is_settled());
+        assert_eq!(capture_side.get(), 120);
+    }
+
+    #[test]
+    fn a_rate_given_outright_is_settled() {
+        assert!(LiveFps::new(60).is_settled());
+    }
 
     /// Feeds `frames` timestamps spaced `period` apart (offset by `jitter(i)`)
     /// through a limiter and returns the admitted timestamps.

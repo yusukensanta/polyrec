@@ -137,7 +137,7 @@ impl CaptureDimensions {
             capture,
             output,
             bitrate_bps,
-            fps: LiveFps::new(fps),
+            fps: LiveFps::awaiting_encoder(fps),
             gpu,
         }
     }

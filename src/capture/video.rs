@@ -762,7 +762,10 @@ pub async fn run_video_capture(
             asked_fps = now_fps;
         }
         pacer.set_fps(now_fps);
-        let paused = ctrl.is_paused();
+        // Until the encoder is up, frames are held back as in a pause: the
+        // newest one is recorded the moment it is (see
+        // `LiveFps::awaiting_encoder`).
+        let paused = ctrl.is_paused() || !fps.is_settled();
         // A frame the pacer holds back (paused, or over the fps cap) gets no
         // GPU copy or readback unless it's recorded after all.
         let next = match gone {
