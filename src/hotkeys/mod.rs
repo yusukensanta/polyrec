@@ -362,7 +362,9 @@ enum KeyOutcome<'a> {
 
 /// The hook's decision for `vk` going down (`down`) or up, given the keys it
 /// has fired on that are still `held`. `mods` reads the modifiers held now,
-/// only needed for a fresh key-down.
+/// only needed for a fresh key-down of a key that some hotkey uses: every
+/// other key -- nearly all of a game's -- is passed on without asking
+/// Windows anything.
 ///
 /// A held hotkey's auto-repeats and its release are swallowed too: the
 /// focused app never saw it go down, so they'd reach a game as presses from
@@ -386,6 +388,9 @@ fn on_key<'a>(
     }
     if held.contains(&vk) {
         return KeyOutcome::Swallow;
+    }
+    if !bindings.iter().any(|b| b.vk.0 as u32 == vk) {
+        return KeyOutcome::Pass;
     }
     let mods = mods();
     match bindings
@@ -595,6 +600,28 @@ mod tests {
         for down in [true, true, false] {
             assert_eq!(outcome(&mut held, &bindings, F9, down), None);
         }
+    }
+
+    /// The hook sees every key of a game. One that no hotkey uses is passed
+    /// on without the three questions to Windows the modifiers take.
+    #[test]
+    fn a_key_no_hotkey_uses_passes_without_reading_the_modifiers() {
+        const W: u32 = 0x57;
+        let bindings = f8_binding();
+        let mut held = HashSet::new();
+        let never = || -> HOT_KEY_MODIFIERS { panic!("modifiers read for a key no hotkey uses") };
+        assert!(matches!(
+            on_key(&mut held, &bindings, W, true, never),
+            KeyOutcome::Pass
+        ));
+        assert!(matches!(
+            on_key(&mut held, &bindings, W, false, never),
+            KeyOutcome::Pass
+        ));
+        assert!(matches!(
+            on_key(&mut held, &[], F8, true, never),
+            KeyOutcome::Pass
+        ));
     }
 
     /// F8 bound bare, pressed with Shift: someone else's Shift+F8.
