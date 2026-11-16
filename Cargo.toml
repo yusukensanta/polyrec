@@ -22,7 +22,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 dirs = "7"
-rfd = "0.17"
+rfd = "0.18"
 windows-core = "0.62"
 chrono = "0.4"
 semver = "1"
